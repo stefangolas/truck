@@ -88,6 +88,13 @@ where
 /// everywhere at every level, runs into this.
 const MAX_CURVE_POINTS: usize = 1 << 16;
 
+/// Divides `range` into parameters whose chords approximate `curve` to within
+/// `tol`, returning those parameters and the points they evaluate to.
+///
+/// Subdivision is adaptive: a span is split only while its midpoint lies
+/// further than `tol` from the chord. The number of points emitted is capped at
+/// [`MAX_CURVE_POINTS`], since depth alone does not bound a curve whose
+/// tolerance is unreachable.
 pub fn parameter_division<C>(curve: &C, range: (f64, f64), tol: f64) -> (Vec<f64>, Vec<C::Point>)
 where
     C: ParametricCurve,

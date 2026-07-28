@@ -355,12 +355,20 @@ fn normalize_range(curve: &mut Vec<SurfacePoint>, compidx: usize, (u0, u1): (f64
     *curve = curve1;
 }
 
-fn loop_orientation(curve: &[SurfacePoint]) -> bool {
+/// Twice the signed area of a closed `uv` loop, by the shoelace formula.
+///
+/// Diagnostic only. Its *sign* must not be used to decide what a face
+/// contains: it negates under an orientation-reversing reparameterization,
+/// which no observer of the solid can detect, so any predicate built on it
+/// classifies the same face differently depending on how its surface happens
+/// to be parameterized. Relative sign between loops is invariant; absolute
+/// sign is not.
+#[allow(dead_code)]
+fn signed_area(curve: &[SurfacePoint]) -> f64 {
     curve
         .iter()
         .circular_tuple_windows()
         .fold(0.0, |sum, (p, q)| sum + (q.x + p.x) * (q.y - p.y))
-        > 0.0
 }
 
 impl PolyBoundary {
@@ -375,6 +383,8 @@ impl PolyBoundary {
                 false => open.push(vec),
             }
         });
+        let probe = std::env::var_os("TRUCK_PROBE_BOUNDARY").is_some();
+        let (n_closed_in, n_open_in) = (closed.len(), open.len());
         fn connect_edges<P>(vecs: impl IntoIterator<Item = Vec<P>>) -> Vec<P> {
             let closure = |vec: Vec<P>| {
                 let len = vec.len();
@@ -454,7 +464,42 @@ impl PolyBoundary {
             }
             _ => {}
         }
-        if !closed.iter().any(|curve| loop_orientation(curve)) {
+        if probe {
+            let areas: Vec<String> = closed
+                .iter()
+                .map(|c| format!("{:+.4e}", signed_area(c)))
+                .collect();
+            let range = surface.try_range_tuple();
+            let has_rect = matches!(range, (Some(_), Some(_)));
+            eprintln!(
+                "PROBE in_closed={n_closed_in} in_open={n_open_in} loops={} \
+                 areas=[{}] uperiod={:?} vperiod={:?} range={} rect={}",
+                closed.len(),
+                areas.join(","),
+                surface.u_period(),
+                surface.v_period(),
+                has_rect,
+                closed.is_empty() && has_rect,
+            );
+        }
+        // Only a face with no enclosing loop takes its domain from the surface.
+        //
+        // This used to fire whenever no closed loop had positive signed area,
+        // which is not a property of the face. Under an orientation-reversing
+        // reparameterization `phi(u, v) = (u, -v)` the signed area negates,
+        // `A(phi . gamma) = -A(gamma)`, while the region the face occupies in
+        // space is unchanged. Appending the rectangle to a face that was
+        // already enclosed left two nested loops in one pool, and the face
+        // meshed its own complement, `R \ interior(gamma)`.
+        //
+        // Emptiness is the right test because it is invariant, and because the
+        // split above has already done the work: a loop wrapping a periodic
+        // direction does not return to its starting `uv`, so it fails the
+        // closure test and is stitched as an open piece instead. Anything
+        // reaching `closed` is contractible and does enclose a region. If
+        // nothing does, the domain really is the surface's own range — a full
+        // cylinder or torus whose only boundary is its seam.
+        if closed.is_empty() {
             if let (Some((u0, u1)), Some((v0, v1))) = surface.try_range_tuple() {
                 let p = [
                     (Point2::new(u0, v0), surface.subs(u0, v0)).into(),
@@ -473,13 +518,27 @@ impl PolyBoundary {
     }
 
     /// whether `c` is included in the domain with boundary = `self`.
+    ///
+    /// Crossing parity, not signed winding. The boundary loops arrive with
+    /// whatever traversal sense the file and the chart gave them, and that
+    /// sense is not recoverable from the geometry: reversing the chart negates
+    /// every signed area while the region occupied in space is unchanged.
+    /// Counting crossings without regard to direction is invariant under that
+    /// reversal, and for the non-crossing loops a well-formed face provides it
+    /// agrees with containment depth — a point is inside iff an odd number of
+    /// loops enclose it, which is what "outer, minus holes, plus islands"
+    /// means.
+    ///
+    /// Direction was previously used to accumulate a winding number kept when
+    /// strictly positive, which required every loop to be coherently oriented
+    /// and silently produced the complement of the face when they were not.
     fn include(&self, c: Point2) -> bool {
         let t = 2.0 * std::f64::consts::PI * HashGen::hash1(c);
         let r = Vector2::new(f64::cos(t), f64::sin(t));
         self.0
             .iter()
             .flat_map(|vec| vec.iter().circular_tuple_windows())
-            .try_fold(0_i32, move |counter, (p0, p1)| {
+            .try_fold(0_i32, move |crossings, (p0, p1)| {
                 let a = **p0 - c;
                 let b = **p1 - c;
                 let s0 = r.x * a.y - r.y * a.x; // v times a
@@ -488,15 +547,13 @@ impl PolyBoundary {
                 let x = s2 / (s1 - s0);
                 if x.so_small() && s0 * s1 < 0.0 {
                     None
-                } else if x > 0.0 && s0 <= 0.0 && s1 > 0.0 {
-                    Some(counter + 1)
-                } else if x > 0.0 && s0 >= 0.0 && s1 < 0.0 {
-                    Some(counter - 1)
+                } else if x > 0.0 && ((s0 <= 0.0 && s1 > 0.0) || (s0 >= 0.0 && s1 < 0.0)) {
+                    Some(crossings + 1)
                 } else {
-                    Some(counter)
+                    Some(crossings)
                 }
             })
-            .map(|counter| counter > 0)
+            .map(|crossings| crossings % 2 == 1)
             .unwrap_or(false)
     }
 
