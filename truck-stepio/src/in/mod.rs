@@ -1033,6 +1033,35 @@ pub struct Axis2Placement3d {
     pub ref_direction: Option<Direction>,
 }
 
+/// Normalize, or report that the vector carries no usable direction.
+///
+/// `DIRECTION` only has to be non-zero in a conforming file, and it does not
+/// have to be unit length. Exporters emit both zero-length and non-unit
+/// directions, so every direction read from STEP goes through here.
+#[inline(always)]
+fn normalized_or_none(vector: Vector3) -> Option<Vector3> {
+    let magnitude = vector.magnitude();
+    (magnitude.is_finite() && magnitude > f64::EPSILON).then(|| vector / magnitude)
+}
+
+/// Any unit vector perpendicular to `axis`, used when a placement does not
+/// supply a usable reference direction.
+///
+/// Crossing with the least-aligned cardinal axis keeps the result well
+/// conditioned no matter how `axis` is oriented.
+#[inline(always)]
+fn any_perpendicular(axis: Vector3) -> Vector3 {
+    let (x, y, z) = (axis.x.abs(), axis.y.abs(), axis.z.abs());
+    let cardinal = if x <= y && x <= z {
+        Vector3::unit_x()
+    } else if y <= z {
+        Vector3::unit_y()
+    } else {
+        Vector3::unit_z()
+    };
+    normalized_or_none(cardinal.cross(axis)).unwrap_or_else(Vector3::unit_x)
+}
+
 impl From<&Axis2Placement3d> for Matrix4 {
     #[inline(always)]
     fn from(axis: &Axis2Placement3d) -> Matrix4 {
@@ -1041,11 +1070,20 @@ impl From<&Axis2Placement3d> for Matrix4 {
             Some(axis) => Vector3::from(axis),
             None => Vector3::unit_z(),
         };
+        // A zero or non-unit axis would otherwise produce a singular basis,
+        // which only fails much later and far from the cause.
+        let z = normalized_or_none(z).unwrap_or_else(Vector3::unit_z);
         let x = match &axis.ref_direction {
             Some(axis) => Vector3::from(axis),
             None => Vector3::unit_x(),
         };
-        let x = (x - x.dot(z) * z).normalize();
+        // Project the reference direction into the plane normal to the axis.
+        // When the two are parallel this leaves the zero vector, and
+        // normalizing that yields NaN that propagates silently through every
+        // curve and surface built on this placement, surfacing later as an
+        // unrelated tolerance assertion. Any perpendicular is a valid basis
+        // here, because the reference direction carried no usable information.
+        let x = normalized_or_none(x - x.dot(z) * z).unwrap_or_else(|| any_perpendicular(z));
         let y = z.cross(x);
         Matrix4::from_cols(
             x.extend(0.0),
@@ -2986,5 +3024,103 @@ impl TryFrom<&ItemDefinedTransformation> for Matrix4 {
         let mat1: Self = (&value.transform_item_1).try_into()?;
         let mat2: Self = (&value.transform_item_2).try_into()?;
         Ok(mat2 * mat1.invert().unwrap())
+    }
+}
+
+#[cfg(test)]
+mod degenerate_placement_tests {
+    use super::*;
+
+    fn direction(x: f64, y: f64, z: f64) -> Direction {
+        Direction {
+            label: String::new(),
+            direction_ratios: vec![x, y, z],
+        }
+    }
+
+    fn placement(axis: Option<Direction>, ref_direction: Option<Direction>) -> Axis2Placement3d {
+        Axis2Placement3d {
+            label: String::new(),
+            location: CartesianPoint {
+                label: String::new(),
+                coordinates: vec![0.0, 0.0, 0.0],
+            },
+            axis,
+            ref_direction,
+        }
+    }
+
+    fn assert_orthonormal(matrix: Matrix4) {
+        for column in 0..4 {
+            for row in 0..4 {
+                assert!(
+                    matrix[column][row].is_finite(),
+                    "matrix must be finite, got {matrix:?}"
+                );
+            }
+        }
+        let x = matrix[0].truncate();
+        let y = matrix[1].truncate();
+        let z = matrix[2].truncate();
+        for (name, vector) in [("x", x), ("y", y), ("z", z)] {
+            assert!(
+                (vector.magnitude() - 1.0).abs() < 1.0e-9,
+                "{name} axis should be unit, got {}",
+                vector.magnitude()
+            );
+        }
+        assert!(x.dot(y).abs() < 1.0e-9, "x and y should be orthogonal");
+        assert!(y.dot(z).abs() < 1.0e-9, "y and z should be orthogonal");
+        assert!(z.dot(x).abs() < 1.0e-9, "z and x should be orthogonal");
+    }
+
+    /// A reference direction parallel to the axis leaves nothing to project,
+    /// which used to normalize the zero vector into NaN.
+    #[test]
+    fn parallel_reference_direction_stays_finite() {
+        let matrix = Matrix4::from(&placement(
+            Some(direction(0.0, 0.0, 1.0)),
+            Some(direction(0.0, 0.0, 1.0)),
+        ));
+        assert_orthonormal(matrix);
+    }
+
+    #[test]
+    fn antiparallel_reference_direction_stays_finite() {
+        let matrix = Matrix4::from(&placement(
+            Some(direction(0.0, 0.0, 1.0)),
+            Some(direction(0.0, 0.0, -1.0)),
+        ));
+        assert_orthonormal(matrix);
+    }
+
+    #[test]
+    fn zero_axis_falls_back_to_a_valid_basis() {
+        let matrix = Matrix4::from(&placement(
+            Some(direction(0.0, 0.0, 0.0)),
+            Some(direction(1.0, 0.0, 0.0)),
+        ));
+        assert_orthonormal(matrix);
+    }
+
+    #[test]
+    fn non_unit_directions_are_normalized() {
+        let matrix = Matrix4::from(&placement(
+            Some(direction(0.0, 0.0, 7.5)),
+            Some(direction(3.2, 0.0, 0.0)),
+        ));
+        assert_orthonormal(matrix);
+    }
+
+    /// The ordinary case must keep its exact orientation.
+    #[test]
+    fn well_formed_placement_is_unchanged() {
+        let matrix = Matrix4::from(&placement(
+            Some(direction(0.0, 0.0, 1.0)),
+            Some(direction(1.0, 0.0, 0.0)),
+        ));
+        assert_orthonormal(matrix);
+        assert!((matrix[0].truncate() - Vector3::unit_x()).magnitude() < 1.0e-12);
+        assert!((matrix[2].truncate() - Vector3::unit_z()).magnitude() < 1.0e-12);
     }
 }
