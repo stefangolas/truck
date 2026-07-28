@@ -373,9 +373,28 @@ fn signed_area(curve: &[SurfacePoint]) -> f64 {
 
 impl PolyBoundary {
     fn new(pieces: Vec<PolyBoundaryPiece>, surface: &impl PreMeshableSurface, tol: f64) -> Self {
+        let probe = std::env::var_os("TRUCK_PROBE_BOUNDARY").is_some();
         let (mut closed, mut open) = (Vec::new(), Vec::new());
         pieces.into_iter().for_each(|PolyBoundaryPiece(mut vec)| {
-            match vec[0].uv.distance(vec[vec.len() - 1].uv) < 1.0e-3 {
+            let gap = vec[0].uv.distance(vec[vec.len() - 1].uv);
+            if probe {
+                // What the closure test is actually deciding, and against what.
+                // `gap` is compared to a fixed constant while `perimeter` is the
+                // only intrinsic length available, so their ratio is the
+                // scale-invariant form of the same question.
+                let perimeter: f64 = vec
+                    .windows(2)
+                    .map(|w| w[0].uv.distance(w[1].uv))
+                    .sum::<f64>();
+                eprintln!(
+                    "PROBE piece pts={} gap={gap:.6e} perimeter={perimeter:.6e} \
+                     gap/perimeter={:.6e} closed={}",
+                    vec.len(),
+                    gap / perimeter,
+                    gap < 1.0e-3,
+                );
+            }
+            match gap < 1.0e-3 {
                 true => {
                     vec.pop();
                     closed.push(vec)
@@ -383,7 +402,6 @@ impl PolyBoundary {
                 false => open.push(vec),
             }
         });
-        let probe = std::env::var_os("TRUCK_PROBE_BOUNDARY").is_some();
         let (n_closed_in, n_open_in) = (closed.len(), open.len());
         fn connect_edges<P>(vecs: impl IntoIterator<Item = Vec<P>>) -> Vec<P> {
             let closure = |vec: Vec<P>| {
