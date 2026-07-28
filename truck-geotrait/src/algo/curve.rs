@@ -73,17 +73,34 @@ where
 /// # Panics
 ///
 /// `tol` must be greater than or equal to `TOLERANCE`.
+/// Ceiling on the points one curve may be divided into.
+///
+/// The division below splits in half wherever the tolerance is missed and
+/// recurses on both halves, so its worst case is exponential in the depth and
+/// the depth limit alone does not bound it. A curve whose tolerance is
+/// unreachable — a degenerate knot vector, a cusp, a zero-length span — keeps
+/// splitting everywhere, and a real CAD assembly drove that to a 1.6 GB single
+/// allocation and died.
+///
+/// Bounding the output rather than the depth keeps the adaptivity that matters:
+/// a curve with one tight feature still recurses deeply there, because that
+/// costs points only along one path. Only the pathological case, which splits
+/// everywhere at every level, runs into this.
+const MAX_CURVE_POINTS: usize = 1 << 16;
+
 pub fn parameter_division<C>(curve: &C, range: (f64, f64), tol: f64) -> (Vec<f64>, Vec<C::Point>)
 where
     C: ParametricCurve,
     C::Point: EuclideanSpace<Scalar = f64> + MetricSpace<Metric = f64> + HashGen<f64>, {
     nonpositive_tolerance!(tol);
+    let mut budget = MAX_CURVE_POINTS;
     sub_parameter_division(
         curve,
         range,
         (curve.subs(range.0), curve.subs(range.1)),
         tol,
         100,
+        &mut budget,
     )
 }
 
@@ -93,6 +110,7 @@ fn sub_parameter_division<C>(
     ends: (C::Point, C::Point),
     tol: f64,
     trials: usize,
+    budget: &mut usize,
 ) -> (Vec<f64>, Vec<C::Point>)
 where
     C: ParametricCurve,
@@ -103,9 +121,10 @@ where
     let t = range.0 * (1.0 - p) + range.1 * p;
     let mid = ends.0 + (ends.1 - ends.0) * p;
     let dist2 = curve.subs(t).distance2(mid);
-    if dist2 < tol * tol || trials == 0 {
+    if dist2 < tol * tol || trials == 0 || *budget == 0 {
         (vec![range.0, range.1], vec![ends.0, ends.1])
     } else {
+        *budget -= 1;
         let mid_param = (range.0 + range.1) / 2.0;
         let mid_value = curve.subs(mid_param);
         let (mut params, mut pts) = sub_parameter_division(
@@ -114,6 +133,7 @@ where
             (ends.0, mid_value),
             tol,
             trials - 1,
+            budget,
         );
         let _ = (params.pop(), pts.pop());
         let (new_params, new_pts) = sub_parameter_division(
@@ -122,6 +142,7 @@ where
             (mid_value, ends.1),
             tol,
             trials - 1,
+            budget,
         );
         params.extend(new_params);
         pts.extend(new_pts);
