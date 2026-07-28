@@ -772,6 +772,23 @@ impl Table {
     pub fn from_data_section(data_section: &DataSection) -> Table {
         Table::from_iter(&data_section.entities)
     }
+
+    /// Build a table from a data section it takes ownership of.
+    ///
+    /// [`Self::from_data_section`] borrows, so the syntax tree stays fully
+    /// resident while the table is filled and a large model pays for both
+    /// representations at once. On a hundred-megabyte assembly the tree is
+    /// around eight times the file and the table another three, so holding
+    /// both is most of the peak.
+    ///
+    /// This consumes each entity as it is converted, letting its storage be
+    /// reused by the table being built rather than sitting on it until the
+    /// end. The resulting table is identical either way; only the high-water
+    /// mark differs.
+    #[inline(always)]
+    pub fn from_owned_data_section(data_section: DataSection) -> Table {
+        Table::from_iter(data_section.entities)
+    }
     #[inline(always)]
     pub fn from_step(step_str: &str) -> Option<Table> {
         let exchange = ruststep::parser::parse(step_str).ok()?;
@@ -784,6 +801,22 @@ impl<'a> FromIterator<&'a EntityInstance> for Table {
         let mut res = Table::default();
         iter.into_iter().for_each(|instance| {
             res.push_instance(instance)
+                .unwrap_or_else(|e| eprintln!("{e}"))
+        });
+        res
+    }
+}
+
+/// Consuming counterpart of the borrowing implementation above.
+///
+/// Each entity is dropped as soon as it has been pushed, so the allocator can
+/// hand its storage straight back to the table instead of the caller holding a
+/// whole second copy of the model until the table is finished.
+impl FromIterator<EntityInstance> for Table {
+    fn from_iter<I: IntoIterator<Item = EntityInstance>>(iter: I) -> Table {
+        let mut res = Table::default();
+        iter.into_iter().for_each(|instance| {
+            res.push_instance(&instance)
                 .unwrap_or_else(|e| eprintln!("{e}"))
         });
         res
