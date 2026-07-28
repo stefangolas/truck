@@ -56,6 +56,7 @@ pub struct Table {
     // surface
     pub plane: HashMap<u64, PlaneHolder>,
     pub spherical_surface: HashMap<u64, SphericalSurfaceHolder>,
+    pub offset_surface: HashMap<u64, OffsetSurfaceHolder>,
     pub cylindrical_surface: HashMap<u64, CylindricalSurfaceHolder>,
     pub toroidal_surface: HashMap<u64, ToroidalSurfaceHolder>,
     pub conical_surface: HashMap<u64, ConicalSurfaceHolder>,
@@ -185,6 +186,10 @@ impl Table {
                 }
                 "PLANE" => {
                     self.plane.insert(*id, Deserialize::deserialize(record)?);
+                }
+                "OFFSET_SURFACE" => {
+                    self.offset_surface
+                        .insert(*id, Deserialize::deserialize(record)?);
                 }
                 "SPHERICAL_SURFACE" => {
                     self.spherical_surface
@@ -1805,6 +1810,8 @@ pub enum SurfaceAny {
     BSplineSurface(Box<BSplineSurfaceAny>),
     #[holder(use_place_holder)]
     SweptSurface(Box<SweptSurfaceAny>),
+    #[holder(use_place_holder)]
+    OffsetSurface(Box<OffsetSurface>),
 }
 
 impl TryFrom<&SurfaceAny> for Surface {
@@ -1816,6 +1823,7 @@ impl TryFrom<&SurfaceAny> for Surface {
             ElementarySurface(x) => Self::ElementarySurface(x.as_ref().into()),
             BSplineSurface(x) => x.as_ref().try_into()?,
             SweptSurface(x) => Self::SweptCurve(x.as_ref().try_into()?),
+            OffsetSurface(x) => Self::OffsetSurface(x.as_ref().try_into()?),
         })
     }
 }
@@ -1870,6 +1878,33 @@ impl From<&Plane> for truck::Plane {
         let p = o + mat[0].truncate();
         let q = o + mat[1].truncate();
         Self::new(o, p, q)
+    }
+}
+
+/// `offset_surface`
+///
+/// A surface at a constant distance from a basis surface along that basis'
+/// own normal. CAD systems emit these constantly for shelled and thickened
+/// parts: a quarter of the real files sampled from the ABC dataset contain
+/// them, though the curated NIST corpus contains none.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Holder)]
+#[holder(table = Table)]
+#[holder(field = offset_surface)]
+#[holder(generate_deserialize)]
+pub struct OffsetSurface {
+    label: String,
+    #[holder(use_place_holder)]
+    basis_surface: SurfaceAny,
+    distance: f64,
+    self_intersect: Logical,
+}
+
+impl TryFrom<&OffsetSurface> for step_geometry::StepOffsetSurface {
+    type Error = StepConvertingError;
+    #[inline(always)]
+    fn try_from(x: &OffsetSurface) -> Result<Self, Self::Error> {
+        let basis: Surface = (&x.basis_surface).try_into()?;
+        Ok(Self::new(basis, x.distance))
     }
 }
 
