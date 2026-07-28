@@ -250,10 +250,20 @@ impl PolyBoundaryPiece {
         let (urange, vrange) = surface.try_range_tuple();
         let mut bdry3d: Vec<Point3> = wire
             .flat_map(|poly_edge| {
-                let n = poly_edge.len() - 1;
+                // Each edge repeats its neighbour's first point, so the last
+                // one is dropped. An empty edge has nothing to drop, and
+                // subtracting from zero here would wrap.
+                let n = poly_edge.len().saturating_sub(1);
                 poly_edge.into_iter().take(n)
             })
             .collect();
+        // A wire that contributed no points cannot bound a face. This
+        // constructor is already fallible, so say so rather than closing the
+        // boundary by indexing a vector that is empty. Real exports do produce
+        // such wires, and panicking here aborts the whole model.
+        if bdry3d.is_empty() {
+            return None;
+        }
         bdry3d.push(bdry3d[0]);
         let mut previous = None;
         let mut vec = bdry3d
