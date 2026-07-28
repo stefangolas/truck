@@ -132,11 +132,20 @@ impl ParameterDivision2D for Sphere {
         tol: f64,
     ) -> (Vec<f64>, Vec<f64>) {
         nonpositive_tolerance!(tol);
-        assert!(
-            tol < self.radius,
-            "Tolerance is larger than the radius of sphere."
-        );
-        let delta = 2.0 * f64::acos(1.0 - tol / self.radius);
+        // A tolerance coarser than the sphere is a meaningful request rather
+        // than a caller error: a tolerance derived from the extent of a whole
+        // model is routinely larger than the smallest features in it, and a
+        // sphere smaller than the permitted chord deviation simply cannot be
+        // subdivided any further. Panicking on that took down the entire
+        // tessellation of otherwise valid CAD assemblies.
+        //
+        // Clamping the ratio also keeps `acos` inside its domain, which is
+        // what the assertion was really protecting: past a ratio of two the
+        // argument falls below -1 and the subdivision would be NaN. At a ratio
+        // of one `delta` is already pi, the coarsest subdivision there is, so
+        // nothing above that can mesh any differently.
+        let ratio = f64::min(tol / self.radius, 1.0);
+        let delta = 2.0 * f64::acos(1.0 - ratio);
         let u_div = 1 + ((urange.1 - urange.0) / delta).floor() as usize;
         let v_div = 1 + ((vrange.1 - vrange.0) / delta).floor() as usize;
         (

@@ -82,3 +82,44 @@ fn sphere_derivation_test() {
         }
     }
 }
+
+/// A tolerance coarser than the sphere used to panic, which took down the
+/// whole tessellation of CAD assemblies whose overall extent sets a tolerance
+/// larger than their smallest features. Such a sphere has to mesh coarsely
+/// instead.
+#[test]
+fn parameter_division_tolerates_a_tolerance_above_the_radius() {
+    let ranges = ((0.0, PI), (0.0, 2.0 * PI));
+    for tol in [0.001, 0.0005025, 0.01, 1.0, 1000.0] {
+        let sphere = Sphere::new(Point3::origin(), 0.0005);
+        let (udiv, vdiv) = sphere.parameter_division(ranges, tol);
+        assert!(udiv.len() >= 2, "tol {tol} produced no u division");
+        assert!(vdiv.len() >= 2, "tol {tol} produced no v division");
+        assert!(
+            udiv.iter().chain(&vdiv).all(|t| t.is_finite()),
+            "tol {tol} produced a non-finite division"
+        );
+    }
+}
+
+/// Clamping must not disturb the ordinary case, where the tolerance is finer
+/// than the sphere and the subdivision follows the chord deviation.
+#[test]
+fn parameter_division_is_unchanged_below_the_radius() {
+    let sphere = Sphere::new(Point3::origin(), 1.0);
+    let ranges = ((0.0, PI), (0.0, 2.0 * PI));
+    let (udiv, vdiv) = sphere.parameter_division(ranges, 0.01);
+    let delta = 2.0 * f64::acos(1.0 - 0.01);
+    assert_eq!(udiv.len(), 1 + (1 + (PI / delta).floor() as usize));
+    assert_eq!(vdiv.len(), 1 + (1 + (2.0 * PI / delta).floor() as usize));
+}
+
+/// A finer tolerance must still mesh at least as finely as a coarser one.
+#[test]
+fn parameter_division_is_monotone_in_tolerance() {
+    let sphere = Sphere::new(Point3::origin(), 1.0);
+    let ranges = ((0.0, PI), (0.0, 2.0 * PI));
+    let fine = sphere.parameter_division(ranges, 0.001).0.len();
+    let coarse = sphere.parameter_division(ranges, 0.5).0.len();
+    assert!(fine >= coarse, "fine {fine} should not be coarser than {coarse}");
+}
