@@ -1296,7 +1296,8 @@ impl<P: for<'a> From<&'a CartesianPoint>> TryFrom<&BSplineCurveWithKnots> for BS
             .iter()
             .map(|n| *n as usize)
             .collect();
-        let knots = KnotVec::from_single_multi(knots, multi).unwrap();
+        // As above: report a malformed knot vector rather than panicking.
+        let knots = KnotVec::from_single_multi(knots, multi)?;
         let ctrpts = curve.control_points_list.iter().map(Into::into).collect();
         Ok(Self::try_new(knots, ctrpts)?)
     }
@@ -2054,14 +2055,18 @@ impl TryFrom<&BSplineSurfaceWithKnots> for BSplineSurface<Point3> {
             .iter()
             .map(|n| *n as usize)
             .collect();
-        let uknots = KnotVec::from_single_multi(uknots, umulti).unwrap();
+        // Exporters do emit knots that are not monotonically increasing. This
+        // conversion already reports failure, so a malformed surface has to
+        // travel back as an error and cost its own face, rather than
+        // unwinding out of a worker and taking the whole model with it.
+        let uknots = KnotVec::from_single_multi(uknots, umulti)?;
         let vknots = surface.v_knots.to_vec();
         let vmulti = surface
             .v_multiplicities
             .iter()
             .map(|n| *n as usize)
             .collect();
-        let vknots = KnotVec::from_single_multi(vknots, vmulti).unwrap();
+        let vknots = KnotVec::from_single_multi(vknots, vmulti)?;
         let ctrls = surface
             .control_points_list
             .iter()
@@ -3042,12 +3047,21 @@ pub struct ItemDefinedTransformation {
     transform_item_2: Axis2Placement,
 }
 
+/// The placement being transformed *from* has to be inverted, and a singular
+/// one cannot be. This is defensive rather than a fix for an observed failure:
+/// the degenerate-placement handling above resolves every basis to an
+/// orthonormal one, so there may be no input that reaches it today. It is still
+/// wrong to unwrap inside a conversion that returns a `Result` — if anything
+/// ever does reach it, aborting the process is not the intended contract.
+const SINGULAR_TRANSFORM: &str =
+    "ITEM_DEFINED_TRANSFORMATION has a degenerate source placement";
+
 impl TryFrom<&ItemDefinedTransformation> for Matrix3 {
     type Error = StepConvertingError;
     fn try_from(value: &ItemDefinedTransformation) -> Result<Self, Self::Error> {
         let mat1: Self = (&value.transform_item_1).try_into()?;
         let mat2: Self = (&value.transform_item_2).try_into()?;
-        Ok(mat2 * mat1.invert().unwrap())
+        Ok(mat2 * mat1.invert().ok_or(SINGULAR_TRANSFORM)?)
     }
 }
 
@@ -3056,7 +3070,7 @@ impl TryFrom<&ItemDefinedTransformation> for Matrix4 {
     fn try_from(value: &ItemDefinedTransformation) -> Result<Self, Self::Error> {
         let mat1: Self = (&value.transform_item_1).try_into()?;
         let mat2: Self = (&value.transform_item_2).try_into()?;
-        Ok(mat2 * mat1.invert().unwrap())
+        Ok(mat2 * mat1.invert().ok_or(SINGULAR_TRANSFORM)?)
     }
 }
 
@@ -3156,4 +3170,52 @@ mod degenerate_placement_tests {
         assert!((matrix[0].truncate() - Vector3::unit_x()).magnitude() < 1.0e-12);
         assert!((matrix[2].truncate() - Vector3::unit_z()).magnitude() < 1.0e-12);
     }
+}
+
+/// Malformed geometry has to travel back as an error rather than unwinding.
+///
+/// These conversions all return a `Result` already, so a panic inside one is
+/// never the intended contract. It also cannot be contained: they run on rayon
+/// workers under callers that abort on panic, so one bad face in a large
+/// assembly used to take down the whole load instead of costing its own shell.
+#[cfg(test)]
+mod malformed_geometry_tests {
+    use super::*;
+
+    fn point(x: f64, y: f64, z: f64) -> CartesianPoint {
+        CartesianPoint {
+            label: String::new(),
+            coordinates: vec![x, y, z],
+        }
+    }
+
+    fn curve_with_knots(knots: Vec<f64>, multiplicities: Vec<i64>) -> BSplineCurveWithKnots {
+        BSplineCurveWithKnots {
+            label: String::new(),
+            degree: 1,
+            control_points_list: vec![point(0.0, 0.0, 0.0), point(1.0, 0.0, 0.0)],
+            curve_form: BSplineCurveForm::Unspecified,
+            closed_curve: Logical::False,
+            self_intersect: Logical::False,
+            knot_multiplicities: multiplicities,
+            knots,
+            knot_spec: KnotType::Unspecified,
+        }
+    }
+
+    /// Exporters emit knot vectors that are not monotonically increasing.
+    #[test]
+    fn unsorted_knots_report_rather_than_panic() {
+        let curve = curve_with_knots(vec![0.0, 1.0, 0.5], vec![2, 1, 2]);
+        let converted = BSplineCurve::<Point3>::try_from(&curve);
+        assert!(converted.is_err(), "an unsorted knot vector must report");
+    }
+
+    /// The ordinary case still converts.
+    #[test]
+    fn sorted_knots_still_convert() {
+        let curve = curve_with_knots(vec![0.0, 1.0], vec![2, 2]);
+        assert!(BSplineCurve::<Point3>::try_from(&curve).is_ok());
+    }
+
 }
