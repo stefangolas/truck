@@ -231,6 +231,20 @@ where
     (udiv, vdiv)
 }
 
+/// Ceiling on the sample grid for a single face.
+///
+/// Subdivision splits every segment that misses the tolerance, so `udiv` and
+/// `vdiv` can each double per level and the grid is their product. Depth alone
+/// does not bound that: a surface whose tolerance is unreachable — a degenerate
+/// knot vector, a discontinuity, a fold — keeps flagging every segment and the
+/// grid grows geometrically until memory runs out, which is what a real CAD
+/// assembly did at 5 GB from a 102 MB file.
+///
+/// A single trimmed face needing more than this many samples is pathological
+/// rather than detailed; legitimate faces use orders of magnitude fewer. The
+/// bound trades exactness on such a face for finishing at all.
+const MAX_DIVISION_CELLS: usize = 1 << 16;
+
 fn sub_parameter_division<S>(
     surface: &S,
     (udiv, vdiv): (&mut Vec<f64>, &mut Vec<f64>),
@@ -241,6 +255,9 @@ fn sub_parameter_division<S>(
     S::Point: EuclideanSpace<Scalar = f64> + MetricSpace<Metric = f64> + HashGen<f64>,
 {
     if trials == 0 {
+        return;
+    }
+    if udiv.len().saturating_mul(vdiv.len()) >= MAX_DIVISION_CELLS {
         return;
     }
     let mut divide_flag0 = vec![false; udiv.len() - 1];
