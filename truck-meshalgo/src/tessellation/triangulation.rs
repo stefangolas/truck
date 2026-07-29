@@ -433,12 +433,18 @@ impl PolyBoundaryPiece {
                 // over, with no nearer solution anywhere in the domain.
                 if !synthetic {
                     let residual = surface.subs(u, v).distance(pt);
-                    if residual > tol * COMPATIBILITY_FACTOR {
+                    if residual > tol * compatibility_factor() {
                         if std::env::var_os("TRUCK_PROBE_COMPAT").is_some() {
+                            // The residual as a multiple of tolerance is the
+                            // number the sweep needs: it says where this
+                            // rejection would land under any other factor, so
+                            // one run yields the whole distribution rather
+                            // than one point on it.
                             eprintln!(
                                 "COMPAT boundary point off surface: residual={residual:.4e} \
-                                 permitted={:.4e}",
-                                tol * COMPATIBILITY_FACTOR
+                                 permitted={:.4e} ratio={:.4}",
+                                tol * compatibility_factor(),
+                                residual / tol,
                             );
                         }
                         return None;
@@ -724,10 +730,36 @@ fn get_mindiff(u: f64, u0: f64, up: f64) -> f64 {
 ///
 /// A face's boundary is required to lie on that face's surface; this is the
 /// slack allowed for the chord approximation and for imperfect exports, not a
-/// licence to trim a surface with a curve belonging to something else. The
-/// observed failure sat at nine times tolerance, so this is not a borderline
-/// judgement.
-const COMPATIBILITY_FACTOR: f64 = 5.0;
+/// licence to trim a surface with a curve belonging to something else.
+///
+/// **Off by default, deliberately.** The violation this detects is real —
+/// swept on `00009190`, the rejected points sit at a median of 191x tolerance
+/// and a maximum of 617x, and loosening the factor twentyfold removes only 62
+/// of 315 rejections, so this is a population and not a threshold. But
+/// rejecting them repairs nothing visible: the blob shells are byte-identical
+/// with the gate on and off, while the gate costs 292 faces and 21,131
+/// triangles, a tenth of the model. Deleting real geometry to fix nothing is
+/// the wrong default. Set `TRUCK_COMPAT_FACTOR=5` to measure the population;
+/// turn it on for real only once something downstream can use the refusal.
+const COMPATIBILITY_FACTOR: f64 = f64::INFINITY;
+
+/// The factor in force, overridable by `TRUCK_COMPAT_FACTOR`.
+///
+/// Sweeping the factor is what established that the gate names a real
+/// population rather than a threshold, and a rebuild per sample would have made
+/// that a five-build afternoon. Read once — this sits in the per-boundary-point
+/// loop, and an env lookup there would be a measurable cost charged to every
+/// model.
+fn compatibility_factor() -> f64 {
+    static FACTOR: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *FACTOR.get_or_init(|| {
+        std::env::var("TRUCK_COMPAT_FACTOR")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<f64>().ok())
+            .filter(|factor| *factor > 0.0 && !factor.is_nan())
+            .unwrap_or(COMPATIBILITY_FACTOR)
+    })
+}
 
 /// How far a step may advance, as a fraction of the period, before the periodic
 /// representative it implies is treated as ambiguous.
