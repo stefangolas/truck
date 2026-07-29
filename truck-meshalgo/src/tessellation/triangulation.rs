@@ -350,13 +350,41 @@ impl PolyBoundaryPiece {
             }
         }
         let grav = vec.iter().fold(Point2::origin(), |g, p| g + p.uv.to_vec()) / vec.len() as f64;
+        let mut quot_u = 0.0;
+        let mut quot_v = 0.0;
         if let (Some(up), Some((u0, _))) = (up, urange) {
-            let quot = f64::floor((grav.x - u0) / up);
-            vec.iter_mut().for_each(|p| p.x -= quot * up);
+            quot_u = f64::floor((grav.x - u0) / up);
+            vec.iter_mut().for_each(|p| p.x -= quot_u * up);
         }
         if let (Some(vp), Some((v0, _))) = (vp, vrange) {
-            let quot = f64::floor((grav.y - v0) / vp);
-            vec.iter_mut().for_each(|p| p.y -= quot * vp);
+            quot_v = f64::floor((grav.y - v0) / vp);
+            vec.iter_mut().for_each(|p| p.y -= quot_v * vp);
+        }
+        if lift_probe {
+            // Which period copy this bound was placed in, and where it ended
+            // up. The shift is chosen from this bound's own centroid alone, and
+            // `try_new` runs once per wire, so two bounds of the same face are
+            // normalized independently and can be placed in different copies.
+            // Comparing these lines across the bounds of one face is the test.
+            let (mut u_lo, mut u_hi) = (f64::INFINITY, f64::NEG_INFINITY);
+            let (mut v_lo, mut v_hi) = (f64::INFINITY, f64::NEG_INFINITY);
+            for p in &vec {
+                u_lo = u_lo.min(p.uv.x);
+                u_hi = u_hi.max(p.uv.x);
+                v_lo = v_lo.min(p.uv.y);
+                v_hi = v_hi.max(p.uv.y);
+            }
+            let winding = |lo: f64, hi: f64, period: Option<f64>| {
+                period.map_or(0.0, |period| (hi - lo) / period)
+            };
+            eprintln!(
+                "BOUND pts={} quot=({quot_u:+.0},{quot_v:+.0}) \
+                 u=[{u_lo:.4},{u_hi:.4}] v=[{v_lo:.4},{v_hi:.4}] \
+                 span/period=({:.3},{:.3})",
+                vec.len(),
+                winding(u_lo, u_hi, up),
+                winding(v_lo, v_hi, vp),
+            );
         }
         let last = *vec.last().unwrap();
         if !vec[0].near(&last) {
