@@ -481,6 +481,12 @@ impl IncludeCurve<NurbsCurve<Vector4>> for RevolutedCurve<NurbsCurve<Vector4>> {
     }
 }
 
+/// Ceiling on the samples taken around one revolution.
+///
+/// See the use site: the count is derived from a radius and a parameter span
+/// that both arrive from imported geometry, and neither is bounded.
+const MAX_CIRCLE_DIVISION: usize = 1 << 12;
+
 impl<C> ParameterDivision2D for RevolutedCurve<C>
 where C: ParametricCurve3D + ParameterDivision1D<Point = Point3>
 {
@@ -499,11 +505,94 @@ where C: ParametricCurve3D + ParameterDivision1D<Point = Point3>
             })
             .sqrt();
         let acos = f64::acos(1.0 - tol / max);
-        let div: usize = 1 + ((vrange.1 - vrange.0) / acos).floor() as usize;
+        // Nothing bounded this, and it is reached with untrusted numbers.
+        //
+        // `acos` collapses toward zero as the revolved radius grows against the
+        // tolerance, and `vrange` is the bounding box of a face's lifted
+        // boundary, which a bad lift can make span many periods. Either alone
+        // sends the sample count to something no machine can allocate; the
+        // product is worse. Measured on ABC `00000730`: a request for
+        // 6,638,692,106,004,871,184 bytes of `f64`, which aborts the process
+        // and loses the whole model rather than one face.
+        //
+        // Degenerate inputs arrive here too. A zero radius makes `tol / max`
+        // infinite and `acos` NaN; a radius small against the tolerance puts
+        // the argument below -1 and does the same. Both are caught by asking
+        // for a finite answer rather than by testing each case.
+        //
+        // This is the same trade `MAX_DIVISION_CELLS` makes in
+        // `sub_parameter_division`: a face needing more samples than this is
+        // pathological rather than detailed, and an approximate face beats an
+        // aborted process. A full revolution at the cap has a chord error of
+        // about 2.3e-7 of its radius, far finer than any tolerance that reaches
+        // this code.
+        let requested = (vrange.1 - vrange.0) / acos;
+        let div: usize = match requested.is_finite() {
+            true => 1 + (requested.floor().max(0.0) as usize).min(MAX_CIRCLE_DIVISION),
+            false => 1,
+        };
         let circle_division = (0..=div)
             .map(|j| vrange.0 + (vrange.1 - vrange.0) * j as f64 / div as f64)
             .collect();
         (curve_division.0, circle_division)
+    }
+}
+
+#[cfg(test)]
+mod parameter_division_bounds {
+    use super::*;
+
+    /// A unit line revolved about the z axis, offset by `radius`.
+    fn revolved(radius: f64) -> RevolutedCurve<Line<Point3>> {
+        RevolutedCurve::by_revolution(
+            Line(
+                Point3::new(radius, 0.0, 0.0),
+                Point3::new(radius, 0.0, 1.0),
+            ),
+            Point3::origin(),
+            Vector3::unit_z(),
+        )
+    }
+
+    /// Each of these aborted the process before the cap existed, so the
+    /// assertion is almost beside the point — that the test returns at all is
+    /// the regression.
+    #[test]
+    fn a_large_radius_cannot_demand_unbounded_samples() {
+        // `tol / max` underflows toward zero, so `acos` does too.
+        let (_, circle) = revolved(1.0e12).parameter_division(((0.0, 1.0), (0.0, 2.0 * PI)), 1.0e-4);
+        assert!(circle.len() <= MAX_CIRCLE_DIVISION + 2, "{}", circle.len());
+    }
+
+    #[test]
+    fn a_corrupt_parameter_span_cannot_demand_unbounded_samples() {
+        // What a bad lift produces: a boundary bounding box spanning an absurd
+        // number of periods.
+        let (_, circle) = revolved(1.0).parameter_division(((0.0, 1.0), (0.0, 1.0e18)), 1.0e-3);
+        assert!(circle.len() <= MAX_CIRCLE_DIVISION + 2, "{}", circle.len());
+    }
+
+    #[test]
+    fn a_degenerate_radius_yields_a_usable_division() {
+        // Radius zero drives `tol / max` to infinity and `acos` to NaN. The old
+        // code cast that to 0 and then divided by it.
+        let (_, circle) = revolved(0.0).parameter_division(((0.0, 1.0), (0.0, 2.0 * PI)), 1.0e-3);
+        assert!(!circle.is_empty());
+        assert!(
+            circle.iter().all(|v| v.is_finite()),
+            "a division must not contain NaN: {circle:?}"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_face_is_unaffected() {
+        // The cap must not perturb geometry that was always fine: a unit
+        // cylinder at a millimetre tolerance needs far fewer than the ceiling.
+        let (_, circle) = revolved(1.0).parameter_division(((0.0, 1.0), (0.0, 2.0 * PI)), 1.0e-3);
+        assert!(circle.len() > 2, "too coarse: {}", circle.len());
+        assert!(circle.len() < 200, "too fine: {}", circle.len());
+        assert_eq!(circle.first(), Some(&0.0));
+        assert_eq!(circle.last(), Some(&(2.0 * PI)));
     }
 }
 
