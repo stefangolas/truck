@@ -377,11 +377,33 @@ impl PolyBoundaryPiece {
             let winding = |lo: f64, hi: f64, period: Option<f64>| {
                 period.map_or(0.0, |period| (hi - lo) / period)
             };
+            // Span conflates two different defects, so report the pair that
+            // separates them. `k` is the net winding — how many periods the
+            // boundary ends away from where it started — and `V` the total
+            // variation, how far it travelled altogether. Circling once gives
+            // |k| = 1 with V ~ 1. |k| = 1 with V ~ 2 means it went out and came
+            // back, a branch chosen wrongly part way. |k| = 2 with V ~ 2 means
+            // it genuinely went round twice, which is a duplicated wire or a
+            // seam concatenated in both orientations.
+            let (mut travel_u, mut travel_v) = (0.0, 0.0);
+            for pair in vec.windows(2) {
+                travel_u += f64::abs(pair[1].uv.x - pair[0].uv.x);
+                travel_v += f64::abs(pair[1].uv.y - pair[0].uv.y);
+            }
+            let net = |period: Option<f64>, first: f64, last: f64| {
+                period.map_or(0.0, |period| f64::round((last - first) / period))
+            };
+            let (first, last) = (vec[0].uv, vec[vec.len() - 1].uv);
             eprintln!(
-                "BOUND pts={} quot=({quot_u:+.0},{quot_v:+.0}) \
+                "BOUND pts={} k=({:+.0},{:+.0}) V=({:.2},{:.2}) \
+                 quot=({quot_u:+.0},{quot_v:+.0}) \
                  u=[{u_lo:.4},{u_hi:.4}] v=[{v_lo:.4},{v_hi:.4}] \
                  span/period=({:.3},{:.3})",
                 vec.len(),
+                net(up, first.x, last.x),
+                net(vp, first.y, last.y),
+                up.map_or(0.0, |p| travel_u / p),
+                vp.map_or(0.0, |p| travel_v / p),
                 winding(u_lo, u_hi, up),
                 winding(v_lo, v_hi, vp),
             );
