@@ -442,8 +442,36 @@ impl PolyBoundaryPiece {
             let e_inv = vec.iter().fold(0.0_f64, |worst, s| {
                 worst.max(surface.subs(s.uv.x, s.uv.y).distance(s.point))
             });
+            // Independent of `sp` entirely: brute-force the true distance from
+            // the first boundary point to the surface. This separates the two
+            // remaining explanations for a large residual. If the minimum is
+            // also far, the point genuinely does not lie on this surface and
+            // the edge has been paired with the wrong face. If the minimum is
+            // near zero, a valid inverse existed and the projection search
+            // failed to find it.
+            let target = vec[0].point;
+            let anchor_uv = vec[0].uv;
+            let axis = |range: Option<(f64, f64)>, period: Option<f64>, centre: f64| match (
+                range, period,
+            ) {
+                (Some(r), _) => r,
+                (None, Some(p)) => (centre - p, centre + p),
+                (None, None) => (centre - 1.0, centre + 1.0),
+            };
+            let (ulo, uhi) = axis(urange, up, anchor_uv.x);
+            let (vlo, vhi) = axis(vrange, vp, anchor_uv.y);
+            const GRID: usize = 400;
+            let mut d_min = f64::INFINITY;
+            for i in 0..=GRID {
+                let u = ulo + (uhi - ulo) * i as f64 / GRID as f64;
+                for j in 0..=GRID {
+                    let v = vlo + (vhi - vlo) * j as f64 / GRID as f64;
+                    d_min = d_min.min(surface.subs(u, v).distance(target));
+                }
+            }
             eprintln!(
-                "PERIOD e_p={e_p:.3e} e_2p={e_2p:.3e} e_hp={e_hp:.3e} e_inv={e_inv:.3e}"
+                "PERIOD e_p={e_p:.3e} e_2p={e_2p:.3e} e_hp={e_hp:.3e} e_inv={e_inv:.3e} \
+                 d_min={d_min:.3e}"
             );
             eprintln!(
                 "BOUND pieces={piece_lengths:?} pts={} k=({:+.0},{:+.0}) V=({:.2},{:.2}) \

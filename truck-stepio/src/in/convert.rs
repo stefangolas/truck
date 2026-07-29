@@ -77,8 +77,6 @@ impl Table {
             if eidx_map.contains_key(&idx) {
                 return None;
             }
-            let len = eidx_map.len();
-            eidx_map.insert(idx, len);
             let edge_curve = edge
                 .clone()
                 .into_owned(self)
@@ -94,10 +92,25 @@ impl Table {
             let Ref(Name::Entity(back_idx)) = edge.edge_end else {
                 return None;
             };
-            Some(CompressedEdge {
-                vertices: (*vidx_map.get(&front_idx)?, *vidx_map.get(&back_idx)?),
-                curve,
-            })
+            let vertices = (*vidx_map.get(&front_idx)?, *vidx_map.get(&back_idx)?);
+            // Claim the index only now, when the edge is certain to be pushed.
+            //
+            // This used to be reserved before the conversion that decides
+            // whether the edge exists at all, and numbered from the map's own
+            // length. Every `?` above drops the edge from the collected vector
+            // while leaving its entry behind, so one failure desynchronised the
+            // two permanently and every later edge was mapped one slot past
+            // where it sits. Faces then silently received a neighbouring edge's
+            // curve — geometrically valid, but lying on a different surface, so
+            // its points do not lie on the face at all. Measured on shell
+            // 160039: a boundary point 0.027 from its own surface, nine times
+            // the chord tolerance, with no nearer solution anywhere in the
+            // parameter domain.
+            //
+            // Counting the map is safe again only because an entry is now added
+            // exactly when an edge is pushed, so the two lengths agree.
+            eidx_map.insert(idx, eidx_map.len());
+            Some(CompressedEdge { vertices, curve })
         };
         let edges: Vec<CompressedEdge<Curve3D>> = shell
             .cfs_faces_holder(self)
