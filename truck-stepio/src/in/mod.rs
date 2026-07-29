@@ -112,6 +112,43 @@ pub struct Table {
 
     // dummy
     pub dummy: HashMap<u64, DummyHolder>,
+
+    /// Every `PLANE_ANGLE_UNIT` the file declares, in the order found.
+    ///
+    /// Angles are the one imported quantity whose unit cannot be ignored. A
+    /// length unit is a uniform scale, so a file in inches renders identically
+    /// to the same file in millimetres — the tolerance is relative and nothing
+    /// downstream cares. An angle is not scale-covariant: mixing an angle in
+    /// degrees with lengths in any unit is dimensionally inconsistent, and the
+    /// error is not a scale factor but a different shape.
+    ///
+    /// That is why the omission stayed invisible and then produced a blob. NIST
+    /// `ftc_07` declares degrees and writes a 2° draft cone, which was read as
+    /// 2 radians: `tan(2°) = 0.035` against `tan(2 rad) = −2.185`, so the cone
+    /// flared backwards at 63x the intended slope and four corner fillets
+    /// became fans bursting out of the part.
+    pub plane_angle_units: Vec<(u64, PlaneAngleUnit)>,
+    /// `PLANE_ANGLE_MEASURE_WITH_UNIT` by entity id: radians per unit, and the
+    /// unit that measurement is expressed *in*.
+    ///
+    /// The second field is what stops the base unit of a conversion from being
+    /// mistaken for a competing declaration. A degree unit is defined as
+    /// "0.0174532925 of that radian unit over there", so every file using
+    /// degrees necessarily also contains a radian `SI_UNIT` — referenced, not
+    /// assigned. Ignoring that cost one wrong refusal before it was noticed.
+    pub plane_angle_measures: HashMap<u64, (f64, Option<u64>)>,
+}
+
+/// A `PLANE_ANGLE_UNIT` declaration, reduced to what conversion needs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PlaneAngleUnit {
+    /// `SI_UNIT($, .RADIAN.)` — already the internal unit, factor 1.
+    Radian,
+    /// `CONVERSION_BASED_UNIT`, whose factor is the referenced measure.
+    Converted {
+        /// The `PLANE_ANGLE_MEASURE_WITH_UNIT` holding radians per unit.
+        measure: u64,
+    },
 }
 
 impl Table {
@@ -779,8 +816,142 @@ impl Table {
                 }
             }
         }
+        self.collect_plane_angle_unit(instance);
         Ok(())
     }
+
+    /// Record the file's plane-angle unit declarations as they go past.
+    ///
+    /// Separate from the main dispatch above rather than folded into it: that
+    /// match is six hundred lines of geometry and this is bookkeeping about how
+    /// to read a number, not another entity to convert.
+    fn collect_plane_angle_unit(&mut self, instance: &EntityInstance) {
+        match instance {
+            EntityInstance::Simple { id, record } => {
+                // `PLANE_ANGLE_MEASURE_WITH_UNIT(PLANE_ANGLE_MEASURE(0.01745), #18)`
+                // — the factor is radians per unit of the converted unit.
+                if record.name == "PLANE_ANGLE_MEASURE_WITH_UNIT" {
+                    if let Parameter::List(params) = &record.parameter {
+                        if let Some(Parameter::Typed { parameter, .. }) = params.first() {
+                            if let Parameter::Real(value) = **parameter {
+                                let base = match params.get(1) {
+                                    Some(Parameter::Ref(Name::Entity(unit))) => Some(*unit),
+                                    _ => None,
+                                };
+                                self.plane_angle_measures.insert(*id, (value, base));
+                            }
+                        }
+                    }
+                }
+            }
+            EntityInstance::Complex {
+                id,
+                subsuper: SubSuperRecord(records),
+            } => {
+                // A unit is a complex instance: the supertypes are listed side
+                // by side, and `PLANE_ANGLE_UNIT` among them is what makes this
+                // an angle unit rather than a length or solid-angle one.
+                if !records.iter().any(|r| r.name == "PLANE_ANGLE_UNIT") {
+                    return;
+                }
+                if let Some(cbu) = records.iter().find(|r| r.name == "CONVERSION_BASED_UNIT") {
+                    if let Parameter::List(params) = &cbu.parameter {
+                        // CONVERSION_BASED_UNIT(name, conversion_factor)
+                        if let Some(Parameter::Ref(Name::Entity(measure))) = params.get(1) {
+                            self.plane_angle_units
+                                .push((*id, PlaneAngleUnit::Converted { measure: *measure }));
+                            return;
+                        }
+                    }
+                }
+                if records.iter().any(|r| r.name == "SI_UNIT") {
+                    self.plane_angle_units.push((*id, PlaneAngleUnit::Radian));
+                }
+            }
+        }
+    }
+
+    /// Radians per unit for the angles in this file, or 1 if that is unknowable.
+    ///
+    /// **Resolved file-globally, and only when every declaration agrees.** The
+    /// strictly correct rule is per-representation: a shell's angles are read in
+    /// the units its `GEOMETRIC_REPRESENTATION_CONTEXT` assigns, and a file may
+    /// carry several contexts — `ftc_07` has two. Associating shells with their
+    /// representation is more machinery than the measured defect needs, because
+    /// in that file *both* contexts declare degrees.
+    ///
+    /// So the rule here is deliberately narrow: agree, or do nothing. A file
+    /// that really does mix radians for geometry with degrees for annotation
+    /// gets a warning and no conversion, which leaves it exactly as wrong as it
+    /// was before rather than newly wrong in a different way. Guessing which
+    /// context owns the geometry is how a fix for one file breaks twenty.
+    pub fn plane_angle_factor(&self) -> f64 {
+        // Units that exist only to define another unit are not declarations of
+        // how this file writes its angles. `DEGREE` is defined as a multiple of
+        // a radian `SI_UNIT`, so that radian unit appears in every degree file
+        // and must not be counted as disagreeing with the degree unit it
+        // defines. Without this the rule below refuses every file it exists to
+        // fix — which is exactly what it did on the first run.
+        let bases: Vec<u64> = self
+            .plane_angle_measures
+            .values()
+            .filter_map(|(_, base)| *base)
+            .collect();
+
+        let mut agreed: Option<f64> = None;
+        for (id, unit) in &self.plane_angle_units {
+            if bases.contains(id) {
+                continue;
+            }
+            let factor = match unit {
+                PlaneAngleUnit::Radian => 1.0,
+                PlaneAngleUnit::Converted { measure } => {
+                    match self.plane_angle_measures.get(measure) {
+                        Some((value, _)) if value.is_finite() && *value > 0.0 => *value,
+                        // A conversion unit whose factor did not resolve is not
+                        // an invitation to assume radians; it is unknown.
+                        _ => return 1.0,
+                    }
+                }
+            };
+            match agreed {
+                None => agreed = Some(factor),
+                Some(seen) if (seen - factor).abs() <= 1.0e-12 * seen.abs().max(1.0) => {}
+                Some(seen) => {
+                    eprintln!(
+                        "plane angle units disagree ({seen} vs {factor} radians per unit); \
+                         angles left unconverted"
+                    );
+                    return 1.0;
+                }
+            }
+        }
+        agreed.unwrap_or(1.0)
+    }
+
+    /// Convert every angle-valued attribute into radians.
+    ///
+    /// Done once, on the table, rather than threaded through conversion: the
+    /// geometry conversions are `From` impls with no access to the table, and
+    /// giving them one would touch every surface and curve type to fix a defect
+    /// measured in exactly one attribute.
+    ///
+    /// `CONICAL_SURFACE.semi_angle` is the attribute proven to matter — it is
+    /// what turned `ftc_07`'s corner fillets into fans. **`PARAMETER_VALUE`
+    /// trims on circles are also angle-valued and are not handled here**;
+    /// `ftc_07` contains none, so they are outside what the reproducer
+    /// demonstrates, but 20 of the 33 NIST files do contain them and `ctc_05`
+    /// is one. Expect to come back here for that.
+    fn normalize_angle_units(&mut self) {
+        let factor = self.plane_angle_factor();
+        if (factor - 1.0).abs() < f64::EPSILON {
+            return;
+        }
+        for cone in self.conical_surface.values_mut() {
+            cone.semi_angle *= factor;
+        }
+    }
+
     #[inline(always)]
     pub fn from_data_section(data_section: &DataSection) -> Table {
         Table::from_iter(&data_section.entities)
@@ -816,6 +987,13 @@ impl<'a> FromIterator<&'a EntityInstance> for Table {
             res.push_instance(instance)
                 .unwrap_or_else(|e| eprintln!("{e}"))
         });
+        // Units are resolved here rather than in the three public constructors
+        // because every one of them funnels through this trait. Normalising at
+        // the public entry points instead would leave a direct `from_iter` call
+        // holding a table whose angles are in whatever the file happened to
+        // use — a hole that only shows up on a file with non-radian angles,
+        // which is exactly the case this exists for.
+        res.normalize_angle_units();
         res
     }
 }
@@ -832,6 +1010,7 @@ impl FromIterator<EntityInstance> for Table {
             res.push_instance(&instance)
                 .unwrap_or_else(|e| eprintln!("{e}"))
         });
+        res.normalize_angle_units();
         res
     }
 }

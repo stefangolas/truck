@@ -800,3 +800,129 @@ mod provenance_tests {
         let _ = table;
     }
 }
+
+#[cfg(test)]
+mod plane_angle_unit_tests {
+    use super::*;
+
+    /// A file writing angles in degrees must report the degree factor.
+    #[test]
+    fn a_degree_file_reports_the_degree_factor() {
+        let mut table = Table::default();
+        // #20 = PLANE_ANGLE_MEASURE_WITH_UNIT(PLANE_ANGLE_MEASURE(0.0174532925), #18)
+        table.plane_angle_measures.insert(20, (0.0174532925, Some(18)));
+        // #18 is the radian SI unit the conversion is expressed in.
+        table.plane_angle_units.push((18, PlaneAngleUnit::Radian));
+        // #24 = CONVERSION_BASED_UNIT('DEGREE', #20)
+        table
+            .plane_angle_units
+            .push((24, PlaneAngleUnit::Converted { measure: 20 }));
+
+        assert_eq!(table.plane_angle_factor(), 0.0174532925);
+    }
+
+    /// The regression for the defect this resolution *introduced*.
+    ///
+    /// A degree unit is defined as a multiple of a radian unit, so every degree
+    /// file necessarily also contains a radian `SI_UNIT`. Counting that base as
+    /// a competing declaration made the agreement rule refuse every file it
+    /// existed to fix — observed on the first run against `ftc_07`, which
+    /// printed "plane angle units disagree (1 vs 0.0174532925)" and left the
+    /// blob exactly as it was. The base must be excluded, not compared.
+    #[test]
+    fn the_base_unit_of_a_conversion_does_not_count_as_disagreement() {
+        let mut table = Table::default();
+        table.plane_angle_measures.insert(20, (0.0174532925, Some(18)));
+        table.plane_angle_units.push((18, PlaneAngleUnit::Radian));
+        table
+            .plane_angle_units
+            .push((24, PlaneAngleUnit::Converted { measure: 20 }));
+
+        assert_ne!(
+            table.plane_angle_factor(),
+            1.0,
+            "the radian base of the degree unit must not veto the conversion"
+        );
+    }
+
+    /// A radian file is left alone, and costs nothing.
+    #[test]
+    fn a_radian_file_needs_no_conversion() {
+        let mut table = Table::default();
+        table.plane_angle_units.push((18, PlaneAngleUnit::Radian));
+        assert_eq!(table.plane_angle_factor(), 1.0);
+    }
+
+    /// A file with no unit declarations at all is assumed to be in radians,
+    /// which is what the standard says and what every file did before this
+    /// existed.
+    #[test]
+    fn no_declaration_means_radians() {
+        assert_eq!(Table::default().plane_angle_factor(), 1.0);
+    }
+
+    /// Two *independently assigned* angle units genuinely conflict, and the
+    /// resolution refuses rather than picking one.
+    ///
+    /// Choosing correctly needs the geometry's own
+    /// `GEOMETRIC_REPRESENTATION_CONTEXT`, which is not resolved here. Guessing
+    /// would convert a file whose geometry is already in radians and break it —
+    /// worse than leaving it as found, because the failure would be new.
+    #[test]
+    fn independently_assigned_conflicting_units_are_refused() {
+        let mut table = Table::default();
+        // Two conversions with different factors, neither the base of the other.
+        table.plane_angle_measures.insert(20, (0.0174532925, Some(18)));
+        table.plane_angle_measures.insert(30, (0.5, Some(28)));
+        table
+            .plane_angle_units
+            .push((24, PlaneAngleUnit::Converted { measure: 20 }));
+        table
+            .plane_angle_units
+            .push((34, PlaneAngleUnit::Converted { measure: 30 }));
+
+        assert_eq!(
+            table.plane_angle_factor(),
+            1.0,
+            "a real conflict leaves the file as found"
+        );
+    }
+
+    /// A conical surface's semi-angle is converted into radians on import.
+    ///
+    /// This is the attribute that produced the `ftc_07` blob: a 2° draft cone
+    /// read as 2 radians has slope `tan(2) = -2.185` instead of `0.0349` —
+    /// wrong by 63x and inverted in sign, which flares the cone backwards into
+    /// a fan.
+    #[test]
+    fn a_cone_semi_angle_is_normalized_into_radians() {
+        let mut table = Table::default();
+        table.plane_angle_measures.insert(20, (0.0174532925, Some(18)));
+        table.plane_angle_units.push((18, PlaneAngleUnit::Radian));
+        table
+            .plane_angle_units
+            .push((24, PlaneAngleUnit::Converted { measure: 20 }));
+        table.conical_surface.insert(
+            686,
+            ConicalSurfaceHolder {
+                label: String::new(),
+                position: PlaceHolder::Ref(Name::Entity(685)),
+                radius: 0.282184119986423,
+                semi_angle: 2.0,
+            },
+        );
+
+        table.normalize_angle_units();
+
+        let converted = table.conical_surface[&686].semi_angle;
+        assert!(
+            (converted - 2.0 * 0.0174532925).abs() < 1.0e-15,
+            "2 degrees must become {} radians, got {converted}",
+            2.0 * 0.0174532925
+        );
+        assert!(
+            f64::tan(converted) > 0.0,
+            "the corrected slope must not be negative; that inversion is the blob"
+        );
+    }
+}
