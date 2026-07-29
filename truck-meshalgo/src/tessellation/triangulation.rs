@@ -421,6 +421,30 @@ impl PolyBoundaryPiece {
                 period.map_or(0.0, |period| f64::round((last - first) / period))
             };
             let (first, last) = (vec[0].uv, vec[vec.len() - 1].uv);
+            // Is the reported period a real period, and is the lift a valid
+            // inverse at all? `e_p` and `e_2p` say whether `S` actually repeats
+            // after one or two periods; `e_hp` catches a period that is not
+            // fundamental. `e_inv` is the reconstruction residual, the distance
+            // from each lifted parameter back to the 3D point it came from --
+            // small residual with a doubled winding means the chart genuinely
+            // takes two parameter circuits per geometric circuit.
+            let anchor = vec[0].uv;
+            let base = surface.subs(anchor.x, anchor.y);
+            let shifted = |dv: f64| surface.subs(anchor.x, anchor.y + dv).distance(base);
+            let (e_p, e_2p, e_hp) = match vp {
+                Some(period) => (
+                    shifted(period),
+                    shifted(2.0 * period),
+                    shifted(0.5 * period),
+                ),
+                None => (f64::NAN, f64::NAN, f64::NAN),
+            };
+            let e_inv = vec.iter().fold(0.0_f64, |worst, s| {
+                worst.max(surface.subs(s.uv.x, s.uv.y).distance(s.point))
+            });
+            eprintln!(
+                "PERIOD e_p={e_p:.3e} e_2p={e_2p:.3e} e_hp={e_hp:.3e} e_inv={e_inv:.3e}"
+            );
             eprintln!(
                 "BOUND pieces={piece_lengths:?} pts={} k=({:+.0},{:+.0}) V=({:.2},{:.2}) \
                  quot=({quot_u:+.0},{quot_v:+.0}) \
