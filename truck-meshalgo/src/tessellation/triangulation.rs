@@ -578,6 +578,57 @@ impl PolyBoundaryPiece {
                  normal_align={normal_alignment:.3}",
                 mean.magnitude(),
             );
+            // The same incidence certificate the source file satisfies exactly,
+            // recomputed on the *converted* geometry. Both frames are recovered
+            // from three sampled points, so this needs no knowledge of how the
+            // conversion stores them and introduces no grid error. The source
+            // gives e_angle = 0, e_axis <= 1e-14, e_radius = 0; whichever of
+            // the three is non-zero here names the field the conversion
+            // damaged.
+            let circle_through = |a: Point3, b: Point3, c: Point3| {
+                let (ab, ac) = (b - a, c - a);
+                let normal = ab.cross(ac);
+                let n2 = normal.magnitude2();
+                if n2 < f64::EPSILON {
+                    return None;
+                }
+                let centre = a
+                    + (ac.magnitude2() * ab.cross(normal) - ab.magnitude2() * ac.cross(normal))
+                        / (2.0 * n2);
+                Some((centre, normal.normalize(), centre.distance(a)))
+            };
+            // Boundary curve: three points spread along it.
+            let n = vec.len();
+            let boundary_fit = if n >= 3 {
+                circle_through(vec[0].point, vec[n / 3].point, vec[2 * n / 3].point)
+            } else {
+                None
+            };
+            // Surface cross-section: three points around one periodic axis.
+            let anchor = vec[0].uv;
+            let cross_fit = match (up, vp) {
+                (Some(p), _) => circle_through(
+                    surface.subs(anchor.x, anchor.y),
+                    surface.subs(anchor.x + p / 3.0, anchor.y),
+                    surface.subs(anchor.x + 2.0 * p / 3.0, anchor.y),
+                ),
+                (_, Some(p)) => circle_through(
+                    surface.subs(anchor.x, anchor.y),
+                    surface.subs(anchor.x, anchor.y + p / 3.0),
+                    surface.subs(anchor.x, anchor.y + 2.0 * p / 3.0),
+                ),
+                _ => None,
+            };
+            if let (Some((cc, cn, cr)), Some((sc, sn, sr))) = (boundary_fit, cross_fit) {
+                let e_angle = f64::acos(f64::min(1.0, f64::abs(cn.dot(sn)))).to_degrees();
+                let offset = cc - sc;
+                let e_axis = (offset - sn * offset.dot(sn)).magnitude();
+                eprintln!(
+                    "INCID e_angle={e_angle:.4}deg e_axis={e_axis:.4e} \
+                     e_radius={:.4e} r_curve={cr:.5} r_surf={sr:.5}",
+                    f64::abs(cr - sr),
+                );
+            }
             eprintln!(
                 "BOUND pieces={piece_lengths:?} pts={} k=({:+.0},{:+.0}) V=({:.2},{:.2}) \
                  quot=({quot_u:+.0},{quot_v:+.0}) \
