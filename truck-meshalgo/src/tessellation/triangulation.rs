@@ -156,11 +156,33 @@ where
     S: PreMeshableSurface + 'a,
 {
     let vertices = shell.vertices.clone();
+    let edge_probe = std::env::var_os("TRUCK_PROBE_EDGE").is_some();
     let tessellate_edge = |edge: &CompressedEdge<C>| {
         let curve = &edge.curve;
+        let range = curve.range_tuple();
+        if edge_probe {
+            // How much of its own period a curve is asked to cover. An edge
+            // whose start and end vertices coincide gives the importer no
+            // independent parameter for each end -- they are the same point
+            // modulo the period -- so a generic endpoint solver can resolve
+            // them into copies two periods apart. The ratio, not the absolute
+            // range, is what says so: a shifted circle may legitimately run
+            // over [-pi, 3pi], which is still two periods.
+            let span = range.1 - range.0;
+            let ratio = curve.period().map(|period| span / period);
+            eprintln!(
+                "EDGE range=({:.6},{:.6}) span={span:.6} period={:?} span/period={:?} \
+                 same_vertex={}",
+                range.0,
+                range.1,
+                curve.period(),
+                ratio,
+                edge.vertices.0 == edge.vertices.1,
+            );
+        }
         CompressedEdge {
             vertices: edge.vertices,
-            curve: PolylineCurve::from_curve(curve, curve.range_tuple(), tol),
+            curve: PolylineCurve::from_curve(curve, range, tol),
         }
     };
     #[cfg(not(target_arch = "wasm32"))]
@@ -248,7 +270,12 @@ impl PolyBoundaryPiece {
     ) -> Option<Self> {
         let (up, vp) = (surface.u_period(), surface.v_period());
         let (urange, vrange) = surface.try_range_tuple();
+        // How many polylines this bound is assembled from, and how long each
+        // is. A bound winding twice is either fed two once-winding pieces --
+        // assembly -- or one piece that the lift doubles. This separates them.
+        let mut piece_lengths: Vec<usize> = Vec::new();
         let mut bdry3d: Vec<Point3> = wire
+            .inspect(|poly_edge| piece_lengths.push(poly_edge.len()))
             .flat_map(|poly_edge| {
                 // Each edge repeats its neighbour's first point, so the last
                 // one is dropped. An empty edge has nothing to drop, and
@@ -395,7 +422,7 @@ impl PolyBoundaryPiece {
             };
             let (first, last) = (vec[0].uv, vec[vec.len() - 1].uv);
             eprintln!(
-                "BOUND pts={} k=({:+.0},{:+.0}) V=({:.2},{:.2}) \
+                "BOUND pieces={piece_lengths:?} pts={} k=({:+.0},{:+.0}) V=({:.2},{:.2}) \
                  quot=({quot_u:+.0},{quot_v:+.0}) \
                  u=[{u_lo:.4},{u_hi:.4}] v=[{v_lo:.4},{v_hi:.4}] \
                  span/period=({:.3},{:.3})",
