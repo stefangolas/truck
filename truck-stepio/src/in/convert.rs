@@ -80,7 +80,11 @@ impl Table {
             .cfs_faces_holder(self)
             .filter_map(move |(_, face)| self.face_any_to_orientation_and_face(face))
             .flat_map(move |(_, face)| face.bounds_holder(self))
-            .filter_map(move |bound| bound?.bound_holder(self))
+            .filter_map(move |bound| match bound?.bound_holder(self)? {
+                FaceBoundLoop::Edges(loop_) => Some(loop_),
+                // A collapsed bound has no edges to contribute.
+                FaceBoundLoop::Collapsed(_) => None,
+            })
             .flat_map(move |bound| bound.edge_list)
             .filter_map(move |edge| self.place_holder_edge_any_to_index_and_edge_curve(&edge))
             .flat_map(move |(_, edge)| [edge.edge_start, edge.edge_end]);
@@ -117,7 +121,11 @@ impl Table {
             .cfs_faces_holder(self)
             .filter_map(move |(_, face)| self.face_any_to_orientation_and_face(face))
             .flat_map(move |(_, face)| face.bounds_holder(self))
-            .filter_map(move |bound| bound?.bound_holder(self))
+            .filter_map(move |bound| match bound?.bound_holder(self)? {
+                FaceBoundLoop::Edges(loop_) => Some(loop_),
+                // A collapsed bound has no edges to contribute.
+                FaceBoundLoop::Collapsed(_) => None,
+            })
             .flat_map(move |bound| bound.edge_list)
             .filter_map(move |edge| self.place_holder_edge_any_to_index_and_edge_curve(&edge));
         for (idx, edge) in edge_curves {
@@ -178,12 +186,20 @@ impl Table {
         &self,
         bound: FaceBoundHolder,
         edges: &Arena<EdgeKind, CompressedEdge<Curve3D>>,
-    ) -> Result<TopologicallyClosedWire, FaceLossReason> {
+    ) -> Result<BoundOutcome, FaceLossReason> {
         use PlaceHolder::Ref;
         let ori = bound.orientation;
-        let bound = bound
+        let bound = match bound
             .bound_holder(self)
-            .ok_or(FaceLossReason::LoopReferenceUnresolved)?;
+            .ok_or(FaceLossReason::LoopReferenceUnresolved)?
+        {
+            FaceBoundLoop::Edges(loop_) => loop_,
+            // A collapsed boundary trims nothing. The apex or pole is closed by
+            // the surface's own degeneracy, so the honest contribution is no
+            // trim segment at all — not a synthesised loop of zero size, which
+            // would trim the face by an empty region and delete it.
+            FaceBoundLoop::Collapsed(_) => return Ok(BoundOutcome::Collapsed),
+        };
         // A bound missing an edge is a broken bound, not a shorter one.
         //
         // This collected through `filter_map`, so every `?` below dropped that
@@ -240,6 +256,7 @@ impl Table {
         TopologicallyClosedWire::try_new(wire, |position| {
             edges.value_at(position).map(|edge| edge.vertices)
         })
+        .map(BoundOutcome::Wire)
         .ok_or(FaceLossReason::WireNotClosed)
     }
 
@@ -311,6 +328,7 @@ impl Table {
         shell: &ShellHolder,
         edges: &Arena<EdgeKind, CompressedEdge<Curve3D>>,
         losses: &mut Vec<FaceLoss>,
+        singular: &mut Vec<FaceProvenance>,
     ) -> Vec<CompressedFace<Surface>> {
         let mut surfaces = Arena::<SurfaceKind, Surface>::new();
         let mut faces = Vec::new();
@@ -360,21 +378,49 @@ impl Table {
             // what the solid is -- lose an inner bound and a hole fills in, lose
             // the outer bound and the remaining holes are read as the outline.
             // Both mesh perfectly happily.
-            let wires = face
+            let outcomes = face
                 .bounds_holder(self)
                 .into_iter()
                 .map(|bound| {
                     let bound = bound.ok_or(FaceLossReason::BoundReferenceUnresolved)?;
                     self.face_bound_to_edges(bound, edges)
                 })
-                .collect::<Result<Vec<TopologicallyClosedWire>, FaceLossReason>>();
-            let wires = match wires {
-                Ok(wires) => wires,
+                .collect::<Result<Vec<BoundOutcome>, FaceLossReason>>();
+            let outcomes = match outcomes {
+                Ok(outcomes) => outcomes,
                 Err(reason) => {
                     losses.push(FaceLoss { provenance, reason });
                     continue;
                 }
             };
+            let collapsed = outcomes
+                .iter()
+                .filter(|o| matches!(o, BoundOutcome::Collapsed))
+                .count();
+            let wires: Vec<TopologicallyClosedWire> = outcomes
+                .into_iter()
+                .filter_map(|o| match o {
+                    BoundOutcome::Wire(wire) => Some(wire),
+                    BoundOutcome::Collapsed => None,
+                })
+                .collect();
+            if wires.is_empty() {
+                // Every bound collapsed, so nothing describes where this face
+                // ends. A cone that is only an apex is not a face, and trimming
+                // by no boundary at all would emit the entire unbounded surface
+                // — the blob failure mode this project exists to avoid.
+                losses.push(FaceLoss {
+                    provenance,
+                    reason: FaceLossReason::AllBoundsCollapsed,
+                });
+                continue;
+            }
+            if collapsed > 0 {
+                // Recorded rather than silently absorbed: the face is now
+                // rendered, but its domain has a singular point that nothing
+                // downstream is told about. QUO-005 wants a type here.
+                singular.push(provenance);
+            }
             faces.push(CompressedFace {
                 surface,
                 // The proof is discharged here and nowhere earlier: truck's
@@ -727,7 +773,14 @@ impl StepShell for ShellHolder {
         // only name an edge that converted. Only then are they flattened to the
         // bare vectors `CompressedShell` requires.
         let mut losses = Vec::new();
-        let faces = table.shell_faces(self, &edges, &mut losses);
+        let mut singular = Vec::new();
+        let faces = table.shell_faces(self, &edges, &mut losses, &mut singular);
+        if !singular.is_empty() && std::env::var_os("TRUCK_PROBE_SINGULAR").is_some() {
+            eprintln!(
+                "SINGULAR {} faces have a collapsed bound (apex or pole)",
+                singular.len()
+            );
+        }
         Ok((
             CompressedShell {
                 vertices: vertices.into_items(),
@@ -1022,6 +1075,8 @@ pub enum FaceLossReason {
     SurfaceConversionFailed,
     /// A `FACE_BOUND`/`FACE_OUTER_BOUND` reference did not resolve.
     BoundReferenceUnresolved,
+    /// Every bound of the face collapsed to a point, so nothing bounds it.
+    AllBoundsCollapsed,
     /// The bound resolved, but the `EDGE_LOOP` it names did not.
     ///
     /// Split from `BoundReferenceUnresolved` once the census showed the pair
@@ -1047,6 +1102,7 @@ impl FaceLossReason {
             Self::SurfaceConversionFailed => "SurfaceConversionFailed",
             Self::BoundReferenceUnresolved => "BoundReferenceUnresolved",
             Self::LoopReferenceUnresolved => "LoopReferenceUnresolved",
+            Self::AllBoundsCollapsed => "AllBoundsCollapsed",
             Self::EdgeUseUnresolved => "EdgeUseUnresolved",
             Self::EdgeCurveConversionFailed => "EdgeCurveConversionFailed",
             Self::WireNotClosed => "WireNotClosed",
@@ -1063,4 +1119,91 @@ pub struct FaceLoss {
     /// id to report, and reporting a fabricated one would defeat the purpose.
     pub provenance: FaceProvenance,
     pub reason: FaceLossReason,
+}
+
+
+/// What one face bound contributed to the trimming domain.
+enum BoundOutcome {
+    /// An ordinary closed wire of edges.
+    Wire(TopologicallyClosedWire),
+    /// Nothing: the bound is a single vertex, and the surface closes itself
+    /// there. See `FaceBoundLoop::Collapsed`.
+    Collapsed,
+}
+
+#[cfg(test)]
+mod vertex_loop_tests {
+    use super::*;
+
+    fn vertex_point() -> VertexPointHolder {
+        VertexPointHolder {
+            label: String::new(),
+            vertex_geometry: PlaceHolder::Ref(Name::Entity(1820)),
+        }
+    }
+
+    /// A bound naming a `VERTEX_LOOP` resolves as collapsed, not as unresolved.
+    ///
+    /// This is the regression for the largest single cause of missing faces
+    /// found in either corpus: 272 of 604 on ABC `00009190` and 132 across
+    /// NIST, with the `VERTEX_LOOP` count matching the failure count exactly in
+    /// all eight files containing one. `bound_holder` checked `edge_loop` alone,
+    /// so a cone apex took its whole face with it.
+    #[test]
+    fn a_vertex_loop_bound_resolves_as_collapsed() {
+        let mut table = Table::default();
+        table.vertex_loop.insert(
+            286,
+            VertexLoopHolder {
+                label: String::new(),
+                loop_vertex: PlaceHolder::Owned(vertex_point()),
+            },
+        );
+        let bound = FaceBoundHolder {
+            label: String::new(),
+            bound: PlaceHolder::Ref(Name::Entity(286)),
+            orientation: true,
+        };
+
+        assert!(matches!(
+            bound.bound_holder(&table),
+            Some(FaceBoundLoop::Collapsed(_))
+        ));
+    }
+
+    /// An `EDGE_LOOP` still resolves as edges, and the two are distinguished
+    /// rather than both being "a loop".
+    #[test]
+    fn an_edge_loop_bound_still_resolves_as_edges() {
+        let mut table = Table::default();
+        table.edge_loop.insert(
+            4930,
+            EdgeLoopHolder {
+                label: String::new(),
+                edge_list: Vec::new(),
+            },
+        );
+        let bound = FaceBoundHolder {
+            label: String::new(),
+            bound: PlaceHolder::Ref(Name::Entity(4930)),
+            orientation: true,
+        };
+
+        assert!(matches!(
+            bound.bound_holder(&table),
+            Some(FaceBoundLoop::Edges(_))
+        ));
+    }
+
+    /// A bound naming neither is still unresolved, so a genuinely missing loop
+    /// is not quietly reclassified as an apex.
+    #[test]
+    fn an_unknown_loop_reference_is_still_unresolved() {
+        let bound = FaceBoundHolder {
+            label: String::new(),
+            bound: PlaceHolder::Ref(Name::Entity(99999)),
+            orientation: true,
+        };
+        assert!(bound.bound_holder(&Table::default()).is_none());
+    }
 }

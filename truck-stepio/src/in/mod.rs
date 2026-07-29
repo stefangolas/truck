@@ -81,6 +81,7 @@ pub struct Table {
     pub edge_curve: HashMap<u64, EdgeCurveHolder>,
     pub oriented_edge: HashMap<u64, OrientedEdgeHolder>,
     pub edge_loop: HashMap<u64, EdgeLoopHolder>,
+    pub vertex_loop: HashMap<u64, VertexLoopHolder>,
     pub face_bound: HashMap<u64, FaceBoundHolder>,
     pub face_surface: HashMap<u64, FaceSurfaceHolder>,
     pub oriented_face: HashMap<u64, OrientedFaceHolder>,
@@ -301,6 +302,10 @@ impl Table {
                 }
                 "EDGE_LOOP" => {
                     self.edge_loop
+                        .insert(*id, Deserialize::deserialize(record)?);
+                }
+                "VERTEX_LOOP" => {
+                    self.vertex_loop
                         .insert(*id, Deserialize::deserialize(record)?);
                 }
                 "FACE_BOUND" => {
@@ -2917,6 +2922,42 @@ pub struct EdgeLoop {
     pub edge_list: Vec<EdgeAny>,
 }
 
+/// Which kind of loop a `FACE_BOUND` resolved to.
+///
+/// The two are not interchangeable and must not be collapsed to "a loop". An
+/// `EDGE_LOOP` contributes a trim curve; a `VERTEX_LOOP` contributes none and
+/// instead marks a point where the chart itself is singular (`QUO-005`). Code
+/// that treats the second as an empty instance of the first would synthesise a
+/// zero-length boundary and trim the face by nothing.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FaceBoundLoop {
+    /// An ordinary loop of oriented edges.
+    Edges(EdgeLoopHolder),
+    /// A boundary collapsed to one vertex: a cone apex or a sphere pole.
+    Collapsed(VertexLoopHolder),
+}
+
+/// `vertex_loop`
+///
+/// A loop that is a single vertex and has no edges: the collapsed boundary at a
+/// cone apex or a sphere pole, where the surface's own parameterisation closes
+/// the domain and there is no curve to trim along.
+///
+/// Unsupported until 2026-07-29, and it was the single largest cause of missing
+/// faces in both corpora -- 272 of 604 on ABC `00009190` and 132 across NIST,
+/// with the entity count matching the failure count exactly in all eight files
+/// that contain one. `FaceBoundHolder::bound_holder` resolved a bound only
+/// against `edge_loop`, so a face with an apex lost its whole self.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Holder)]
+#[holder(table = Table)]
+#[holder(field = vertex_loop)]
+#[holder(generate_deserialize)]
+pub struct VertexLoop {
+    pub label: String,
+    #[holder(use_place_holder)]
+    pub loop_vertex: VertexPoint,
+}
+
 /// `face_bound`
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Holder)]
 #[holder(table = Table)]
@@ -2932,10 +2973,27 @@ pub struct FaceBound {
 }
 
 impl FaceBoundHolder {
-    fn bound_holder(&self, table: &Table) -> Option<EdgeLoopHolder> {
+    /// What kind of loop this bound actually names.
+    ///
+    /// STEP permits a face bound to reference either an `EDGE_LOOP` or a
+    /// `VERTEX_LOOP`; the reference itself is untyped, so which one it is can
+    /// only be discovered by looking. This used to check `edge_loop` alone and
+    /// return `None` otherwise, which turned every apex into a lost face.
+    fn bound_holder(&self, table: &Table) -> Option<FaceBoundLoop> {
         match &self.bound {
-            PlaceHolder::Owned(holder) => Some(holder.clone()),
-            PlaceHolder::Ref(Name::Entity(ref idx)) => table.edge_loop.get(idx).cloned(),
+            PlaceHolder::Owned(holder) => Some(FaceBoundLoop::Edges(holder.clone())),
+            PlaceHolder::Ref(Name::Entity(ref idx)) => table
+                .edge_loop
+                .get(idx)
+                .cloned()
+                .map(FaceBoundLoop::Edges)
+                .or_else(|| {
+                    table
+                        .vertex_loop
+                        .get(idx)
+                        .cloned()
+                        .map(FaceBoundLoop::Collapsed)
+                }),
             _ => None,
         }
     }
