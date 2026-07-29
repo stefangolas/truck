@@ -265,40 +265,90 @@ impl PolyBoundaryPiece {
             return None;
         }
         bdry3d.push(bdry3d[0]);
-        let mut previous = None;
-        let mut vec = bdry3d
-            .into_iter()
-            .flat_map(|pt| {
-                let (mut u, mut v) = match sp(surface, pt, previous) {
-                    Some(hint) => hint,
-                    None => return vec![None],
+        let lift_probe = std::env::var_os("TRUCK_PROBE_LIFT").is_some();
+        let mut previous: Option<(f64, f64)> = None;
+        let mut previous_pt: Option<Point3> = None;
+        let mut vec: Vec<SurfacePoint> = Vec::with_capacity(bdry3d.len());
+        // Samples still to lift, most recent last. A step whose periodic
+        // representative is ambiguous pushes its own chord midpoint and then
+        // revisits itself, so density is spent only where the lift is unsafe
+        // rather than across every edge in the model.
+        // The flag marks a point this refinement invented rather than one the
+        // edge supplied.
+        let mut pending: Vec<(Point3, bool)> = Vec::new();
+        for point in bdry3d {
+            pending.clear();
+            pending.push((point, false));
+            let mut refinements = 0usize;
+            while let Some((pt, synthetic)) = pending.pop() {
+                let projected = sp(surface, pt, previous);
+                // A midpoint is only a device for disambiguating the step, and
+                // a chord midpoint of a coarse arc does not lie on the surface,
+                // so its projection can legitimately fail. Dropping it costs
+                // only the refinement; failing the face over it costs the face,
+                // which is how this turned 276 surfaceless faces into 391.
+                let (mut u, mut v) = match (projected, synthetic) {
+                    (Some(uv), _) => uv,
+                    (None, true) => continue,
+                    (None, false) => return None,
                 };
+                let raw = (u, v);
                 if let (Some(up), Some((u0, _))) = (up, previous) {
                     u = get_mindiff(u, u0, up);
                 }
                 if let (Some(vp), Some((_, v0))) = (vp, previous) {
                     v = get_mindiff(v, v0, vp);
                 }
-                let res = (|| {
-                    if let Some((u0, v0)) = previous {
-                        if !u0.near(&u) && surface.uder(u0, v0).so_small() {
-                            return vec![
-                                Some((Point2::new(u, v0), pt).into()),
-                                Some((Point2::new(u, v), pt).into()),
-                            ];
-                        } else if !v0.near(&v) && surface.vder(u0, v0).so_small() {
-                            return vec![
-                                Some((Point2::new(u0, v), pt).into()),
-                                Some((Point2::new(u, v), pt).into()),
-                            ];
-                        }
+                if lift_probe {
+                    // Each sample's raw projection, the periodic representative
+                    // chosen for it, and the step that choice implies. Aliasing
+                    // shows up as a step near or beyond half a period, or as a
+                    // step that closes a loop which should have stayed open.
+                    let (du, dv) = match previous {
+                        Some((u0, v0)) => (u - u0, v - v0),
+                        None => (0.0, 0.0),
+                    };
+                    let frac = |d: f64, p: Option<f64>| p.map_or(0.0, |p| d / p);
+                    eprintln!(
+                        "LIFT raw=({:.6},{:.6}) chosen=({u:.6},{v:.6}) \
+                         step=({du:+.6},{dv:+.6}) step/period=({:+.4},{:+.4})",
+                        raw.0,
+                        raw.1,
+                        frac(du, up),
+                        frac(dv, vp),
+                    );
+                }
+                // Halve the step rather than guess which copy was meant. The
+                // projection of the chord midpoint recovers a point the curve
+                // actually passes through, so each half advances by less and
+                // the nearest copy becomes unambiguous.
+                if let (Some((u0, v0)), Some(previous_point)) = (previous, previous_pt) {
+                    let ambiguous = |now: f64, before: f64, period: Option<f64>| {
+                        period.is_some_and(|period| {
+                            f64::abs(now - before) >= AMBIGUOUS_STEP_FRACTION * period
+                        })
+                    };
+                    if refinements < MAX_LIFT_REFINEMENTS
+                        && (ambiguous(u, u0, up) || ambiguous(v, v0, vp))
+                    {
+                        refinements += 1;
+                        pending.push((pt, synthetic));
+                        pending.push((previous_point.midpoint(pt), true));
+                        continue;
                     }
-                    vec![Some((Point2::new(u, v), pt).into())]
-                })();
+                }
+                if let Some((u0, v0)) = previous {
+                    if !u0.near(&u) && surface.uder(u0, v0).so_small() {
+                        vec.push((Point2::new(u, v0), pt).into());
+                    } else if !v0.near(&v) && surface.vder(u0, v0).so_small() {
+                        vec.push((Point2::new(u0, v), pt).into());
+                    }
+                }
+                vec.push((Point2::new(u, v), pt).into());
                 previous = Some((u, v));
-                res
-            })
-            .collect::<Option<Vec<SurfacePoint>>>()?;
+                previous_pt = Some(pt);
+            }
+        }
         let grav = vec.iter().fold(Point2::origin(), |g, p| g + p.uv.to_vec()) / vec.len() as f64;
         if let (Some(up), Some((u0, _))) = (up, urange) {
             let quot = f64::floor((grav.x - u0) / up);
@@ -319,14 +369,27 @@ impl PolyBoundaryPiece {
     }
 }
 
-fn abs_diff(previous: f64) -> impl Fn(&f64, &f64) -> std::cmp::Ordering {
-    let f = move |x: &f64| f64::abs(x - previous);
-    move |x: &f64, y: &f64| f(x).partial_cmp(&f(y)).unwrap()
-}
 fn get_mindiff(u: f64, u0: f64, up: f64) -> f64 {
-    let closure = |i| u + i as f64 * up;
-    (-2..=2).map(closure).min_by(abs_diff(u0)).unwrap()
+    // The nearest periodic copy outright, rather than the nearest among five.
+    // The old search covered only two periods either side, so a boundary that
+    // wrapped further was silently pulled back; rounding has no such bound and
+    // is cheaper.
+    u + f64::round((u0 - u) / up) * up
 }
+
+/// How far a step may advance, as a fraction of the period, before the periodic
+/// representative it implies is treated as ambiguous.
+///
+/// [`get_mindiff`] takes the copy nearest the previous parameter, which is the
+/// right answer only while the true step is under half a period. At exactly
+/// half, the two candidates are equidistant and the tie is broken arbitrarily —
+/// measured advancing `-0.5` of a period where the curve went `+0.5`, which
+/// folds a full turn onto itself and makes a period-wrapping boundary look like
+/// a closed loop. The margin below `0.5` keeps numerical noise clear of the tie.
+const AMBIGUOUS_STEP_FRACTION: f64 = 0.45;
+
+/// How many times a single step may be halved before refinement gives up.
+const MAX_LIFT_REFINEMENTS: usize = 8;
 
 #[derive(Debug, Default, Clone)]
 struct PolyBoundary(Vec<Vec<SurfacePoint>>);
