@@ -178,10 +178,12 @@ impl Table {
         &self,
         bound: FaceBoundHolder,
         edges: &Arena<EdgeKind, CompressedEdge<Curve3D>>,
-    ) -> Option<TopologicallyClosedWire> {
+    ) -> Result<TopologicallyClosedWire, FaceLossReason> {
         use PlaceHolder::Ref;
         let ori = bound.orientation;
-        let bound = bound.bound_holder(self)?;
+        let bound = bound
+            .bound_holder(self)
+            .ok_or(FaceLossReason::LoopReferenceUnresolved)?;
         // A bound missing an edge is a broken bound, not a shorter one.
         //
         // This collected through `filter_map`, so every `?` below dropped that
@@ -202,23 +204,29 @@ impl Table {
             .into_iter()
             .map(|edge| {
                 let Ref(Name::Entity(ref idx)) = edge else {
-                    return None;
+                    return Err(FaceLossReason::EdgeUseUnresolved);
                 };
                 let edge_idx = if let Some(oriented_edge) = self.oriented_edge.get(idx) {
-                    let named = EdgeCurveId::new(oriented_edge.edge_element_idx()?);
+                    let named = EdgeCurveId::new(
+                        oriented_edge
+                            .edge_element_idx()
+                            .ok_or(FaceLossReason::EdgeUseUnresolved)?,
+                    );
                     CompressedEdgeIndex {
-                        index: Self::checked_edge_position(edges, named)?,
+                        index: Self::checked_edge_position(edges, named)
+                            .ok_or(FaceLossReason::EdgeCurveConversionFailed)?,
                         orientation: oriented_edge.orientation == ori,
                     }
                 } else {
                     CompressedEdgeIndex {
-                        index: Self::checked_edge_position(edges, EdgeCurveId::new(*idx))?,
+                        index: Self::checked_edge_position(edges, EdgeCurveId::new(*idx))
+                            .ok_or(FaceLossReason::EdgeCurveConversionFailed)?,
                         orientation: ori,
                     }
                 };
-                Some(edge_idx)
+                Ok(edge_idx)
             })
-            .collect::<Option<Vec<_>>>()?;
+            .collect::<Result<Vec<_>, FaceLossReason>>()?;
         debug_assert!(
             wire.is_empty() || wire.len() == source_uses,
             "a resolved bound must use every edge its source named"
@@ -232,6 +240,7 @@ impl Table {
         TopologicallyClosedWire::try_new(wire, |position| {
             edges.value_at(position).map(|edge| edge.vertices)
         })
+        .ok_or(FaceLossReason::WireNotClosed)
     }
 
     /// The supporting surface of a face, converted once per source entity.
@@ -289,65 +298,103 @@ impl Table {
         Some((surface, Some(*idx)))
     }
 
+    /// Convert a shell's faces, and say why each one that failed did.
+    ///
+    /// The reasons come from the real conversion, not from a second
+    /// reimplementation of it that reports instead of converting. That
+    /// distinction is the whole design: a diagnostic which re-derives the
+    /// pipeline can disagree with the pipeline, and this project has twice had
+    /// a detector carrying the bug it was hunting. There is one path, and it
+    /// either produces a face or a reason.
     fn shell_faces(
         &self,
         shell: &ShellHolder,
         edges: &Arena<EdgeKind, CompressedEdge<Curve3D>>,
+        losses: &mut Vec<FaceLoss>,
     ) -> Vec<CompressedFace<Surface>> {
         let mut surfaces = Arena::<SurfaceKind, Surface>::new();
-        shell
-            .cfs_faces_holder(self)
-            .filter_map(|(shell_ref, face)| {
-                let (orientation, reference, face) = self.face_any_resolved(face)?;
-                // The shell's own reference lands in whichever slot it actually
-                // names, and the other stays empty unless the file supplied it.
-                let (use_id, definition_id) = match reference {
-                    FaceReference::Definition => (None, shell_ref),
-                    FaceReference::Use { definition_id } => (shell_ref, definition_id),
-                };
-                Some((use_id, orientation, definition_id, face))
-            })
-            .filter_map(|(use_id, orientation, definition_id, face)| {
-                let (mut surface, surface_id) = self.face_surface(&face, &mut surfaces)?;
-                if !face.same_sense && std::env::var_os("TRUCK_NO_INVERT").is_none() {
-                    surface.invert()
-                }
-                // Same rule one level up: a face missing a bound is a broken
-                // face, not a simpler one. Dropping a failed bound here silently
-                // rewrites what the solid is — lose an inner bound and a hole
-                // fills in, lose the outer bound and the remaining holes are
-                // read as the outline. Both mesh perfectly happily.
-                let boundaries: Vec<_> = face
-                    .bounds_holder(self)
-                    .into_iter()
-                    .map(|bound| self.face_bound_to_edges(bound?, edges))
-                    .collect::<Option<Vec<TopologicallyClosedWire>>>()?
-                    .into_iter()
-                    // The proof is discharged here and nowhere earlier: truck's
-                    // `CompressedFace` takes bare index vectors, so this is the
-                    // boundary at which the guarantee stops travelling. Closing
-                    // it is §33a item 11 — `boundaries` becomes
-                    // `Vec<TopologicallyClosedWire>`, which the owned-fork
-                    // decision (§31a) now permits.
-                    .map(TopologicallyClosedWire::into_edges)
-                    .collect();
-                Some(CompressedFace {
-                    surface,
-                    boundaries,
-                    orientation,
-                    // The whole reference chain, not one collapsed id. Every
-                    // later complaint about this face can now name entities a
-                    // reader can grep out of the source file, and can say which
-                    // layer it means: the use the shell made, the face that use
-                    // resolved to, and the surface that face named.
+        let mut faces = Vec::new();
+        // One explicit loop rather than chained `filter_map`s: two closures
+        // cannot both hold `&mut losses`, and threading a cell through to keep
+        // the iterator style would be ceremony in exchange for nothing.
+        for (shell_ref, face) in shell.cfs_faces_holder(self) {
+            let Some((orientation, reference, face)) = self.face_any_resolved(face) else {
+                // The shell named something that is not a face it can resolve.
+                // All that is known is the reference itself.
+                losses.push(FaceLoss {
                     provenance: FaceProvenance {
-                        use_id: use_id.map(SourceEntityId::new),
-                        definition_id: definition_id.map(SourceEntityId::new),
-                        surface_id: surface_id.map(SourceEntityId::new),
+                        use_id: shell_ref.map(SourceEntityId::new),
+                        ..FaceProvenance::default()
                     },
+                    reason: FaceLossReason::FaceReferenceUnresolved,
+                });
+                continue;
+            };
+            // The shell's own reference lands in whichever slot it actually
+            // names, and the other stays empty unless the file supplied it.
+            let (use_id, definition_id) = match reference {
+                FaceReference::Definition => (None, shell_ref),
+                FaceReference::Use { definition_id } => (shell_ref, definition_id),
+            };
+            let partial = FaceProvenance {
+                use_id: use_id.map(SourceEntityId::new),
+                definition_id: definition_id.map(SourceEntityId::new),
+                surface_id: None,
+            };
+            let Some((mut surface, surface_id)) = self.face_surface(&face, &mut surfaces) else {
+                losses.push(FaceLoss {
+                    provenance: partial,
+                    reason: FaceLossReason::SurfaceConversionFailed,
+                });
+                continue;
+            };
+            let provenance = FaceProvenance {
+                surface_id: surface_id.map(SourceEntityId::new),
+                ..partial
+            };
+            if !face.same_sense && std::env::var_os("TRUCK_NO_INVERT").is_none() {
+                surface.invert()
+            }
+            // Same rule one level up: a face missing a bound is a broken face,
+            // not a simpler one. Dropping a failed bound here silently rewrites
+            // what the solid is -- lose an inner bound and a hole fills in, lose
+            // the outer bound and the remaining holes are read as the outline.
+            // Both mesh perfectly happily.
+            let wires = face
+                .bounds_holder(self)
+                .into_iter()
+                .map(|bound| {
+                    let bound = bound.ok_or(FaceLossReason::BoundReferenceUnresolved)?;
+                    self.face_bound_to_edges(bound, edges)
                 })
-            })
-            .collect()
+                .collect::<Result<Vec<TopologicallyClosedWire>, FaceLossReason>>();
+            let wires = match wires {
+                Ok(wires) => wires,
+                Err(reason) => {
+                    losses.push(FaceLoss { provenance, reason });
+                    continue;
+                }
+            };
+            faces.push(CompressedFace {
+                surface,
+                // The proof is discharged here and nowhere earlier: truck's
+                // `CompressedFace` takes bare index vectors, so this is the
+                // boundary at which the guarantee stops travelling. Closing it
+                // is §33a item 11 -- `boundaries` becomes
+                // `Vec<TopologicallyClosedWire>`, which the owned-fork decision
+                // (§31a) now permits.
+                boundaries: wires
+                    .into_iter()
+                    .map(TopologicallyClosedWire::into_edges)
+                    .collect(),
+                orientation,
+                // The whole reference chain, not one collapsed id. Every later
+                // complaint about this face can name entities a reader can grep
+                // out of the source file, and can say which layer it means.
+                provenance,
+            });
+        }
+        faces
     }
 
     /// Constructs `CompressedShell` of `truck` from `Shell` in STEP file
@@ -373,6 +420,15 @@ impl Table {
         shell: &impl StepShell,
     ) -> Result<CompressedShell<Point3, Curve3D, Surface>, StepConvertingError> {
         shell.to_compressed_shell(self)
+    }
+
+    /// As [`Self::to_compressed_shell`], and also why each lost face was lost.
+    pub fn to_compressed_shell_with_losses(
+        &self,
+        shell: &impl StepShell,
+    ) -> Result<(CompressedShell<Point3, Curve3D, Surface>, Vec<FaceLoss>), StepConvertingError>
+    {
+        shell.to_compressed_shell_with_losses(self)
     }
 
     /// Constructs `CompressedShell`s of `truck` from `ShellBasedSurfaceModel` in STEP file
@@ -644,57 +700,76 @@ pub trait StepShell {
     fn to_compressed_shell(
         &self,
         table: &Table,
-    ) -> Result<CompressedShell<Point3, Curve3D, Surface>, StepConvertingError>;
+    ) -> Result<CompressedShell<Point3, Curve3D, Surface>, StepConvertingError> {
+        self.to_compressed_shell_with_losses(table).map(|(shell, _)| shell)
+    }
+
+    /// The shell, plus one record per source face that did not survive.
+    ///
+    /// The plain conversion delegates to this rather than the reverse, so there
+    /// is exactly one conversion path and the census cannot drift away from
+    /// what the renderer actually does.
+    fn to_compressed_shell_with_losses(
+        &self,
+        table: &Table,
+    ) -> Result<(CompressedShell<Point3, Curve3D, Surface>, Vec<FaceLoss>), StepConvertingError>;
 }
 
 impl StepShell for ShellHolder {
-    fn to_compressed_shell(
+    fn to_compressed_shell_with_losses(
         &self,
         table: &Table,
-    ) -> Result<CompressedShell<Point3, Curve3D, Surface>, StepConvertingError> {
+    ) -> Result<(CompressedShell<Point3, Curve3D, Surface>, Vec<FaceLoss>), StepConvertingError>
+    {
         let vertices = table.shell_vertices(self);
         let edges = table.shell_edges(self, &vertices);
         // Faces are resolved while the arenas are still arenas, so a face can
         // only name an edge that converted. Only then are they flattened to the
         // bare vectors `CompressedShell` requires.
-        let faces = table.shell_faces(self, &edges);
-        Ok(CompressedShell {
-            vertices: vertices.into_items(),
-            edges: edges.into_items(),
-            faces,
-        })
+        let mut losses = Vec::new();
+        let faces = table.shell_faces(self, &edges, &mut losses);
+        Ok((
+            CompressedShell {
+                vertices: vertices.into_items(),
+                edges: edges.into_items(),
+                faces,
+            },
+            losses,
+        ))
     }
 }
 
 impl StepShell for OrientedShellHolder {
-    fn to_compressed_shell(
+    fn to_compressed_shell_with_losses(
         &self,
         table: &Table,
-    ) -> Result<CompressedShell<Point3, Curve3D, Surface>, StepConvertingError> {
+    ) -> Result<(CompressedShell<Point3, Curve3D, Surface>, Vec<FaceLoss>), StepConvertingError>
+    {
         let PlaceHolder::Ref(Name::Entity(idx)) = &self.shell_element else {
             return Err("failed to reference shell".into());
         };
         let Some(shell) = table.shell.get(idx) else {
             return Err("failed to reference shell".into());
         };
-        let mut res = shell.to_compressed_shell(table)?;
+        let (mut res, losses) = shell.to_compressed_shell_with_losses(table)?;
         if !self.orientation {
             for face in &mut res.faces {
                 face.orientation = !face.orientation;
             }
         }
-        Ok(res)
+        Ok((res, losses))
     }
 }
 
 impl StepShell for ShellAnyHolder {
-    fn to_compressed_shell(
+    fn to_compressed_shell_with_losses(
         &self,
         table: &Table,
-    ) -> Result<CompressedShell<Point3, Curve3D, Surface>, StepConvertingError> {
+    ) -> Result<(CompressedShell<Point3, Curve3D, Surface>, Vec<FaceLoss>), StepConvertingError>
+    {
         match self {
-            ShellAnyHolder::OrientedShell(shell) => shell.to_compressed_shell(table),
-            ShellAnyHolder::Shell(shell) => shell.to_compressed_shell(table),
+            ShellAnyHolder::OrientedShell(shell) => shell.to_compressed_shell_with_losses(table),
+            ShellAnyHolder::Shell(shell) => shell.to_compressed_shell_with_losses(table),
         }
     }
 }
@@ -925,4 +1000,67 @@ mod plane_angle_unit_tests {
             "the corrected slope must not be negative; that inversion is the blob"
         );
     }
+}
+
+/// Why a source face produced no `CompressedFace`.
+///
+/// Coarse on purpose. The point of a census is to order a repair queue, and a
+/// dozen categories that each name a real code path beat forty that require
+/// judgement to assign. Split a variant when its count is large enough that the
+/// split would change what gets fixed next, not before.
+///
+/// These cover conversion only. A face that converts and then meshes to nothing
+/// is lost later, in tessellation, and is counted there — the two populations
+/// have different causes and must not be summed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FaceLossReason {
+    /// The shell named something that does not resolve to a face at all.
+    FaceReferenceUnresolved,
+    /// The face's surface reference did not resolve, or its geometry could not
+    /// be converted. `OFFSET_SURFACE` lands here: it parses and then has no
+    /// conversion arm.
+    SurfaceConversionFailed,
+    /// A `FACE_BOUND`/`FACE_OUTER_BOUND` reference did not resolve.
+    BoundReferenceUnresolved,
+    /// The bound resolved, but the `EDGE_LOOP` it names did not.
+    ///
+    /// Split from `BoundReferenceUnresolved` once the census showed the pair
+    /// accounted for 45% of all lost faces on `00009190`: they are different
+    /// defects — a missing bound entity against a missing loop entity — and
+    /// deciding what to fix next requires knowing which.
+    LoopReferenceUnresolved,
+    /// An `ORIENTED_EDGE` in a bound did not resolve to an edge.
+    EdgeUseUnresolved,
+    /// The edge resolved as a reference but its curve did not convert, so no
+    /// arena position exists for it.
+    EdgeCurveConversionFailed,
+    /// Every edge resolved and the wire still does not close on vertex
+    /// identity, so it bounds nothing (`TOP-004`).
+    WireNotClosed,
+}
+
+impl FaceLossReason {
+    /// A short stable tag, for grouping a census.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::FaceReferenceUnresolved => "FaceReferenceUnresolved",
+            Self::SurfaceConversionFailed => "SurfaceConversionFailed",
+            Self::BoundReferenceUnresolved => "BoundReferenceUnresolved",
+            Self::LoopReferenceUnresolved => "LoopReferenceUnresolved",
+            Self::EdgeUseUnresolved => "EdgeUseUnresolved",
+            Self::EdgeCurveConversionFailed => "EdgeCurveConversionFailed",
+            Self::WireNotClosed => "WireNotClosed",
+        }
+    }
+}
+
+/// One source face that did not survive conversion, and why.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FaceLoss {
+    /// As much of the reference chain as was resolved before the failure.
+    ///
+    /// Partial by nature: a face whose surface reference failed has no surface
+    /// id to report, and reporting a fabricated one would defeat the purpose.
+    pub provenance: FaceProvenance,
+    pub reason: FaceLossReason,
 }
