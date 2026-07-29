@@ -170,14 +170,41 @@ where
             // over [-pi, 3pi], which is still two periods.
             let span = range.1 - range.0;
             let ratio = curve.period().map(|period| span / period);
+            // The radius the converted curve actually has. The source file's
+            // circles are a short, known inventory, so a converted radius that
+            // is not in it means the conversion built the wrong geometry for
+            // the right entity; one that is in it exonerates the curve and
+            // points at the face-to-surface pairing instead.
+            let fitted = {
+                let (t0, t1) = range;
+                let (a, b, c) = (
+                    curve.subs(t0),
+                    curve.subs(t0 + (t1 - t0) / 3.0),
+                    curve.subs(t0 + 2.0 * (t1 - t0) / 3.0),
+                );
+                let (ab, ac) = (b - a, c - a);
+                let normal = ab.cross(ac);
+                let n2 = normal.magnitude2();
+                match n2 > f64::EPSILON {
+                    true => {
+                        let centre = a
+                            + (ac.magnitude2() * ab.cross(normal)
+                                - ab.magnitude2() * ac.cross(normal))
+                                / (2.0 * n2);
+                        Some(centre.distance(a))
+                    }
+                    false => None,
+                }
+            };
             eprintln!(
                 "EDGE range=({:.6},{:.6}) span={span:.6} period={:?} span/period={:?} \
-                 same_vertex={}",
+                 same_vertex={} fitted_radius={:?}",
                 range.0,
                 range.1,
                 curve.period(),
                 ratio,
                 edge.vertices.0 == edge.vertices.1,
+                fitted.map(|r| (r * 1.0e5).round() / 1.0e5),
             );
         }
         CompressedEdge {
@@ -266,7 +293,7 @@ where
         };
         let create_boundary = |wire: &Vec<CompressedEdgeIndex>| {
             let wire_iter = wire.iter().filter_map(create_edge);
-            PolyBoundaryPiece::try_new(surface, wire_iter, &sp)
+            PolyBoundaryPiece::try_new(surface, wire_iter, &sp, tol)
         };
         let preboundary: Option<Vec<_>> = boundaries.iter().map(create_boundary).collect();
         let polygon: Option<PolygonMesh> = preboundary.map(|preboundary| {
@@ -301,7 +328,7 @@ fn shell_create_polygon<S: PreMeshableSurface>(
         .iter()
         .map(|wire: &Wire<_, _>| {
             let wire_iter = wire.iter().map(Edge::oriented_curve);
-            PolyBoundaryPiece::try_new(surface, wire_iter, &sp)
+            PolyBoundaryPiece::try_new(surface, wire_iter, &sp, tol)
         })
         .collect::<Option<Vec<_>>>();
     let polygon: Option<PolygonMesh> = preboundary.map(|preboundary| {
@@ -335,6 +362,7 @@ impl PolyBoundaryPiece {
         surface: &S,
         wire: impl Iterator<Item = PolylineCurve>,
         sp: impl SP<S>,
+        tol: f64,
     ) -> Option<Self> {
         let (up, vp) = (surface.u_period(), surface.v_period());
         let (urange, vrange) = surface.try_range_tuple();
@@ -387,6 +415,35 @@ impl PolyBoundaryPiece {
                     (None, true) => continue,
                     (None, false) => return None,
                 };
+                // A nearest point is not an incidence.
+                //
+                // `search_nearest_parameter` answers whether or not the query
+                // lies on the surface, so a boundary belonging to a different
+                // face still yields a plausible parameter, and the uv path
+                // built from it is smooth enough to triangulate into a large
+                // wrong region. Every symptom chased downstream of this — a
+                // doubled periodic winding, bounds landing in different period
+                // copies, a domain spanning the whole chart — was a reading of
+                // that path as though it meant something.
+                //
+                // The contract is that a face's boundary lies on its own
+                // surface. Check it where the answer is produced, and refuse
+                // the boundary rather than pass a fiction downstream. Measured
+                // on shell 160039: 0.027 against a 0.003 tolerance, nine times
+                // over, with no nearer solution anywhere in the domain.
+                if !synthetic {
+                    let residual = surface.subs(u, v).distance(pt);
+                    if residual > tol * COMPATIBILITY_FACTOR {
+                        if std::env::var_os("TRUCK_PROBE_COMPAT").is_some() {
+                            eprintln!(
+                                "COMPAT boundary point off surface: residual={residual:.4e} \
+                                 permitted={:.4e}",
+                                tol * COMPATIBILITY_FACTOR
+                            );
+                        }
+                        return None;
+                    }
+                }
                 let raw = (u, v);
                 if let (Some(up), Some((u0, _))) = (up, previous) {
                     u = get_mindiff(u, u0, up);
@@ -661,6 +718,16 @@ fn get_mindiff(u: f64, u0: f64, up: f64) -> f64 {
     // is cheaper.
     u + f64::round((u0 - u) / up) * up
 }
+
+/// How far a boundary point may sit from its own surface, as a multiple of the
+/// chord tolerance, before the pairing is refused.
+///
+/// A face's boundary is required to lie on that face's surface; this is the
+/// slack allowed for the chord approximation and for imperfect exports, not a
+/// licence to trim a surface with a curve belonging to something else. The
+/// observed failure sat at nine times tolerance, so this is not a borderline
+/// judgement.
+const COMPATIBILITY_FACTOR: f64 = 5.0;
 
 /// How far a step may advance, as a fraction of the period, before the periodic
 /// representative it implies is treated as ambiguous.

@@ -73,6 +73,9 @@ impl Table {
     ) -> (Vec<CompressedEdge<Curve3D>>, HashMap<u64, usize>) {
         use PlaceHolder::Ref;
         let mut eidx_map = HashMap::<u64, usize>::new();
+        // The source entity pushed at each position, so the map can be checked
+        // against the vector it indexes rather than trusted.
+        let mut source_ids = Vec::<u64>::new();
         let edge_curve_to_compressed_edge = |(idx, edge): (u64, EdgeCurveHolder)| {
             if eidx_map.contains_key(&idx) {
                 return None;
@@ -110,6 +113,7 @@ impl Table {
             // Counting the map is safe again only because an entry is now added
             // exactly when an edge is pushed, so the two lengths agree.
             eidx_map.insert(idx, eidx_map.len());
+            source_ids.push(idx);
             Some(CompressedEdge { vertices, curve })
         };
         let edges: Vec<CompressedEdge<Curve3D>> = shell
@@ -121,6 +125,39 @@ impl Table {
             .filter_map(move |edge| self.place_holder_edge_any_to_index_and_edge_curve(&edge))
             .filter_map(edge_curve_to_compressed_edge)
             .collect();
+        // Does every mapped index address the edge it names? Geometry can only
+        // ever say a face's boundary looks wrong; this says outright whether
+        // the index it was reached through identifies the right source entity.
+        if std::env::var_os("TRUCK_PROBE_IDENTITY").is_some() {
+            let mut mismatched = 0usize;
+            for (source, index) in &eidx_map {
+                match source_ids.get(*index) {
+                    Some(pushed) if pushed == *source => {}
+                    Some(pushed) => {
+                        mismatched += 1;
+                        if mismatched <= 5 {
+                            eprintln!(
+                                "IDENTITY edge #{source} maps to index {index}, \
+                                 which holds #{pushed}"
+                            );
+                        }
+                    }
+                    None => {
+                        mismatched += 1;
+                        eprintln!(
+                            "IDENTITY edge #{source} maps to index {index}, \
+                             past the end of {} edges",
+                            source_ids.len()
+                        );
+                    }
+                }
+            }
+            eprintln!(
+                "IDENTITY edges={} mapped={} mismatched={mismatched}",
+                edges.len(),
+                eidx_map.len(),
+            );
+        }
         (edges, eidx_map)
     }
     fn face_bound_to_edges(
@@ -176,7 +213,7 @@ impl Table {
                 let mut surface = Surface::try_from(&step_surface)
                     .map_err(|e| eprintln!("{e}"))
                     .ok()?;
-                if !face.same_sense {
+                if !face.same_sense && std::env::var_os("TRUCK_NO_INVERT").is_none() {
                     surface.invert()
                 }
                 let boundaries: Vec<_> = face
