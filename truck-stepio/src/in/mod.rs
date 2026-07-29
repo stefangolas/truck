@@ -16,6 +16,14 @@ use truck_assembly::assy::*;
 use truck_geometry::prelude as truck;
 use truck_topology::compress::*;
 
+/// Typed entity identities and the transactional arenas that convert into them
+pub mod arena;
+use arena::*;
+
+/// Face boundaries that are known to close
+pub mod wire;
+use wire::*;
+
 pub mod convert;
 /// Geometry parsed from STEP that can be handled by truck
 pub mod step_geometry;

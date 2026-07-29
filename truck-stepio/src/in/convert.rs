@@ -37,189 +37,258 @@ impl Table {
         }
     }
 
-    fn shell_vertices(&self, shell: &ShellHolder) -> (Vec<Point3>, HashMap<u64, usize>) {
+    fn shell_vertices(&self, shell: &ShellHolder) -> Arena<VertexKind, Point3> {
         use PlaceHolder::Ref;
-        let mut vidx_map = HashMap::<u64, usize>::new();
-        let vertex_to_point = |v: PlaceHolder<VertexPointHolder>| {
-            if let Ref(Name::Entity(ref idx)) = v {
-                if !vidx_map.contains_key(idx) {
-                    let len = vidx_map.len();
-                    vidx_map.insert(*idx, len);
-                    let p = EntityTable::<VertexPointHolder>::get_owned(self, *idx)
-                        .map_err(|e| eprintln!("{e}"))
-                        .ok()?;
-                    return Some(Point3::from(&p.vertex_geometry));
-                }
-            }
-            None
-        };
-        let vertices: Vec<Point3> = shell
+        // This carried the reserve-before-convert defect that was already fixed
+        // for edges: the position was inserted into the map, and only then was
+        // `get_owned` called, which can fail. The point was never pushed but the
+        // entry stayed, so every subsequent vertex was addressed one slot past
+        // where it sat. The arena removes the ordering question entirely — there
+        // is no way to express the claim before the conversion.
+        let mut arena = Arena::new();
+        let vertex_holders = shell
             .cfs_faces_holder(self)
             .filter_map(move |face| self.face_any_to_orientation_and_face(face))
             .flat_map(move |(_, face)| face.bounds_holder(self))
             .filter_map(move |bound| bound?.bound_holder(self))
             .flat_map(move |bound| bound.edge_list)
             .filter_map(move |edge| self.place_holder_edge_any_to_index_and_edge_curve(&edge))
-            .flat_map(move |(_, edge)| [edge.edge_start, edge.edge_end])
-            .filter_map(vertex_to_point)
-            .collect();
-        (vertices, vidx_map)
+            .flat_map(move |(_, edge)| [edge.edge_start, edge.edge_end]);
+        for holder in vertex_holders {
+            let Ref(Name::Entity(idx)) = holder else {
+                continue;
+            };
+            arena.get_or_try_insert(VertexPointId::new(idx), || {
+                let point = EntityTable::<VertexPointHolder>::get_owned(self, idx)
+                    .map_err(|e| eprintln!("{e}"))
+                    .ok()?;
+                Some(Point3::from(&point.vertex_geometry))
+            });
+        }
+        arena
     }
 
+    /// The `TRUCK_PROBE_IDENTITY` probe used to live here, checking after the
+    /// fact that every mapped index addressed the edge it named. It is gone
+    /// because the question it asked can no longer have a bad answer:
+    /// [`Arena::get_or_try_insert`] converts before it claims a position, so
+    /// map and vector cannot disagree (`TOP-002`). That is the promotion from
+    /// diagnostic to certificate the plan calls for — the check moved from
+    /// runtime to the shape of the code, and its regression lives in
+    /// `arena::tests`.
     fn shell_edges(
         &self,
         shell: &ShellHolder,
-        vidx_map: &HashMap<u64, usize>,
-    ) -> (Vec<CompressedEdge<Curve3D>>, HashMap<u64, usize>) {
+        vertices: &Arena<VertexKind, Point3>,
+    ) -> Arena<EdgeKind, CompressedEdge<Curve3D>> {
         use PlaceHolder::Ref;
-        let mut eidx_map = HashMap::<u64, usize>::new();
-        // The source entity pushed at each position, so the map can be checked
-        // against the vector it indexes rather than trusted.
-        let mut source_ids = Vec::<u64>::new();
-        let edge_curve_to_compressed_edge = |(idx, edge): (u64, EdgeCurveHolder)| {
-            if eidx_map.contains_key(&idx) {
-                return None;
-            }
-            let edge_curve = edge
-                .clone()
-                .into_owned(self)
-                .map_err(|e| eprintln!("{e}"))
-                .ok()?;
-            let curve = edge_curve
-                .parse_curve3d()
-                .map_err(|e| eprintln!("{e}"))
-                .ok()?;
-            let Ref(Name::Entity(front_idx)) = edge.edge_start else {
-                return None;
-            };
-            let Ref(Name::Entity(back_idx)) = edge.edge_end else {
-                return None;
-            };
-            let vertices = (*vidx_map.get(&front_idx)?, *vidx_map.get(&back_idx)?);
-            // Claim the index only now, when the edge is certain to be pushed.
-            //
-            // This used to be reserved before the conversion that decides
-            // whether the edge exists at all, and numbered from the map's own
-            // length. Every `?` above drops the edge from the collected vector
-            // while leaving its entry behind, so one failure desynchronised the
-            // two permanently and every later edge was mapped one slot past
-            // where it sits. Faces then silently received a neighbouring edge's
-            // curve — geometrically valid, but lying on a different surface, so
-            // its points do not lie on the face at all. Measured on shell
-            // 160039: a boundary point 0.027 from its own surface, nine times
-            // the chord tolerance, with no nearer solution anywhere in the
-            // parameter domain.
-            //
-            // Counting the map is safe again only because an entry is now added
-            // exactly when an edge is pushed, so the two lengths agree.
-            eidx_map.insert(idx, eidx_map.len());
-            source_ids.push(idx);
-            Some(CompressedEdge { vertices, curve })
-        };
-        let edges: Vec<CompressedEdge<Curve3D>> = shell
+        let mut arena = Arena::new();
+        let edge_curves = shell
             .cfs_faces_holder(self)
             .filter_map(move |face| self.face_any_to_orientation_and_face(face))
             .flat_map(move |(_, face)| face.bounds_holder(self))
             .filter_map(move |bound| bound?.bound_holder(self))
             .flat_map(move |bound| bound.edge_list)
-            .filter_map(move |edge| self.place_holder_edge_any_to_index_and_edge_curve(&edge))
-            .filter_map(edge_curve_to_compressed_edge)
-            .collect();
-        // Does every mapped index address the edge it names? Geometry can only
-        // ever say a face's boundary looks wrong; this says outright whether
-        // the index it was reached through identifies the right source entity.
-        if std::env::var_os("TRUCK_PROBE_IDENTITY").is_some() {
-            let mut mismatched = 0usize;
-            for (source, index) in &eidx_map {
-                match source_ids.get(*index) {
-                    Some(pushed) if pushed == *source => {}
-                    Some(pushed) => {
-                        mismatched += 1;
-                        if mismatched <= 5 {
-                            eprintln!(
-                                "IDENTITY edge #{source} maps to index {index}, \
-                                 which holds #{pushed}"
-                            );
-                        }
-                    }
-                    None => {
-                        mismatched += 1;
-                        eprintln!(
-                            "IDENTITY edge #{source} maps to index {index}, \
-                             past the end of {} edges",
-                            source_ids.len()
-                        );
-                    }
-                }
-            }
-            eprintln!(
-                "IDENTITY edges={} mapped={} mismatched={mismatched}",
-                edges.len(),
-                eidx_map.len(),
-            );
+            .filter_map(move |edge| self.place_holder_edge_any_to_index_and_edge_curve(&edge));
+        for (idx, edge) in edge_curves {
+            arena.get_or_try_insert(EdgeCurveId::new(idx), move || {
+                let edge_curve = edge
+                    .clone()
+                    .into_owned(self)
+                    .map_err(|e| eprintln!("{e}"))
+                    .ok()?;
+                let curve = edge_curve
+                    .parse_curve3d()
+                    .map_err(|e| eprintln!("{e}"))
+                    .ok()?;
+                let Ref(Name::Entity(front_idx)) = edge.edge_start else {
+                    return None;
+                };
+                let Ref(Name::Entity(back_idx)) = edge.edge_end else {
+                    return None;
+                };
+                // An edge whose endpoints did not convert is not an edge. The
+                // bare `usize` pair is what `CompressedEdge` demands, so this is
+                // one of the few places a `VertexIndex` has to be unwrapped, and
+                // it happens only after the lookup proved the vertex exists.
+                let endpoints = (
+                    vertices.index_of(VertexPointId::new(front_idx))?.position(),
+                    vertices.index_of(VertexPointId::new(back_idx))?.position(),
+                );
+                Some(CompressedEdge {
+                    vertices: endpoints,
+                    curve,
+                })
+            });
         }
-        (edges, eidx_map)
+        arena
     }
+    /// Follow a source reference to the position of the edge it names, having
+    /// checked that the position addresses that edge and no other.
+    ///
+    /// `TOP-001` at the point of use (`MATHEMATICAL_FOUNDATION.md` §22.2). The
+    /// arena's construction already makes the answer right, so this compare
+    /// never fires in a correct build; what it buys is that if it ever does,
+    /// the model reports which entity was asked for and which one was stored,
+    /// instead of rendering a curve from a neighbouring surface as a smooth
+    /// wrong region. One integer comparison per edge use — structural tier.
+    fn checked_edge_position(
+        edges: &Arena<EdgeKind, CompressedEdge<Curve3D>>,
+        named: EdgeCurveId,
+    ) -> Option<usize> {
+        let index = edges.index_of(named)?;
+        if let Err(mismatch) = edges.get_checked(index, named) {
+            eprintln!("{mismatch}");
+            return None;
+        }
+        Some(index.position())
+    }
+
     fn face_bound_to_edges(
         &self,
         bound: FaceBoundHolder,
-        eidx_map: &HashMap<u64, usize>,
-    ) -> Option<Vec<CompressedEdgeIndex>> {
+        edges: &Arena<EdgeKind, CompressedEdge<Curve3D>>,
+    ) -> Option<TopologicallyClosedWire> {
         use PlaceHolder::Ref;
         let ori = bound.orientation;
         let bound = bound.bound_holder(self)?;
-        let mut edges: Vec<CompressedEdgeIndex> = bound
+        // A bound missing an edge is a broken bound, not a shorter one.
+        //
+        // This collected through `filter_map`, so every `?` below dropped that
+        // edge from the wire and let the rest through. The result is a wire that
+        // no longer closes: the gap is bridged by whatever the next stage joins
+        // it to, and the face is then trimmed by a region its own file never
+        // described. Nothing downstream can detect this, because a short wire is
+        // indistinguishable from a wire that was always that shape.
+        //
+        // Collecting into `Option<Vec<_>>` makes the conversion total — every
+        // `ORIENTED_EDGE` the bound names resolves, or the bound does not exist.
+        // That also discharges the source-use versus resolved-use count check by
+        // construction rather than by assertion: the collect yields exactly as
+        // many indices as `edge_list` held, or it yields nothing.
+        let source_uses = bound.edge_list.len();
+        let mut wire: Vec<CompressedEdgeIndex> = bound
             .edge_list
             .into_iter()
-            .filter_map(|edge| {
+            .map(|edge| {
                 let Ref(Name::Entity(ref idx)) = edge else {
                     return None;
                 };
                 let edge_idx = if let Some(oriented_edge) = self.oriented_edge.get(idx) {
+                    let named = EdgeCurveId::new(oriented_edge.edge_element_idx()?);
                     CompressedEdgeIndex {
-                        index: *eidx_map.get(&oriented_edge.edge_element_idx()?)?,
+                        index: Self::checked_edge_position(edges, named)?,
                         orientation: oriented_edge.orientation == ori,
                     }
                 } else {
                     CompressedEdgeIndex {
-                        index: *eidx_map.get(idx)?,
+                        index: Self::checked_edge_position(edges, EdgeCurveId::new(*idx))?,
                         orientation: ori,
                     }
                 };
                 Some(edge_idx)
             })
-            .collect();
+            .collect::<Option<Vec<_>>>()?;
+        debug_assert!(
+            wire.is_empty() || wire.len() == source_uses,
+            "a resolved bound must use every edge its source named"
+        );
         if !ori {
-            edges.reverse();
+            wire.reverse();
         }
-        Some(edges)
+        // Every edge resolved, but that does not make this a boundary. The wire
+        // has to close, and it is checked in traversal order — after the
+        // reversal, since that is the order the face will be trimmed in.
+        TopologicallyClosedWire::try_new(wire, |position| {
+            edges.value_at(position).map(|edge| edge.vertices)
+        })
+    }
+
+    /// The supporting surface of a face, converted once per source entity.
+    ///
+    /// Surfaces are the third entity kind to resolve through the one generic
+    /// [`Arena`], and §51a is the whole reason it is that arena rather than a
+    /// third hand-written map: the reserve-before-convert defect was repaired
+    /// in the edge path and survived untouched in the vertex path for exactly
+    /// as long as the repair was site-local. A contract is discharged when the
+    /// invalid transition has one implementation that cannot express the bad
+    /// state — not when every site anyone has looked at is correct.
+    ///
+    /// The arena stores the surface **as the file describes it**. `same_sense`
+    /// inversion is a property of the *face*, so it is applied to the copy a
+    /// face takes and never to the canonical entity: two faces may share one
+    /// `CYLINDRICAL_SURFACE` and disagree about sense, and inverting in place
+    /// would let the first face rewrite the second's geometry.
+    ///
+    /// **Cost** (§29a): one retained surface per distinct source entity for the
+    /// duration of one shell, against one conversion per *face* before. Shared
+    /// surfaces now convert once; the arena is dropped when the shell's faces
+    /// are built. `CompressedFace` still owns its surface by value, so the copy
+    /// is unavoidable until §33a item 11 replaces it with a `SurfaceIndex`.
+    ///
+    /// **Contracts:** `TOP-001`, `TOP-002`, `TOP-007` for surfaces.
+    fn face_surface(
+        &self,
+        face: &FaceSurfaceHolder,
+        surfaces: &mut Arena<SurfaceKind, Surface>,
+    ) -> Option<Surface> {
+        let convert = || {
+            let step_surface: SurfaceAny = face
+                .face_geometry
+                .clone()
+                .into_owned(self)
+                .map_err(|e| eprintln!("{e}"))
+                .ok()?;
+            Surface::try_from(&step_surface)
+                .map_err(|e| eprintln!("{e}"))
+                .ok()
+        };
+        // An inline owned surface has no entity id, so there is no identity to
+        // be canonical about: it belongs to this face alone.
+        let PlaceHolder::Ref(Name::Entity(idx)) = &face.face_geometry else {
+            return convert();
+        };
+        let named = SurfaceId::new(*idx);
+        let index = surfaces.get_or_try_insert(named, convert)?;
+        surfaces
+            .get_checked(index, named)
+            .map_err(|mismatch| eprintln!("{mismatch}"))
+            .ok()
+            .cloned()
     }
 
     fn shell_faces(
         &self,
         shell: &ShellHolder,
-        eidx_map: &HashMap<u64, usize>,
+        edges: &Arena<EdgeKind, CompressedEdge<Curve3D>>,
     ) -> Vec<CompressedFace<Surface>> {
+        let mut surfaces = Arena::<SurfaceKind, Surface>::new();
         shell
             .cfs_faces_holder(self)
             .filter_map(|face| self.face_any_to_orientation_and_face(face))
             .filter_map(|(orientation, face)| {
-                let step_surface: SurfaceAny = face
-                    .face_geometry
-                    .clone()
-                    .into_owned(self)
-                    .map_err(|e| eprintln!("{e}"))
-                    .ok()?;
-                let mut surface = Surface::try_from(&step_surface)
-                    .map_err(|e| eprintln!("{e}"))
-                    .ok()?;
+                let mut surface = self.face_surface(&face, &mut surfaces)?;
                 if !face.same_sense && std::env::var_os("TRUCK_NO_INVERT").is_none() {
                     surface.invert()
                 }
+                // Same rule one level up: a face missing a bound is a broken
+                // face, not a simpler one. Dropping a failed bound here silently
+                // rewrites what the solid is — lose an inner bound and a hole
+                // fills in, lose the outer bound and the remaining holes are
+                // read as the outline. Both mesh perfectly happily.
                 let boundaries: Vec<_> = face
                     .bounds_holder(self)
                     .into_iter()
-                    .filter_map(|bound| self.face_bound_to_edges(bound?, eidx_map))
+                    .map(|bound| self.face_bound_to_edges(bound?, edges))
+                    .collect::<Option<Vec<TopologicallyClosedWire>>>()?
+                    .into_iter()
+                    // The proof is discharged here and nowhere earlier: truck's
+                    // `CompressedFace` takes bare index vectors, so this is the
+                    // boundary at which the guarantee stops travelling. Closing
+                    // it is §33a item 11 — `boundaries` becomes
+                    // `Vec<TopologicallyClosedWire>`, which the owned-fork
+                    // decision (§31a) now permits.
+                    .map(TopologicallyClosedWire::into_edges)
                     .collect();
                 Some(CompressedFace {
                     surface,
@@ -532,12 +601,16 @@ impl StepShell for ShellHolder {
         &self,
         table: &Table,
     ) -> Result<CompressedShell<Point3, Curve3D, Surface>, StepConvertingError> {
-        let (vertices, vidx_map) = table.shell_vertices(self);
-        let (edges, eidx_map) = table.shell_edges(self, &vidx_map);
+        let vertices = table.shell_vertices(self);
+        let edges = table.shell_edges(self, &vertices);
+        // Faces are resolved while the arenas are still arenas, so a face can
+        // only name an edge that converted. Only then are they flattened to the
+        // bare vectors `CompressedShell` requires.
+        let faces = table.shell_faces(self, &edges);
         Ok(CompressedShell {
-            vertices,
-            edges,
-            faces: table.shell_faces(self, &eidx_map),
+            vertices: vertices.into_items(),
+            edges: edges.into_items(),
+            faces,
         })
     }
 }
