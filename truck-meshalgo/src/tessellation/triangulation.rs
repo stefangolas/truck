@@ -189,6 +189,74 @@ where
     let edges: Vec<_> = shell.edges.par_iter().map(tessellate_edge).collect();
     #[cfg(target_arch = "wasm32")]
     let edges: Vec<_> = shell.edges.iter().map(tessellate_edge).collect();
+    // Which surface in this shell does a face's own boundary actually lie on?
+    //
+    // A residual says the boundary and the surface it was handed are
+    // incompatible; it does not say whether the pairing is wrong or one of the
+    // entities is built wrong. Testing the boundary against *every* surface in
+    // the shell separates them. If another surface fits to near zero, this is
+    // an association defect and the correct partner is named. If none fits, one
+    // of the two entities is constructed incorrectly.
+    if std::env::var_os("TRUCK_PROBE_ASSOC").is_some() {
+        const GRID: usize = 60;
+        let nearest = |surface: &S, point: Point3| {
+            let (urange, vrange) = surface.try_range_tuple();
+            let axis = |range: Option<(f64, f64)>, period: Option<f64>| match (range, period) {
+                (Some(r), _) => r,
+                (None, Some(p)) => (-p, p),
+                (None, None) => (-1.0, 1.0),
+            };
+            let (ulo, uhi) = axis(urange, surface.u_period());
+            let (vlo, vhi) = axis(vrange, surface.v_period());
+            let mut best = f64::INFINITY;
+            for i in 0..=GRID {
+                let u = ulo + (uhi - ulo) * i as f64 / GRID as f64;
+                for j in 0..=GRID {
+                    let v = vlo + (vhi - vlo) * j as f64 / GRID as f64;
+                    best = best.min(surface.subs(u, v).distance(point));
+                }
+            }
+            best
+        };
+        for (index, face) in shell.faces.iter().enumerate() {
+            // A handful of boundary samples is enough to decide a pairing.
+            let samples: Vec<Point3> = face
+                .boundaries
+                .iter()
+                .flatten()
+                .filter_map(|e| edges.get(e.index))
+                .flat_map(|e| e.curve.iter().copied())
+                .step_by(3)
+                .take(8)
+                .collect();
+            if samples.is_empty() {
+                continue;
+            }
+            let worst = |surface: &S| {
+                samples
+                    .iter()
+                    .fold(0.0_f64, |acc, p| acc.max(nearest(surface, *p)))
+            };
+            let own = worst(&face.surface);
+            if own <= tol * 3.0 {
+                continue;
+            }
+            let mut best = (usize::MAX, f64::INFINITY);
+            for (other, candidate) in shell.faces.iter().enumerate() {
+                if other == index {
+                    continue;
+                }
+                let d = worst(&candidate.surface);
+                if d < best.1 {
+                    best = (other, d);
+                }
+            }
+            eprintln!(
+                "ASSOC face={index} own={own:.4e} best_other=face{} at {:.4e} tol={tol:.4e}",
+                best.0, best.1
+            );
+        }
+    }
     let tessellate_face = |face: &CompressedFace<S>| {
         let boundaries = face.boundaries.clone();
         let surface = &face.surface;
