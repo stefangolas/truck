@@ -304,6 +304,11 @@ where
             boundaries,
             orientation: face.orientation,
             surface: polygon,
+            // Tessellation is the stage most likely to produce nothing, so it
+            // is the stage that most needs to say which face produced nothing.
+            // `polygon` is `None` on failure, and the identity is then the only
+            // thing left that can name what was lost.
+            provenance: face.provenance,
         }
     };
     #[cfg(not(target_arch = "wasm32"))]

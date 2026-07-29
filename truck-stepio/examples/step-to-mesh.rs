@@ -144,6 +144,7 @@ fn output_vtk(polyshells: Vec<MeshedCShell>, path: &Path) {
                             boundaries: face.boundaries,
                             orientation: face.orientation,
                             surface: face.surface?,
+                            provenance: face.provenance,
                         })
                     })
                     .collect();

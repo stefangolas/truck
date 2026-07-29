@@ -769,6 +769,7 @@ fn divide_face<S: ParametricSurface3D>(
         ref mut boundaries,
         ref surface,
         ref orientation,
+        ref provenance,
     }: &mut Face<S>,
     new_boundaries: Vec<Wire>,
     poly_edges: &[PolylineCurve<Point3>],
@@ -776,10 +777,15 @@ fn divide_face<S: ParametricSurface3D>(
 ) -> Option<Vec<Face<S>>> {
     let mut face_boundaries = assort_boundary(surface, new_boundaries, poly_edges, sp)?.into_iter();
     *boundaries = face_boundaries.next().unwrap();
+    // Splitting one face yields several, and every piece came from the same
+    // source entity. Sharing the id is the truthful record: provenance answers
+    // "which entity is this geometry from", not "which face object is it", so
+    // a one-to-many split does not dilute it.
     let create_face = |boundaries| Face {
         boundaries,
         surface: surface.clone(),
         orientation: *orientation,
+        provenance: *provenance,
     };
     Some(face_boundaries.map(create_face).collect())
 }

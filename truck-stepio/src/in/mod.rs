@@ -2842,25 +2842,36 @@ pub struct Shell {
 }
 
 impl ShellHolder {
+    /// The shell's faces, each paired with the entity the shell named to reach
+    /// it.
+    ///
+    /// The id is what `cfs_faces` *names* — an `ORIENTED_FACE` where the file
+    /// used one, otherwise the `FACE_SURFACE`. That is the honest provenance:
+    /// it is the reference a failure report should quote back, because it is
+    /// the one a reader can find in the file. An inline owned face has no id,
+    /// and gets `None` rather than a fabricated one.
     fn cfs_faces_holder<'a>(
         &'a self,
         table: &'a Table,
-    ) -> impl Iterator<Item = Option<FaceAnyHolder>> + 'a {
+    ) -> impl Iterator<Item = (Option<u64>, Option<FaceAnyHolder>)> + 'a {
         self.cfs_faces.iter().map(|face| match face {
-            PlaceHolder::Owned(holder) => Some(holder.clone()),
-            PlaceHolder::Ref(Name::Entity(ref idx)) => table
-                .oriented_face
-                .get(idx)
-                .cloned()
-                .map(FaceAnyHolder::OrientedFace)
-                .or_else(|| {
-                    table
-                        .face_surface
-                        .get(idx)
-                        .cloned()
-                        .map(FaceAnyHolder::FaceSurface)
-                }),
-            _ => None,
+            PlaceHolder::Owned(holder) => (None, Some(holder.clone())),
+            PlaceHolder::Ref(Name::Entity(ref idx)) => (
+                Some(*idx),
+                table
+                    .oriented_face
+                    .get(idx)
+                    .cloned()
+                    .map(FaceAnyHolder::OrientedFace)
+                    .or_else(|| {
+                        table
+                            .face_surface
+                            .get(idx)
+                            .cloned()
+                            .map(FaceAnyHolder::FaceSurface)
+                    }),
+            ),
+            _ => (None, None),
         })
     }
 }

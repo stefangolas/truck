@@ -43,6 +43,106 @@ impl From<(usize, bool)> for CompressedEdgeIndex {
     fn from((index, orientation): (usize, bool)) -> Self { Self { index, orientation } }
 }
 
+/// The identity of an entity in the document an object was imported from.
+///
+/// An importer that knows which entity something came from — a STEP file writes
+/// them as `#1234` — records it so that later stages can name what they are
+/// complaining about. Without it a failure can only be counted, and "604 of
+/// 24202 faces produced no geometry" localises nothing.
+///
+/// Opaque and importer-agnostic: `truck-topology` carries the number and does
+/// not interpret it.
+///
+/// **Document-local.** `#1234` in one file has nothing to do with `#1234` in
+/// another. Comparing ids across documents, or using one as a key in a
+/// structure spanning several, is meaningless. Nothing here associates an id
+/// with the document it came from, so that association is the caller's
+/// obligation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SourceEntityId(u64);
+
+impl SourceEntityId {
+    /// Name an entity of the document being imported.
+    pub const fn new(value: u64) -> Self { Self(value) }
+    /// The underlying number, for printing and for importer-side lookups.
+    pub const fn get(self) -> u64 { self.0 }
+}
+
+impl std::fmt::Display for SourceEntityId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#{}", self.0)
+    }
+}
+
+/// Where an imported face came from, as a chain rather than a single name.
+///
+/// A B-rep document distinguishes a **use** of a face from the **definition**
+/// of that face, and both from the surface the definition names. STEP spells
+/// the chain
+///
+/// ```text
+/// shell → ORIENTED_FACE (use) → FACE_SURFACE (definition) → surface geometry
+/// ```
+///
+/// and other formats make the same distinction under other names, which is why
+/// the field names here are generic. Several uses may resolve to one
+/// definition, orientation is composed at the use layer, and geometry is shared
+/// at the surface layer — so collapsing the chain to one id makes exactly the
+/// failures one wants to tell apart indistinguishable: a wrong shell-use
+/// orientation, a wrong underlying face, a wrong face-to-surface association,
+/// and a duplicated use all reduce to the same ambiguous number.
+///
+/// Every field is optional because a document may inline a definition instead
+/// of referencing it — STEP's `PlaceHolder::Owned` — and because a face built
+/// by modelling or by a healing pass was imported from nothing at all.
+/// Fabricating an id in either case would make provenance unfalsifiable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FaceProvenance {
+    /// The entity the containing shell referenced to reach this face.
+    ///
+    /// A *use*: it carries orientation, and two of them may name one
+    /// definition.
+    pub use_id: Option<SourceEntityId>,
+    /// The entity that defines the face — its bounds and its surface reference.
+    pub definition_id: Option<SourceEntityId>,
+    /// The entity defining the face's supporting surface.
+    ///
+    /// Separate from the definition because one surface is commonly shared by
+    /// many faces, so "which surface did this face name" is a different
+    /// question from "which face is this".
+    pub surface_id: Option<SourceEntityId>,
+}
+
+impl FaceProvenance {
+    /// True when nothing at all is known — an unimported face.
+    pub fn is_empty(self) -> bool {
+        self.use_id.is_none() && self.definition_id.is_none() && self.surface_id.is_none()
+    }
+
+    /// The most specific identity available for naming this face in one word.
+    ///
+    /// Prefers the definition: it is the thing a reader is usually looking for,
+    /// and it is stable across the several uses that may reach it.
+    pub fn best_id(self) -> Option<SourceEntityId> {
+        self.definition_id.or(self.use_id).or(self.surface_id)
+    }
+}
+
+impl std::fmt::Display for FaceProvenance {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match (self.use_id, self.definition_id) {
+            (Some(u), Some(d)) => write!(f, "face use {u} of face {d}")?,
+            (Some(u), None) => write!(f, "face use {u}")?,
+            (None, Some(d)) => write!(f, "face {d}")?,
+            (None, None) => write!(f, "unimported face")?,
+        }
+        if let Some(s) = self.surface_id {
+            write!(f, ", surface {s}")?;
+        }
+        Ok(())
+    }
+}
+
 /// Serialized compressed face
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompressedFace<S> {
@@ -52,6 +152,33 @@ pub struct CompressedFace<S> {
     pub orientation: bool,
     /// surface geometry of the face
     pub surface: S,
+    /// where this face came from, when it was imported from a document
+    ///
+    /// Every stage that rebuilds a face must carry this through, or the
+    /// identity is lost exactly where a failure is about to need it.
+    ///
+    /// Note that this records what the importer *asserted*, and conserving it
+    /// downstream is a weaker claim than it being right. That the stored chain
+    /// matches the document is a separate obligation, discharged where the
+    /// references are read, not here.
+    #[serde(default)]
+    pub provenance: FaceProvenance,
+}
+
+impl<S: PartialEq> CompressedFace<S> {
+    /// Compare the face as geometry and topology, ignoring where it came from.
+    ///
+    /// `PartialEq` on this type is **whole-record** equality and includes
+    /// provenance, so two faces of identical shape imported from different
+    /// entities are not equal. That is the right default for a serialized
+    /// record — a round trip must preserve everything — but it is the wrong
+    /// question for healing, deduplication, or a test comparing shapes. Ask
+    /// that question with this.
+    pub fn geometrically_eq(&self, other: &Self) -> bool {
+        self.boundaries == other.boundaries
+            && self.orientation == other.orientation
+            && self.surface == other.surface
+    }
 }
 
 impl<S> CompressedFace<S> {
@@ -152,6 +279,12 @@ impl<P: Clone, C: Clone> CompressDirector<P, C> {
                 .collect(),
             orientation: face.orientation(),
             surface: face.surface(),
+            // Compressing an in-memory `Face` recovers no importer identity:
+            // a `Face` is the editable form and carries none. Anything that
+            // round-trips through it loses provenance, which is a real
+            // limitation and is better stated as `None` than papered over with
+            // the face's position in some vector.
+            provenance: FaceProvenance::default(),
         }
     }
 

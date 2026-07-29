@@ -28,11 +28,41 @@ impl Table {
         &self,
         face: Option<FaceAnyHolder>,
     ) -> Option<(bool, FaceSurfaceHolder)> {
+        let (orientation, _, face) = self.face_any_resolved(face)?;
+        Some((orientation, face))
+    }
+
+    /// Resolve a shell's face reference to its orientation, the id of the
+    /// `FACE_SURFACE` that *defines* it, and the definition itself.
+    ///
+    /// The definition id is deliberately kept apart from whatever the shell
+    /// named to get here. An `ORIENTED_FACE` is a *use*: it contributes
+    /// orientation, and several uses may resolve to one `FACE_SURFACE`.
+    /// Reporting the use where the definition is meant — or the reverse — makes
+    /// a wrong shell-use orientation indistinguishable from a wrong underlying
+    /// face, which is precisely the distinction this stage exists to preserve.
+    fn face_any_resolved(
+        &self,
+        face: Option<FaceAnyHolder>,
+    ) -> Option<(bool, FaceReference, FaceSurfaceHolder)> {
         match face? {
-            FaceAnyHolder::FaceSurface(face) => Some((true, face)),
+            // The shell named the definition directly. There is no use entity
+            // in this file at all, and claiming one — by copying the shell's
+            // reference into the use slot — would be the very conflation this
+            // split exists to remove.
+            FaceAnyHolder::FaceSurface(face) => Some((true, FaceReference::Definition, face)),
             FaceAnyHolder::OrientedFace(oriented_face) => {
+                let definition_id = match &oriented_face.face_element {
+                    PlaceHolder::Ref(Name::Entity(idx)) => Some(*idx),
+                    // An inlined definition has no id to report.
+                    _ => None,
+                };
                 let face_element = oriented_face.face_element_holder(self)?;
-                Some((oriented_face.orientation, face_element))
+                Some((
+                    oriented_face.orientation,
+                    FaceReference::Use { definition_id },
+                    face_element,
+                ))
             }
         }
     }
@@ -48,7 +78,7 @@ impl Table {
         let mut arena = Arena::new();
         let vertex_holders = shell
             .cfs_faces_holder(self)
-            .filter_map(move |face| self.face_any_to_orientation_and_face(face))
+            .filter_map(move |(_, face)| self.face_any_to_orientation_and_face(face))
             .flat_map(move |(_, face)| face.bounds_holder(self))
             .filter_map(move |bound| bound?.bound_holder(self))
             .flat_map(move |bound| bound.edge_list)
@@ -85,7 +115,7 @@ impl Table {
         let mut arena = Arena::new();
         let edge_curves = shell
             .cfs_faces_holder(self)
-            .filter_map(move |face| self.face_any_to_orientation_and_face(face))
+            .filter_map(move |(_, face)| self.face_any_to_orientation_and_face(face))
             .flat_map(move |(_, face)| face.bounds_holder(self))
             .filter_map(move |bound| bound?.bound_holder(self))
             .flat_map(move |bound| bound.edge_list)
@@ -231,7 +261,7 @@ impl Table {
         &self,
         face: &FaceSurfaceHolder,
         surfaces: &mut Arena<SurfaceKind, Surface>,
-    ) -> Option<Surface> {
+    ) -> Option<(Surface, Option<u64>)> {
         let convert = || {
             let step_surface: SurfaceAny = face
                 .face_geometry
@@ -244,17 +274,19 @@ impl Table {
                 .ok()
         };
         // An inline owned surface has no entity id, so there is no identity to
-        // be canonical about: it belongs to this face alone.
+        // be canonical about: it belongs to this face alone, and it has no
+        // surface provenance to report.
         let PlaceHolder::Ref(Name::Entity(idx)) = &face.face_geometry else {
-            return convert();
+            return Some((convert()?, None));
         };
         let named = SurfaceId::new(*idx);
         let index = surfaces.get_or_try_insert(named, convert)?;
-        surfaces
+        let surface = surfaces
             .get_checked(index, named)
             .map_err(|mismatch| eprintln!("{mismatch}"))
             .ok()
-            .cloned()
+            .cloned()?;
+        Some((surface, Some(*idx)))
     }
 
     fn shell_faces(
@@ -265,9 +297,18 @@ impl Table {
         let mut surfaces = Arena::<SurfaceKind, Surface>::new();
         shell
             .cfs_faces_holder(self)
-            .filter_map(|face| self.face_any_to_orientation_and_face(face))
-            .filter_map(|(orientation, face)| {
-                let mut surface = self.face_surface(&face, &mut surfaces)?;
+            .filter_map(|(shell_ref, face)| {
+                let (orientation, reference, face) = self.face_any_resolved(face)?;
+                // The shell's own reference lands in whichever slot it actually
+                // names, and the other stays empty unless the file supplied it.
+                let (use_id, definition_id) = match reference {
+                    FaceReference::Definition => (None, shell_ref),
+                    FaceReference::Use { definition_id } => (shell_ref, definition_id),
+                };
+                Some((use_id, orientation, definition_id, face))
+            })
+            .filter_map(|(use_id, orientation, definition_id, face)| {
+                let (mut surface, surface_id) = self.face_surface(&face, &mut surfaces)?;
                 if !face.same_sense && std::env::var_os("TRUCK_NO_INVERT").is_none() {
                     surface.invert()
                 }
@@ -294,6 +335,16 @@ impl Table {
                     surface,
                     boundaries,
                     orientation,
+                    // The whole reference chain, not one collapsed id. Every
+                    // later complaint about this face can now name entities a
+                    // reader can grep out of the source file, and can say which
+                    // layer it means: the use the shell made, the face that use
+                    // resolved to, and the surface that face named.
+                    provenance: FaceProvenance {
+                        use_id: use_id.map(SourceEntityId::new),
+                        definition_id: definition_id.map(SourceEntityId::new),
+                        surface_id: surface_id.map(SourceEntityId::new),
+                    },
                 })
             })
             .collect()
@@ -645,5 +696,107 @@ impl StepShell for ShellAnyHolder {
             ShellAnyHolder::OrientedShell(shell) => shell.to_compressed_shell(table),
             ShellAnyHolder::Shell(shell) => shell.to_compressed_shell(table),
         }
+    }
+}
+
+/// Which layer of the face reference chain a shell named directly.
+///
+/// STEP shells may reference either layer, and the two are not
+/// interchangeable: an `ORIENTED_FACE` is a use that contributes orientation
+/// and may share its `FACE_SURFACE` with other uses. Recording which one was
+/// found keeps `FaceProvenance` from claiming a use entity that the file never
+/// wrote.
+enum FaceReference {
+    /// The shell named a `FACE_SURFACE`. There is no use entity.
+    Definition,
+    /// The shell named an `ORIENTED_FACE`, which resolved to this definition.
+    Use { definition_id: Option<u64> },
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+
+    /// A `FACE_SURFACE` with no bounds. Only its identity matters here.
+    fn face_surface() -> FaceSurfaceHolder {
+        FaceSurfaceHolder {
+            label: String::new(),
+            bounds: Vec::new(),
+            face_geometry: PlaceHolder::Ref(Name::Entity(700)),
+            same_sense: true,
+        }
+    }
+
+    /// A shell naming an `ORIENTED_FACE` must yield a use id *and* a separately
+    /// resolved definition id.
+    ///
+    /// This is the branch no file in either corpus exercises — all 33 NIST
+    /// models and the ABC models checked name `ADVANCED_FACE` directly — so
+    /// without this test the half of the split that motivated it would be
+    /// unrun. Compiling is not evidence.
+    #[test]
+    fn an_oriented_face_reports_use_and_definition_separately() {
+        let mut table = Table::default();
+        table.face_surface.insert(402, face_surface());
+        table.oriented_face.insert(
+            811,
+            OrientedFaceHolder {
+                label: String::new(),
+                face_element: PlaceHolder::Ref(Name::Entity(402)),
+                orientation: false,
+            },
+        );
+
+        let holder = table.oriented_face.get(&811).cloned().unwrap();
+        let (orientation, reference, _) = table
+            .face_any_resolved(Some(FaceAnyHolder::OrientedFace(holder)))
+            .expect("the oriented face resolves");
+
+        assert!(!orientation, "the use carries the orientation flag");
+        match reference {
+            FaceReference::Use { definition_id } => assert_eq!(
+                definition_id,
+                Some(402),
+                "the definition is the FACE_SURFACE, not the use"
+            ),
+            FaceReference::Definition => panic!("an ORIENTED_FACE is a use, not a definition"),
+        }
+    }
+
+    /// A shell naming a `FACE_SURFACE` directly has no use entity at all, and
+    /// must not invent one by copying the reference into the use slot — which
+    /// is exactly what an earlier version did, printing "face use #43172 of
+    /// face #43172".
+    #[test]
+    fn a_direct_face_surface_reference_has_no_use() {
+        let table = Table::default();
+        let (orientation, reference, _) = table
+            .face_any_resolved(Some(FaceAnyHolder::FaceSurface(face_surface())))
+            .expect("the face surface resolves");
+
+        assert!(orientation, "a definition carries no orientation of its own");
+        assert!(
+            matches!(reference, FaceReference::Definition),
+            "a direct reference names the definition"
+        );
+    }
+
+    /// The surface reference is a third, independent identity: one surface is
+    /// commonly shared by many faces, so "which surface did this face name" is
+    /// not answered by either of the other two ids.
+    #[test]
+    fn the_surface_identity_is_recorded_separately() {
+        let table = Table::default();
+        let provenance = FaceProvenance {
+            use_id: Some(SourceEntityId::new(811)),
+            definition_id: Some(SourceEntityId::new(402)),
+            surface_id: Some(SourceEntityId::new(91)),
+        };
+        assert_eq!(
+            provenance.to_string(),
+            "face use #811 of face #402, surface #91"
+        );
+        assert_eq!(provenance.best_id(), Some(SourceEntityId::new(402)));
+        let _ = table;
     }
 }

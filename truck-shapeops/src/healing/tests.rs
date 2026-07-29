@@ -18,6 +18,7 @@ fn test_split_closed_edges() {
                 index: 0,
                 orientation: true,
             }]],
+            provenance: Default::default(),
         },
         CompressedFace {
             surface: (),
@@ -26,6 +27,7 @@ fn test_split_closed_edges() {
                 index: 0,
                 orientation: false,
             }]],
+            provenance: Default::default(),
         },
     ];
     let mut shell = CompressedShell {
@@ -67,6 +69,7 @@ fn test_split_closed_edges() {
                         orientation: true,
                     }
                 ]],
+                provenance: Default::default(),
             },
             CompressedFace {
                 surface: (),
@@ -81,6 +84,7 @@ fn test_split_closed_edges() {
                         orientation: false,
                     }
                 ]],
+                provenance: Default::default(),
             },
         ]
     );
@@ -935,6 +939,7 @@ fn too_simple_cylinder() {
         ],
         surface,
         orientation: true,
+        provenance: Default::default(),
     }];
 
     let mut shell = CompressedShell {
@@ -1166,6 +1171,7 @@ fn double_closed_boundary_cylinder() {
         ],
         surface,
         orientation: true,
+        provenance: Default::default(),
     }];
     let mut shell = CompressedShell {
         vertices,
@@ -1283,6 +1289,7 @@ fn double_closed_boundary_cylinder() {
                 ]],
                 surface,
                 orientation: true,
+                provenance: Default::default(),
             },
             CompressedFace {
                 boundaries: vec![vec![
@@ -1321,6 +1328,7 @@ fn double_closed_boundary_cylinder() {
                 ]],
                 surface,
                 orientation: true,
+                provenance: Default::default(),
             },
         ]
     );
@@ -1428,6 +1436,7 @@ fn many_closed_boundary_cylinder() {
         boundaries,
         surface,
         orientation: true,
+        provenance: Default::default(),
     }];
     let mut shell = CompressedShell {
         vertices,
