@@ -469,9 +469,46 @@ impl PolyBoundaryPiece {
                     d_min = d_min.min(surface.subs(u, v).distance(target));
                 }
             }
+            // The structure of the residual, not just its size, says which
+            // upstream error produced it. A constant world-space vector is a
+            // missing translation. A constant magnitude aligned with the
+            // surface normal is a radius or offset error. Neither pattern
+            // holding means the entities are unrelated rather than
+            // misplaced.
+            let residuals: Vec<_> = vec
+                .iter()
+                .map(|s| s.point - surface.subs(s.uv.x, s.uv.y))
+                .collect();
+            let mean = residuals
+                .iter()
+                .fold(Vector3::zero(), |acc, r| acc + r)
+                / residuals.len() as f64;
+            let spread = residuals
+                .iter()
+                .fold(0.0_f64, |worst, r| worst.max((r - mean).magnitude()));
+            let (mut mag_lo, mut mag_hi) = (f64::INFINITY, 0.0_f64);
+            let mut normal_alignment = 0.0;
+            for (r, s) in residuals.iter().zip(&vec) {
+                let magnitude = r.magnitude();
+                mag_lo = mag_lo.min(magnitude);
+                mag_hi = mag_hi.max(magnitude);
+                let normal = surface
+                    .uder(s.uv.x, s.uv.y)
+                    .cross(surface.vder(s.uv.x, s.uv.y));
+                if magnitude > 0.0 && normal.magnitude() > 0.0 {
+                    normal_alignment +=
+                        f64::abs(r.dot(normal.normalize()) / magnitude);
+                }
+            }
+            normal_alignment /= residuals.len() as f64;
             eprintln!(
                 "PERIOD e_p={e_p:.3e} e_2p={e_2p:.3e} e_hp={e_hp:.3e} e_inv={e_inv:.3e} \
                  d_min={d_min:.3e}"
+            );
+            eprintln!(
+                "RESID |mean|={:.4e} spread={spread:.4e} |r|=[{mag_lo:.4e},{mag_hi:.4e}] \
+                 normal_align={normal_alignment:.3}",
+                mean.magnitude(),
             );
             eprintln!(
                 "BOUND pieces={piece_lengths:?} pts={} k=({:+.0},{:+.0}) V=({:.2},{:.2}) \
