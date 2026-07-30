@@ -2200,8 +2200,36 @@ impl From<&ConicalSurface> for step_geometry::ConicalSurface {
         }: &ConicalSurface,
     ) -> Self {
         let mat = Matrix4::from(position);
-        let p = Point3::new(*radius, 0.0, 0.0);
-        let v = Vector3::new(f64::tan(*semi_angle), 0.0, 1.0);
+        // EXPERIMENT (TRUCK_CONE_APEX_RANGE): span the generatrix from the apex
+        // to twice the reference radius, instead of one unit outward from the
+        // reference circle.
+        //
+        // `Line::parameter_range()` is `[0,1]` unconditionally, so the declared
+        // domain of the revolved surface is whatever one unit of the generatrix
+        // covers. With the direction below that is axial z in [0,1] starting at
+        // the reference circle -- a slab that excludes the apex at
+        // u* = -R/tan(theta) and, for any cone taller than one unit, most of the
+        // face as well. Boundary stitching closes an open piece against the edge
+        // of that domain, and when the piece lies on the edge the enclosed area
+        // is zero and nothing meshes.
+        let tan = f64::tan(*semi_angle);
+        let (p, v) = match std::env::var_os("TRUCK_CONE_APEX_RANGE").is_some()
+            && tan.is_finite()
+            && tan.abs() > 1.0e-12
+        {
+            true => {
+                let apex = Point3::new(0.0, 0.0, -*radius / tan);
+                // t = 0 at the apex, t = 0.5 at the reference circle, t = 1 at
+                // twice its radius. Radius is 2tR, so the chart is monotone and
+                // the singular point sits exactly on the boundary u = 0.
+                let reach = Vector3::new(2.0 * *radius, 0.0, 2.0 * *radius / tan);
+                (apex, reach)
+            }
+            false => (
+                Point3::new(*radius, 0.0, 0.0),
+                Vector3::new(tan, 0.0, 1.0),
+            ),
+        };
         let rev =
             RevolutedCurve::by_revolution(Line(p, p + v), Point3::origin(), Vector3::unit_z());
         let mut processor = Processor::new(rev);
