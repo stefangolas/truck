@@ -823,9 +823,71 @@ fn signed_area(curve: &[SurfacePoint]) -> f64 {
         .fold(0.0, |sum, (p, q)| sum + (q.x + p.x) * (q.y - p.y))
 }
 
+/// The working parameter rectangle of a trimmed face, derived from the face's
+/// own bounds.
+///
+/// **`PAR-RANGE-INHERITANCE-001`.** A surface's declared `parameter_range` is a
+/// property of the primitive it was constructed from, not of any face that
+/// references it. `Line::parameter_range` is `[0, 1]` unconditionally and
+/// `RevolutedCurve` inherits it, so a cone built as a revolved line declares
+/// `[0, 1] x [0, 2pi)` — one unit of generatrix starting at the STEP reference
+/// radius, chosen by the primitive and unrelated to the face. Stitching an open
+/// boundary piece against the edge of that rectangle fabricates trim geometry
+/// no source entity describes (`DOM-ARTIFICIAL-CLOSURE-001`), and when the
+/// piece already lies on the edge the enclosed area is zero
+/// (`DOM-ZERO-AREA-001`).
+///
+/// Measured: extending that range by a constant instead recovers 348 NIST faces
+/// and destroys 268 others, in a disjoint set of models — one part in two
+/// encodings loses 148 cone faces under whichever window excludes it. Any
+/// fixed-size window trades one population for another, because whether a
+/// face's material interval falls inside is decided by where its exporter put
+/// the reference circle. The extent has to come from the face.
+///
+/// **A periodic axis is different in kind**: its extent *is* determined, by the
+/// period, and the seam handling below relies on the wrap interval being one
+/// full period. Only non-periodic axes are re-derived.
+///
+/// Returns `None` for an axis the bounds do not determine. A degenerate extent
+/// means the material region is not recoverable from the boundary alone, and
+/// the caller must refuse rather than invent one — a collapsed single-vertex
+/// bound is exactly that case, marking a point the domain must reach while
+/// contributing no trim segment (`QUO-005`, `SNG-COLLAPSED-DIRECTION-001`).
+fn working_range(
+    pieces: &[PolyBoundaryPiece],
+    surface: &impl PreMeshableSurface,
+) -> (Option<(f64, f64)>, Option<(f64, f64)>) {
+    let (udeclared, vdeclared) = surface.try_range_tuple();
+    let axis = |idx: usize, period: Option<f64>, declared: Option<(f64, f64)>| {
+        // A period determines the extent; the bounds do not get a say.
+        if period.is_some() {
+            return declared;
+        }
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        pieces.iter().for_each(|PolyBoundaryPiece(vec)| {
+            vec.iter().for_each(|p| {
+                lo = f64::min(lo, p[idx]);
+                hi = f64::max(hi, p[idx]);
+            })
+        });
+        (hi - lo > TOLERANCE).then_some((lo, hi))
+    };
+    (
+        axis(0, surface.u_period(), udeclared),
+        axis(1, surface.v_period(), vdeclared),
+    )
+}
+
 impl PolyBoundary {
     fn new(pieces: Vec<PolyBoundaryPiece>, surface: &impl PreMeshableSurface, tol: f64) -> Self {
         let probe = std::env::var_os("TRUCK_PROBE_BOUNDARY").is_some();
+        // EXPERIMENT (TRUCK_FACE_DOMAIN): take the working rectangle from the
+        // face's own bounds rather than from the supporting primitive's
+        // declared range. Default off until swept.
+        let range = match std::env::var_os("TRUCK_FACE_DOMAIN").is_some() {
+            true => working_range(&pieces, surface),
+            false => surface.try_range_tuple(),
+        };
         let (mut closed, mut open) = (Vec::new(), Vec::new());
         pieces.into_iter().for_each(|PolyBoundaryPiece(mut vec)| {
             let gap = vec[0].uv.distance(vec[vec.len() - 1].uv);
@@ -867,7 +929,7 @@ impl PolyBoundary {
                 let mut curve = open.pop().unwrap();
                 let p = curve[0];
                 let q = curve[curve.len() - 1];
-                if let (Some((u0, u1)), Some((v0, v1))) = surface.try_range_tuple() {
+                if let (Some((u0, u1)), Some((v0, v1))) = range {
                     if p.x < q.x - TOLERANCE {
                         normalize_range(&mut curve, 0, (u0, u1));
                         let p = curve[0];
@@ -917,12 +979,12 @@ impl PolyBoundary {
                 fn end_pts<T: Copy>(vec: &[T]) -> (T, T) { (vec[0], vec[vec.len() - 1]) }
                 let ((p0, p1), (q0, q1)) = (end_pts(&curve0), end_pts(&curve1));
                 if !p0.x.near(&p1.x) && !q0.x.near(&q1.x) {
-                    if let (Some(urange), _) = surface.try_range_tuple() {
+                    if let (Some(urange), _) = range {
                         normalize_range(&mut curve0, 0, urange);
                         normalize_range(&mut curve1, 0, urange);
                     }
                 } else if !p0.y.near(&p1.y) && !q0.y.near(&q1.y) {
-                    if let (_, Some(vrange)) = surface.try_range_tuple() {
+                    if let (_, Some(vrange)) = range {
                         normalize_range(&mut curve0, 1, vrange);
                         normalize_range(&mut curve1, 1, vrange);
                     }
@@ -970,7 +1032,7 @@ impl PolyBoundary {
         // nothing does, the domain really is the surface's own range — a full
         // cylinder or torus whose only boundary is its seam.
         if closed.is_empty() {
-            if let (Some((u0, u1)), Some((v0, v1))) = surface.try_range_tuple() {
+            if let (Some((u0, u1)), Some((v0, v1))) = range {
                 let p = [
                     (Point2::new(u0, v0), surface.subs(u0, v0)).into(),
                     (Point2::new(u1, v0), surface.subs(u1, v0)).into(),
