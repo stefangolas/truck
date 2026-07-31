@@ -416,9 +416,14 @@ mod tests {
     fn a_checked_lookup_accepts_the_identity_it_stored() {
         let mut arena = Arena::<EdgeKind, &str>::new();
         arena.get_or_try_insert(EdgeCurveId::new(10), || Some("A"));
-        let index = arena.get_or_try_insert(EdgeCurveId::new(30), || Some("C")).unwrap();
+        let index = arena
+            .get_or_try_insert(EdgeCurveId::new(30), || Some("C"))
+            .unwrap();
 
-        assert_eq!(arena.get_checked(index, EdgeCurveId::new(30)).unwrap(), &"C");
+        assert_eq!(
+            arena.get_checked(index, EdgeCurveId::new(30)).unwrap(),
+            &"C"
+        );
         assert_eq!(arena.source_id_at(1), Some(EdgeCurveId::new(30)));
     }
 

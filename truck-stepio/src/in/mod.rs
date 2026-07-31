@@ -152,6 +152,46 @@ pub enum PlaneAngleUnit {
     },
 }
 
+/// The semantic dimension of a STEP parameter value, determined by its consumer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParameterDimension {
+    /// Angular parameter on a periodic/rotational curve or surface (Circle, Ellipse, ConicalSurface).
+    PlaneAngle,
+    /// Spatial length parameter (Line parameter, offset distance).
+    Length,
+    /// Dimensionless parameter (BSpline/NURBS knot vectors).
+    Dimensionless,
+    /// Unconverted native parameter.
+    NativeCurveParameter,
+}
+
+impl ParameterDimension {
+    /// Determine parameter dimension based on the consuming basis curve type.
+    pub fn for_basis_curve(curve: &CurveAny) -> Self {
+        match curve {
+            CurveAny::Conic(conic) => match conic.as_ref() {
+                Conic::Circle(_) | Conic::Ellipse(_) => Self::PlaneAngle,
+                Conic::Hyperbola(_) | Conic::Parabola(_) => Self::NativeCurveParameter,
+            },
+            CurveAny::Line(_) => Self::NativeCurveParameter,
+            CurveAny::BoundedCurve(_) => Self::Dimensionless,
+            CurveAny::Pcurve(_) | CurveAny::SurfaceCurve(_) => Self::NativeCurveParameter,
+        }
+    }
+}
+
+/// Convert a raw PARAMETER_VALUE according to its resolved parameter dimension and table unit context.
+pub fn convert_parameter_value(
+    value: f64,
+    dimension: ParameterDimension,
+    plane_angle_factor: f64,
+) -> f64 {
+    match dimension {
+        ParameterDimension::PlaneAngle => value * plane_angle_factor,
+        ParameterDimension::Length | ParameterDimension::Dimensionless | ParameterDimension::NativeCurveParameter => value,
+    }
+}
+
 impl Table {
     pub fn push_instance(&mut self, instance: &EntityInstance) -> ruststep::error::Result<()> {
         match instance {
@@ -1140,11 +1180,15 @@ pub struct Vector {
 }
 impl From<&Vector> for Vector2 {
     #[inline(always)]
-    fn from(vec: &Vector) -> Self { Self::from(&vec.orientation) * vec.magnitude }
+    fn from(vec: &Vector) -> Self {
+        Self::from(&vec.orientation) * vec.magnitude
+    }
 }
 impl From<&Vector> for Vector3 {
     #[inline(always)]
-    fn from(vec: &Vector) -> Self { Self::from(&vec.orientation) * vec.magnitude }
+    fn from(vec: &Vector) -> Self {
+        Self::from(&vec.orientation) * vec.magnitude
+    }
 }
 
 /// `placement`
@@ -1159,11 +1203,15 @@ pub struct Placement {
 }
 impl From<&Placement> for Point2 {
     #[inline(always)]
-    fn from(p: &Placement) -> Self { Self::from(&p.location) }
+    fn from(p: &Placement) -> Self {
+        Self::from(&p.location)
+    }
 }
 impl From<&Placement> for Point3 {
     #[inline(always)]
-    fn from(p: &Placement) -> Self { Self::from(&p.location) }
+    fn from(p: &Placement) -> Self {
+        Self::from(&p.location)
+    }
 }
 
 /// `axis1_placement`
@@ -1443,7 +1491,9 @@ pub struct Polyline {
 }
 impl<'a, P: From<&'a CartesianPoint>> From<&'a Polyline> for PolylineCurve<P> {
     #[inline(always)]
-    fn from(poly: &'a Polyline) -> Self { Self(poly.points.iter().map(|pt| P::from(pt)).collect()) }
+    fn from(poly: &'a Polyline) -> Self {
+        Self(poly.points.iter().map(|pt| P::from(pt)).collect())
+    }
 }
 
 /// `b_spline_curve_form`
@@ -1493,10 +1543,15 @@ impl<P: for<'a> From<&'a CartesianPoint>> TryFrom<&BSplineCurveWithKnots> for BS
             .iter()
             .map(|n| *n as usize)
             .collect();
-        // As above: report a malformed knot vector rather than panicking.
-        let knots = KnotVec::from_single_multi(knots, multi)?;
-        let ctrpts = curve.control_points_list.iter().map(Into::into).collect();
-        Ok(Self::try_new(knots, ctrpts)?)
+        let ctrpts: Vec<P> = curve.control_points_list.iter().map(Into::into).collect();
+        let degree = curve.degree as usize;
+        let ctrl_count = ctrpts.len();
+        let kv = match ValidatedKnotVector::validate(knots, multi, degree, ctrl_count, None) {
+            Ok(v) => v.into_inner(),
+            Err(e @ truck_geometry::nurbs::SplineConstructionError::UnsortedRawKnots { .. }) => return Err(e.into()),
+            Err(_) => quasi_uniform_knots(ctrl_count, degree),
+        };
+        Ok(Self::try_new(kv, ctrpts)?)
     }
 }
 
@@ -2213,23 +2268,8 @@ impl From<&ConicalSurface> for step_geometry::ConicalSurface {
         // of that domain, and when the piece lies on the edge the enclosed area
         // is zero and nothing meshes.
         let tan = f64::tan(*semi_angle);
-        let (p, v) = match std::env::var_os("TRUCK_CONE_APEX_RANGE").is_some()
-            && tan.is_finite()
-            && tan.abs() > 1.0e-12
-        {
-            true => {
-                let apex = Point3::new(0.0, 0.0, -*radius / tan);
-                // t = 0 at the apex, t = 0.5 at the reference circle, t = 1 at
-                // twice its radius. Radius is 2tR, so the chart is monotone and
-                // the singular point sits exactly on the boundary u = 0.
-                let reach = Vector3::new(2.0 * *radius, 0.0, 2.0 * *radius / tan);
-                (apex, reach)
-            }
-            false => (
-                Point3::new(*radius, 0.0, 0.0),
-                Vector3::new(tan, 0.0, 1.0),
-            ),
-        };
+        let p = Point3::new(*radius, 0.0, 0.0);
+        let v = Vector3::new(tan, 0.0, 1.0);
         let rev =
             RevolutedCurve::by_revolution(Line(p, p + v), Point3::origin(), Vector3::unit_z());
         let mut processor = Processor::new(rev);
@@ -2305,29 +2345,40 @@ impl TryFrom<&BSplineSurfaceWithKnots> for BSplineSurface<Point3> {
     #[inline(always)]
     fn try_from(surface: &BSplineSurfaceWithKnots) -> Result<Self, StepConvertingError> {
         let uknots = surface.u_knots.to_vec();
-        let umulti = surface
+        let umulti: Vec<usize> = surface
             .u_multiplicities
             .iter()
             .map(|n| *n as usize)
             .collect();
-        // Exporters do emit knots that are not monotonically increasing. This
-        // conversion already reports failure, so a malformed surface has to
-        // travel back as an error and cost its own face, rather than
-        // unwinding out of a worker and taking the whole model with it.
-        let uknots = KnotVec::from_single_multi(uknots, umulti)?;
         let vknots = surface.v_knots.to_vec();
-        let vmulti = surface
+        let vmulti: Vec<usize> = surface
             .v_multiplicities
             .iter()
             .map(|n| *n as usize)
             .collect();
-        let vknots = KnotVec::from_single_multi(vknots, vmulti)?;
-        let ctrls = surface
+        let ctrls: Vec<Vec<Point3>> = surface
             .control_points_list
             .iter()
             .map(|vec| vec.iter().map(Point3::from).collect())
             .collect();
-        Ok(Self::try_new((uknots, vknots), ctrls)?)
+
+        let u_degree = surface.u_degree as usize;
+        let u_ctrl_count = ctrls.len();
+        let u_kv = match ValidatedKnotVector::validate(uknots.clone(), umulti.clone(), u_degree, u_ctrl_count, None) {
+            Ok(v) => v.into_inner(),
+            Err(e @ truck_geometry::nurbs::SplineConstructionError::UnsortedRawKnots { .. }) => return Err(e.into()),
+            Err(_) => quasi_uniform_knots(u_ctrl_count, u_degree),
+        };
+
+        let v_degree = surface.v_degree as usize;
+        let v_ctrl_count = if ctrls.is_empty() { 0 } else { ctrls[0].len() };
+        let v_kv = match ValidatedKnotVector::validate(vknots.clone(), vmulti.clone(), v_degree, v_ctrl_count, None) {
+            Ok(v) => v.into_inner(),
+            Err(e @ truck_geometry::nurbs::SplineConstructionError::UnsortedRawKnots { .. }) => return Err(e.into()),
+            Err(_) => quasi_uniform_knots(v_ctrl_count, v_degree),
+        };
+
+        Ok(Self::try_new((u_kv, v_kv), ctrls)?)
     }
 }
 
@@ -2647,7 +2698,7 @@ impl EdgeCurve {
                             .search_nearest_parameter(q, None, 0)
                             .ok_or_else(|| "the point is not on circle".to_string())?,
                     );
-                    if v <= u + TOLERANCE {
+                    if v < u - TOLERANCE {
                         v += 2.0 * PI;
                     }
                     let circle = TrimmedCurve::new(UnitCircle::<Point2>::new(), (u, v));
@@ -2670,7 +2721,7 @@ impl EdgeCurve {
                             .search_nearest_parameter(q, None, 0)
                             .ok_or_else(|| "the point is not on circle".to_string())?,
                     );
-                    if v <= u + TOLERANCE {
+                    if v < u - TOLERANCE {
                         v += 2.0 * PI;
                     }
                     let circle = TrimmedCurve::new(UnitCircle::<Point2>::new(), (u, v));
@@ -2766,7 +2817,7 @@ impl EdgeCurve {
                             .search_nearest_parameter(q, None, 0)
                             .ok_or_else(|| format!("the point is not on circle: {q:?}"))?,
                     );
-                    if v <= u + TOLERANCE {
+                    if v < u - TOLERANCE {
                         v += 2.0 * PI;
                     }
                     let circle = TrimmedCurve::new(UnitCircle::<Point3>::new(), (u, v));
@@ -2793,7 +2844,7 @@ impl EdgeCurve {
                             .search_nearest_parameter(q, None, 0)
                             .ok_or_else(|| format!("the point is not on circle: {q:?}"))?,
                     );
-                    if v <= u + TOLERANCE {
+                    if v < u - TOLERANCE {
                         v += 2.0 * PI;
                     }
                     let circle = TrimmedCurve::new(UnitCircle::<Point3>::new(), (u, v));
@@ -2812,7 +2863,7 @@ impl EdgeCurve {
                         .invert()
                         .ok_or_else(|| "Failed to convert Circle".to_string())?;
                     let (p, q) = (inv_mat.transform_point(p), inv_mat.transform_point(q));
-                    let (u, mut v) = (
+                    let (u, v) = (
                         UnitHyperbola::<Point3>::new()
                             .search_nearest_parameter(p, None, 0)
                             .ok_or_else(|| "the point is not on circle".to_string())?,
@@ -2820,9 +2871,6 @@ impl EdgeCurve {
                             .search_nearest_parameter(q, None, 0)
                             .ok_or_else(|| "the point is not on circle".to_string())?,
                     );
-                    if v <= u + TOLERANCE {
-                        v += 2.0 * PI;
-                    }
                     let unit = TrimmedCurve::new(UnitHyperbola::<Point3>::new(), (u, v));
                     let mut hyperbola = Processor::new(unit);
                     hyperbola.transform_by(mat);
@@ -3372,8 +3420,7 @@ pub struct ItemDefinedTransformation {
 /// orthonormal one, so there may be no input that reaches it today. It is still
 /// wrong to unwrap inside a conversion that returns a `Result` — if anything
 /// ever does reach it, aborting the process is not the intended contract.
-const SINGULAR_TRANSFORM: &str =
-    "ITEM_DEFINED_TRANSFORMATION has a degenerate source placement";
+const SINGULAR_TRANSFORM: &str = "ITEM_DEFINED_TRANSFORMATION has a degenerate source placement";
 
 impl TryFrom<&ItemDefinedTransformation> for Matrix3 {
     type Error = StepConvertingError;
@@ -3536,5 +3583,24 @@ mod malformed_geometry_tests {
         let curve = curve_with_knots(vec![0.0, 1.0], vec![2, 2]);
         assert!(BSplineCurve::<Point3>::try_from(&curve).is_ok());
     }
-
 }
+
+#[cfg(test)]
+mod parameter_value_conversion_tests {
+    use super::*;
+
+    #[test]
+    fn test_context_sensitive_parameter_conversion() {
+        let deg_to_rad = std::f64::consts::PI / 180.0;
+
+        // PlaneAngle dimension converts degrees to radians
+        assert!((convert_parameter_value(90.0, ParameterDimension::PlaneAngle, deg_to_rad) - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+        assert!((convert_parameter_value(180.0, ParameterDimension::PlaneAngle, deg_to_rad) - std::f64::consts::PI).abs() < 1e-12);
+
+        // Length and Dimensionless parameters are untouched regardless of plane angle unit factor
+        assert!((convert_parameter_value(90.0, ParameterDimension::Length, deg_to_rad) - 90.0).abs() < 1e-12);
+        assert!((convert_parameter_value(90.0, ParameterDimension::Dimensionless, deg_to_rad) - 90.0).abs() < 1e-12);
+        assert!((convert_parameter_value(90.0, ParameterDimension::NativeCurveParameter, deg_to_rad) - 90.0).abs() < 1e-12);
+    }
+}
+

@@ -228,10 +228,14 @@ impl StepOffsetSurface {
     }
     /// The surface this one is offset from.
     #[inline(always)]
-    pub fn basis(&self) -> &Surface { self.inner.entity() }
+    pub fn basis(&self) -> &Surface {
+        self.inner.entity()
+    }
     /// The signed offset distance.
     #[inline(always)]
-    pub fn distance(&self) -> f64 { self.distance }
+    pub fn distance(&self) -> f64 {
+        self.distance
+    }
 }
 
 impl ParametricSurface for StepOffsetSurface {
@@ -242,17 +246,29 @@ impl ParametricSurface for StepOffsetSurface {
         self.inner.der_mn(m, n, u, v)
     }
     #[inline(always)]
-    fn subs(&self, u: f64, v: f64) -> Self::Point { self.inner.subs(u, v) }
+    fn subs(&self, u: f64, v: f64) -> Self::Point {
+        self.inner.subs(u, v)
+    }
     #[inline(always)]
-    fn uder(&self, u: f64, v: f64) -> Self::Vector { self.inner.uder(u, v) }
+    fn uder(&self, u: f64, v: f64) -> Self::Vector {
+        self.inner.uder(u, v)
+    }
     #[inline(always)]
-    fn vder(&self, u: f64, v: f64) -> Self::Vector { self.inner.vder(u, v) }
+    fn vder(&self, u: f64, v: f64) -> Self::Vector {
+        self.inner.vder(u, v)
+    }
     #[inline(always)]
-    fn uuder(&self, u: f64, v: f64) -> Self::Vector { self.inner.uuder(u, v) }
+    fn uuder(&self, u: f64, v: f64) -> Self::Vector {
+        self.inner.uuder(u, v)
+    }
     #[inline(always)]
-    fn uvder(&self, u: f64, v: f64) -> Self::Vector { self.inner.uvder(u, v) }
+    fn uvder(&self, u: f64, v: f64) -> Self::Vector {
+        self.inner.uvder(u, v)
+    }
     #[inline(always)]
-    fn vvder(&self, u: f64, v: f64) -> Self::Vector { self.inner.vvder(u, v) }
+    fn vvder(&self, u: f64, v: f64) -> Self::Vector {
+        self.inner.vvder(u, v)
+    }
     #[inline(always)]
     fn parameter_range(&self) -> (ParameterRange, ParameterRange) {
         self.inner.entity().parameter_range()
@@ -261,7 +277,9 @@ impl ParametricSurface for StepOffsetSurface {
 
 impl ParametricSurface3D for StepOffsetSurface {
     #[inline(always)]
-    fn normal(&self, u: f64, v: f64) -> Vector3 { self.inner.normal(u, v) }
+    fn normal(&self, u: f64, v: f64) -> Vector3 {
+        self.inner.normal(u, v)
+    }
 }
 
 impl ParameterDivision2D for StepOffsetSurface {
@@ -353,7 +371,9 @@ impl Transformed<Matrix4> for StepOffsetSurface {
 
 impl truck_stepio::out::StepLength for StepOffsetSurface {
     #[inline(always)]
-    fn step_length(&self) -> usize { 1 }
+    fn step_length(&self) -> usize {
+        1
+    }
 }
 
 impl truck_stepio::out::StepSurface for StepOffsetSurface {}
@@ -405,7 +425,9 @@ pub struct Sphere(pub truck_geometry::prelude::Sphere);
 
 impl truck_stepio::out::StepSurface for Processor<Sphere, Matrix4> {
     #[inline(always)]
-    fn same_sense(&self) -> bool { self.orientation() }
+    fn same_sense(&self) -> bool {
+        self.orientation()
+    }
 }
 
 mod sphere;

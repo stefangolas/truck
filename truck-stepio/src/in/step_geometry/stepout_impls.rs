@@ -4,7 +4,9 @@ impl out::ConstStepLength for Processor<Sphere, Matrix4> {
     const LENGTH: usize = Processor::<truck_geometry::prelude::Sphere, Matrix4>::LENGTH;
 }
 impl out::StepLength for Processor<Sphere, Matrix4> {
-    fn step_length(&self) -> usize { <Self as out::ConstStepLength>::LENGTH }
+    fn step_length(&self) -> usize {
+        <Self as out::ConstStepLength>::LENGTH
+    }
 }
 impl out::DisplayByStep for Processor<Sphere, Matrix4> {
     fn fmt(&self, idx: usize, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

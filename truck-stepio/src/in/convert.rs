@@ -198,7 +198,17 @@ impl Table {
             // the surface's own degeneracy, so the honest contribution is no
             // trim segment at all — not a synthesised loop of zero size, which
             // would trim the face by an empty region and delete it.
-            FaceBoundLoop::Collapsed(_) => return Ok(BoundOutcome::Collapsed),
+            FaceBoundLoop::Collapsed(vl) => {
+                let pt = match &vl.loop_vertex {
+                    PlaceHolder::Ref(Name::Entity(v_idx)) => {
+                        EntityTable::<VertexPointHolder>::get_owned(self, *v_idx)
+                            .map(|p| Point3::from(&p.vertex_geometry))
+                            .unwrap_or_else(|_| Point3::origin())
+                    }
+                    _ => Point3::origin(),
+                };
+                return Ok(BoundOutcome::Collapsed(pt));
+            }
         };
         // A bound missing an edge is a broken bound, not a shorter one.
         //
@@ -315,6 +325,93 @@ impl Table {
         Some((surface, Some(*idx)))
     }
 
+    fn tune_conical_surface(
+        surface: &mut Surface,
+        wires: &[TopologicallyClosedWire],
+        edges: &Arena<EdgeKind, CompressedEdge<Curve3D>>,
+        collapsed_pts: &[Point3],
+    ) {
+        use cgmath::Transform;
+        use step_geometry::*;
+        let Surface::ElementarySurface(ElementarySurface::ConicalSurface(ref mut processor)) = surface else {
+            return;
+        };
+
+        let mut points: Vec<Point3> = collapsed_pts.to_vec();
+        for wire in wires {
+            for edge_idx in wire.edges() {
+                if let Some(edge) = edges.value_at(edge_idx.index) {
+                    let (t0, t1) = edge.curve.range_tuple();
+                    points.push(edge.curve.subs(t0));
+                    points.push(edge.curve.subs(t1));
+                    points.push(edge.curve.subs(t0 * 0.5 + t1 * 0.5));
+                }
+            }
+        }
+
+        if points.is_empty() {
+            return;
+        }
+
+        let inv_mat = match processor.transform().invert() {
+            Some(m) => m,
+            None => return,
+        };
+
+        let rev = processor.entity();
+        let line = rev.entity_curve();
+        let p0 = line.0;
+        let p1 = line.1;
+        let dr = p1.x - p0.x;
+        let dz = p1.z - p0.z;
+
+        if dz.abs() < 1.0e-12 {
+            return;
+        }
+
+        let tan = dr / dz;
+        let r0 = p0.x - p0.z * tan;
+        let z_apex = if tan.abs() > 1.0e-12 {
+            -r0 / tan
+        } else {
+            0.0
+        };
+
+        let mut z_min = f64::INFINITY;
+        let mut z_max = f64::NEG_INFINITY;
+
+        for p in &points {
+            let p_local = inv_mat.transform_point(*p);
+            let z = p_local.z;
+            z_min = z_min.min(z);
+            z_max = z_max.max(z);
+        }
+
+        if !collapsed_pts.is_empty() || (z_min.is_finite() && (z_min - z_apex).abs() < 1.0e-3) {
+            z_min = z_min.min(z_apex);
+        }
+
+        if !z_min.is_finite() || !z_max.is_finite() {
+            z_min = z_apex.min(0.0);
+            z_max = z_apex.max(0.0) + 1.0;
+        }
+
+        let span = (z_max - z_min).max(1.0);
+        let pad = (0.2 * span).max(0.1);
+        let u_min = z_min - pad;
+        let u_max = z_max + pad;
+
+        let new_p0 = Point3::new(r0 + u_min * tan, 0.0, u_min);
+        let new_p1 = Point3::new(r0 + u_max * tan, 0.0, u_max);
+        let new_rev = RevolutedCurve::by_revolution(
+            Line(new_p0, new_p1),
+            Point3::origin(),
+            Vector3::unit_z(),
+        );
+
+        *processor.entity_mut() = new_rev;
+    }
+
     /// Convert a shell's faces, and say why each one that failed did.
     ///
     /// The reasons come from the real conversion, not from a second
@@ -393,15 +490,19 @@ impl Table {
                     continue;
                 }
             };
-            let collapsed = outcomes
+            let collapsed_pts: Vec<Point3> = outcomes
                 .iter()
-                .filter(|o| matches!(o, BoundOutcome::Collapsed))
-                .count();
+                .filter_map(|o| match o {
+                    BoundOutcome::Collapsed(pt) => Some(*pt),
+                    _ => None,
+                })
+                .collect();
+            let collapsed = collapsed_pts.len();
             let wires: Vec<TopologicallyClosedWire> = outcomes
                 .into_iter()
                 .filter_map(|o| match o {
                     BoundOutcome::Wire(wire) => Some(wire),
-                    BoundOutcome::Collapsed => None,
+                    BoundOutcome::Collapsed(_) => None,
                 })
                 .collect();
             if wires.is_empty() {
@@ -421,6 +522,7 @@ impl Table {
                 // downstream is told about. QUO-005 wants a type here.
                 singular.push(provenance);
             }
+            Self::tune_conical_surface(&mut surface, &wires, edges, &collapsed_pts);
             faces.push(CompressedFace {
                 surface,
                 // The proof is discharged here and nowhere earlier: truck's
@@ -747,7 +849,8 @@ pub trait StepShell {
         &self,
         table: &Table,
     ) -> Result<CompressedShell<Point3, Curve3D, Surface>, StepConvertingError> {
-        self.to_compressed_shell_with_losses(table).map(|(shell, _)| shell)
+        self.to_compressed_shell_with_losses(table)
+            .map(|(shell, _)| shell)
     }
 
     /// The shell, plus one record per source face that did not survive.
@@ -902,7 +1005,10 @@ mod provenance_tests {
             .face_any_resolved(Some(FaceAnyHolder::FaceSurface(face_surface())))
             .expect("the face surface resolves");
 
-        assert!(orientation, "a definition carries no orientation of its own");
+        assert!(
+            orientation,
+            "a definition carries no orientation of its own"
+        );
         assert!(
             matches!(reference, FaceReference::Definition),
             "a direct reference names the definition"
@@ -938,7 +1044,9 @@ mod plane_angle_unit_tests {
     fn a_degree_file_reports_the_degree_factor() {
         let mut table = Table::default();
         // #20 = PLANE_ANGLE_MEASURE_WITH_UNIT(PLANE_ANGLE_MEASURE(0.0174532925), #18)
-        table.plane_angle_measures.insert(20, (0.0174532925, Some(18)));
+        table
+            .plane_angle_measures
+            .insert(20, (0.0174532925, Some(18)));
         // #18 is the radian SI unit the conversion is expressed in.
         table.plane_angle_units.push((18, PlaneAngleUnit::Radian));
         // #24 = CONVERSION_BASED_UNIT('DEGREE', #20)
@@ -960,7 +1068,9 @@ mod plane_angle_unit_tests {
     #[test]
     fn the_base_unit_of_a_conversion_does_not_count_as_disagreement() {
         let mut table = Table::default();
-        table.plane_angle_measures.insert(20, (0.0174532925, Some(18)));
+        table
+            .plane_angle_measures
+            .insert(20, (0.0174532925, Some(18)));
         table.plane_angle_units.push((18, PlaneAngleUnit::Radian));
         table
             .plane_angle_units
@@ -1000,7 +1110,9 @@ mod plane_angle_unit_tests {
     fn independently_assigned_conflicting_units_are_refused() {
         let mut table = Table::default();
         // Two conversions with different factors, neither the base of the other.
-        table.plane_angle_measures.insert(20, (0.0174532925, Some(18)));
+        table
+            .plane_angle_measures
+            .insert(20, (0.0174532925, Some(18)));
         table.plane_angle_measures.insert(30, (0.5, Some(28)));
         table
             .plane_angle_units
@@ -1025,7 +1137,9 @@ mod plane_angle_unit_tests {
     #[test]
     fn a_cone_semi_angle_is_normalized_into_radians() {
         let mut table = Table::default();
-        table.plane_angle_measures.insert(20, (0.0174532925, Some(18)));
+        table
+            .plane_angle_measures
+            .insert(20, (0.0174532925, Some(18)));
         table.plane_angle_units.push((18, PlaneAngleUnit::Radian));
         table
             .plane_angle_units
@@ -1121,14 +1235,13 @@ pub struct FaceLoss {
     pub reason: FaceLossReason,
 }
 
-
 /// What one face bound contributed to the trimming domain.
 enum BoundOutcome {
     /// An ordinary closed wire of edges.
     Wire(TopologicallyClosedWire),
     /// Nothing: the bound is a single vertex, and the surface closes itself
-    /// there. See `FaceBoundLoop::Collapsed`.
-    Collapsed,
+    /// there. See `FaceBoundLoop::Collapsed`. Retains the 3D vertex position.
+    Collapsed(Point3),
 }
 
 #[cfg(test)]

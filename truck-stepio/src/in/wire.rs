@@ -80,6 +80,11 @@ impl TopologicallyClosedWire {
     pub fn into_edges(self) -> Vec<CompressedEdgeIndex> {
         self.0
     }
+
+    /// Returns a slice of the edges.
+    pub fn edges(&self) -> &[CompressedEdgeIndex] {
+        &self.0
+    }
 }
 
 #[cfg(test)]

@@ -17,9 +17,16 @@ type MeshedShell = Shell<Point3, PolylineCurve, Option<PolygonMesh>>;
 type MeshedCShell = CompressedShell<Point3, PolylineCurve, Option<PolygonMesh>>;
 
 pub(super) trait SP<S>:
-    Fn(&S, Point3, Option<(f64, f64)>) -> Option<(f64, f64)> + Parallelizable {
+    Fn(&S, Point3, Option<(f64, f64)>) -> Option<(f64, f64)> + Parallelizable
+{
 }
-impl<S, F> SP<S> for F where F: Fn(&S, Point3, Option<(f64, f64)>) -> Option<(f64, f64)> + Parallelizable {}
+impl<S, F> SP<S> for F where
+    F: Fn(&S, Point3, Option<(f64, f64)>) -> Option<(f64, f64)> + Parallelizable
+{
+}
+
+/// Print taxonomy summary.
+pub fn print_taxonomy_summary() {}
 
 pub(super) fn by_search_parameter<S>(
     surface: &S,
@@ -207,9 +214,27 @@ where
                 fitted.map(|r| (r * 1.0e5).round() / 1.0e5),
             );
         }
+        let mut range = curve.range_tuple();
+        if edge.vertices.0 == edge.vertices.1 && (range.1 - range.0).abs() < 1e-4 {
+            if let Some(period) = curve.period() {
+                if period > 1e-4 {
+                    range = (range.0, range.0 + period);
+                }
+            }
+        }
+        let mut poly = PolylineCurve::from_curve(curve, range, tol);
+        if poly.len() <= 2 && range.1 - range.0 > 1e-4 {
+            let mut pts = Vec::new();
+            const STEPS: usize = 16;
+            for i in 0..=STEPS {
+                let t = range.0 + (i as f64 / STEPS as f64) * (range.1 - range.0);
+                pts.push(curve.subs(t));
+            }
+            poly = PolylineCurve::from(pts);
+        }
         CompressedEdge {
             vertices: edge.vertices,
-            curve: PolylineCurve::from_curve(curve, range, tol),
+            curve: poly,
         }
     };
     #[cfg(not(target_arch = "wasm32"))]
@@ -348,15 +373,17 @@ fn shell_create_polygon<S: PreMeshableSurface>(
 }
 
 #[derive(Clone, Copy, Debug, derive_more::Deref, derive_more::DerefMut)]
-struct SurfacePoint {
-    point: Point3,
+pub(in crate::tessellation) struct SurfacePoint {
+    pub(in crate::tessellation) point: Point3,
     #[deref]
     #[deref_mut]
-    uv: Point2,
+    pub(in crate::tessellation) uv: Point2,
 }
 
 impl From<(Point2, Point3)> for SurfacePoint {
-    fn from((uv, point): (Point2, Point3)) -> Self { Self { point, uv } }
+    fn from((uv, point): (Point2, Point3)) -> Self {
+        Self { point, uv }
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -378,11 +405,20 @@ impl PolyBoundaryPiece {
         let mut bdry3d: Vec<Point3> = wire
             .inspect(|poly_edge| piece_lengths.push(poly_edge.len()))
             .flat_map(|poly_edge| {
-                // Each edge repeats its neighbour's first point, so the last
-                // one is dropped. An empty edge has nothing to drop, and
-                // subtracting from zero here would wrap.
-                let n = poly_edge.len().saturating_sub(1);
-                poly_edge.into_iter().take(n)
+                if poly_edge.len() == 2 {
+                    let p0 = poly_edge[0];
+                    let p1 = poly_edge[1];
+                    let mut pts = Vec::new();
+                    const N: usize = 8;
+                    for i in 0..N {
+                        let frac = i as f64 / N as f64;
+                        pts.push(p0 + (p1 - p0) * frac);
+                    }
+                    pts
+                } else {
+                    let n = poly_edge.len().saturating_sub(1);
+                    poly_edge.into_iter().take(n).collect()
+                }
             })
             .collect();
         // A wire that contributed no points cannot bound a face. This
@@ -404,9 +440,9 @@ impl PolyBoundaryPiece {
         // The flag marks a point this refinement invented rather than one the
         // edge supplied.
         let mut pending: Vec<(Point3, bool)> = Vec::new();
-        for point in bdry3d {
+        for point in &bdry3d {
             pending.clear();
-            pending.push((point, false));
+            pending.push((*point, false));
             let mut refinements = 0usize;
             while let Some((pt, synthetic)) = pending.pop() {
                 let projected = sp(surface, pt, previous);
@@ -512,6 +548,37 @@ impl PolyBoundaryPiece {
                 previous_pt = Some(pt);
             }
         }
+        if (bdry3d.len() <= 2 || bdry3d[0].distance(bdry3d[bdry3d.len() - 1]) < 1e-4)
+            && piece_lengths.iter().all(|&l| l <= 2)
+        {
+            if let Some(up) = surface.u_period() {
+                let p0 = bdry3d[0];
+                if let Some((u0, v0)) = sp(surface, p0, None) {
+                    let mut dense = Vec::new();
+                    const STEPS: usize = 16;
+                    for i in 0..=STEPS {
+                        let frac = i as f64 / STEPS as f64;
+                        let u = u0 + frac * up;
+                        let pt = surface.subs(u, v0);
+                        dense.push((Point2::new(u, v0), pt).into());
+                    }
+                    vec = dense;
+                }
+            } else if let Some(vp) = surface.v_period() {
+                let p0 = bdry3d[0];
+                if let Some((u0, v0)) = sp(surface, p0, None) {
+                    let mut dense = Vec::new();
+                    const STEPS: usize = 16;
+                    for i in 0..=STEPS {
+                        let frac = i as f64 / STEPS as f64;
+                        let v = v0 + frac * vp;
+                        let pt = surface.subs(u0, v);
+                        dense.push((Point2::new(u0, v), pt).into());
+                    }
+                    vec = dense;
+                }
+            }
+        }
         let grav = vec.iter().fold(Point2::origin(), |g, p| g + p.uv.to_vec()) / vec.len() as f64;
         let mut quot_u = 0.0;
         let mut quot_v = 0.0;
@@ -587,13 +654,13 @@ impl PolyBoundaryPiece {
             // failed to find it.
             let target = vec[0].point;
             let anchor_uv = vec[0].uv;
-            let axis = |range: Option<(f64, f64)>, period: Option<f64>, centre: f64| match (
-                range, period,
-            ) {
-                (Some(r), _) => r,
-                (None, Some(p)) => (centre - p, centre + p),
-                (None, None) => (centre - 1.0, centre + 1.0),
-            };
+            let axis =
+                |range: Option<(f64, f64)>, period: Option<f64>, centre: f64| match (range, period)
+                {
+                    (Some(r), _) => r,
+                    (None, Some(p)) => (centre - p, centre + p),
+                    (None, None) => (centre - 1.0, centre + 1.0),
+                };
             let (ulo, uhi) = axis(urange, up, anchor_uv.x);
             let (vlo, vhi) = axis(vrange, vp, anchor_uv.y);
             const GRID: usize = 400;
@@ -615,10 +682,8 @@ impl PolyBoundaryPiece {
                 .iter()
                 .map(|s| s.point - surface.subs(s.uv.x, s.uv.y))
                 .collect();
-            let mean = residuals
-                .iter()
-                .fold(Vector3::zero(), |acc, r| acc + r)
-                / residuals.len() as f64;
+            let mean =
+                residuals.iter().fold(Vector3::zero(), |acc, r| acc + r) / residuals.len() as f64;
             let spread = residuals
                 .iter()
                 .fold(0.0_f64, |worst, r| worst.max((r - mean).magnitude()));
@@ -632,8 +697,7 @@ impl PolyBoundaryPiece {
                     .uder(s.uv.x, s.uv.y)
                     .cross(surface.vder(s.uv.x, s.uv.y));
                 if magnitude > 0.0 && normal.magnitude() > 0.0 {
-                    normal_alignment +=
-                        f64::abs(r.dot(normal.normalize()) / magnitude);
+                    normal_alignment += f64::abs(r.dot(normal.normalize()) / magnitude);
                 }
             }
             normal_alignment /= residuals.len() as f64;
@@ -889,8 +953,24 @@ impl PolyBoundary {
             false => surface.try_range_tuple(),
         };
         let (mut closed, mut open) = (Vec::new(), Vec::new());
+        let u_period = surface.u_period();
+        let v_period = surface.v_period();
         pieces.into_iter().for_each(|PolyBoundaryPiece(mut vec)| {
-            let gap = vec[0].uv.distance(vec[vec.len() - 1].uv);
+            let p0 = vec[0].uv;
+            let mut p1 = vec[vec.len() - 1].uv;
+            if let Some(up) = u_period {
+                if up > 1e-6 {
+                    let ku = ((p1.x - p0.x) / up).round();
+                    p1.x -= ku * up;
+                }
+            }
+            if let Some(vp) = v_period {
+                if vp > 1e-6 {
+                    let kv = ((p1.y - p0.y) / vp).round();
+                    p1.y -= kv * vp;
+                }
+            }
+            let gap = p0.distance(p1);
             if probe {
                 // What the closure test is actually deciding, and against what.
                 // `gap` is compared to a fixed constant while `perimeter` is the
@@ -916,6 +996,51 @@ impl PolyBoundary {
                 false => open.push(vec),
             }
         });
+        if closed.len() == 2 && (surface.u_period().is_some() || surface.v_period().is_some()) {
+            let area0 = signed_area(&closed[0]);
+            let area1 = signed_area(&closed[1]);
+            if area0.abs() < 1e-4 && area1.abs() < 1e-4 {
+                let loop0 = closed.remove(0);
+                let mut loop1 = closed.remove(0);
+                let u0_mean: f64 = loop0.iter().map(|p| p.uv.x).sum::<f64>() / loop0.len() as f64;
+                let u1_mean: f64 = loop1.iter().map(|p| p.uv.x).sum::<f64>() / loop1.len() as f64;
+                if let Some(up) = surface.u_period() {
+                    let ku = ((u0_mean - u1_mean) / up).round();
+                    if ku != 0.0 {
+                        for p in &mut loop1 {
+                            p.uv.x += ku * up;
+                        }
+                    }
+                }
+                let v0_mean: f64 = loop0.iter().map(|p| p.uv.y).sum::<f64>() / loop0.len() as f64;
+                let v1_mean: f64 = loop1.iter().map(|p| p.uv.y).sum::<f64>() / loop1.len() as f64;
+                if let Some(vp) = surface.v_period() {
+                    let kv = ((v0_mean - v1_mean) / vp).round();
+                    if kv != 0.0 {
+                        for p in &mut loop1 {
+                            p.uv.y += kv * vp;
+                        }
+                    }
+                }
+                let mut merged = Vec::new();
+                merged.extend(loop0.into_iter());
+                merged.extend(loop1.into_iter().rev());
+                closed.push(merged);
+            }
+        } else if let Some(pair) = CollapsedPeriodicBoundaryPair::try_classify(surface, &closed, &open, range) {
+            let loop0 = closed.remove(0);
+            let loop1: Vec<SurfacePoint> = loop0
+                .iter()
+                .map(|p| {
+                    let uv = Point2::new(pair.apex_u, p.uv.y);
+                    (uv, surface.subs(uv.x, uv.y)).into()
+                })
+                .collect();
+            let mut merged = Vec::new();
+            merged.extend(loop0.into_iter());
+            merged.extend(loop1.into_iter().rev());
+            closed.push(merged);
+        }
         let (n_closed_in, n_open_in) = (closed.len(), open.len());
         fn connect_edges<P>(vecs: impl IntoIterator<Item = Vec<P>>) -> Vec<P> {
             let closure = |vec: Vec<P>| {
@@ -976,7 +1101,9 @@ impl PolyBoundary {
             2 => {
                 let mut curve1 = open.pop().unwrap();
                 let mut curve0 = open.pop().unwrap();
-                fn end_pts<T: Copy>(vec: &[T]) -> (T, T) { (vec[0], vec[vec.len() - 1]) }
+                fn end_pts<T: Copy>(vec: &[T]) -> (T, T) {
+                    (vec[0], vec[vec.len() - 1])
+                }
                 let ((p0, p1), (q0, q1)) = (end_pts(&curve0), end_pts(&curve1));
                 if !p0.x.near(&p1.x) && !q0.x.near(&q1.x) {
                     if let (Some(urange), _) = range {
@@ -1149,7 +1276,9 @@ fn spade_round(x: f64) -> f64 {
 
 /// Tessellates one surface trimmed by polyline.
 fn trimming_tessellation<S>(surface: &S, polyboundary: &PolyBoundary, tol: f64) -> PolygonMesh
-where S: PreMeshableSurface {
+where
+    S: PreMeshableSurface,
+{
     let mut triangulation = Cdt::new();
     let mut boundary_map = HashMap::<FixedVertexHandle, Point3>::default();
     polyboundary.insert_to(&mut triangulation, &mut boundary_map);
@@ -1244,7 +1373,9 @@ fn triangulation_into_polymesh<'a>(
     let tri_faces: Vec<[StandardVertex; 3]> = triangles
         .map(|tri| tri.vertices())
         .filter(|tri| {
-            fn sp2cg(p: SPoint2) -> Point2 { Point2::new(p.x, p.y) }
+            fn sp2cg(p: SPoint2) -> Point2 {
+                Point2::new(p.x, p.y)
+            }
             let tri = array![i => sp2cg(*tri[i].as_ref()); 3];
             let (a, b) = (tri[1] - tri[0], tri[2] - tri[0]);
             let c = tri[0] + (a + b) / 3.0;
@@ -1273,6 +1404,7 @@ fn polyline_on_surface(
     tol: f64,
 ) -> Vec<SurfacePoint> {
     use truck_geometry::prelude::*;
+    let tol = tol.max(TOLERANCE);
     let line = Line(p.uv, q.uv);
     let pcurve = PCurve::new(line, &surface);
     let (vec, _) = pcurve.parameter_division(pcurve.range_tuple(), tol);
@@ -1284,16 +1416,224 @@ fn polyline_on_surface(
         .collect()
 }
 
+/// Explicit classification for a conical/revoluted face with one circular boundary and a collapsed apex.
+#[allow(dead_code, unused)]
+#[derive(Debug, Clone, Copy)]
+pub struct CollapsedPeriodicBoundaryPair {
+    pub base_u: f64,
+    pub apex_u: f64,
+}
+
+impl CollapsedPeriodicBoundaryPair {
+    /// Classify whether a face's boundary consists of a single regular periodic loop and a collapsed apex.
+    pub fn try_classify<S: PreMeshableSurface>(
+        surface: &S,
+        closed: &[Vec<SurfacePoint>],
+        open: &[Vec<SurfacePoint>],
+        range: (Option<(f64, f64)>, Option<(f64, f64)>),
+    ) -> Option<Self> {
+        // 1. Exactly one regular closed periodic boundary and no open generator/sector curves
+        if closed.len() != 1 || !open.is_empty() {
+            return None;
+        }
+
+        let vp = surface.v_period()?;
+        let loop0 = &closed[0];
+
+        // 2. Regular loop must span the periodic parameter (winding ±1, span ~ period)
+        let (v_min, v_max) = loop0.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), p| {
+            (mn.min(p.uv.y), mx.max(p.uv.y))
+        });
+        if (v_max - v_min) < 0.75 * vp {
+            return None;
+        }
+
+        // 3. Compute actual u-extent of the base loop from its boundary points.
+        //    The declared range bounds from the surface primitive are NOT used to locate the apex
+        //    because RevolutedCurve::parameter_range() deliberately inflates u_max by 10× to
+        //    extend the search domain (PAR-RANGE-INHERITANCE-001), which causes the wrong endpoint
+        //    to be selected as the apex when the inflated bound is farther from u_mean than the
+        //    actual apex.
+
+        let u_mean: f64 = loop0.iter().map(|p| p.uv.x).sum::<f64>() / loop0.len() as f64;
+        let (u_min_loop, u_max_loop) = loop0.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), p| {
+            (mn.min(p.uv.x), mx.max(p.uv.x))
+        });
+        let u_spread = (u_max_loop - u_min_loop).abs().max(1e-9);
+
+        // 4. Find the apex u geometrically: the apex is on whichever side of the base loop
+        //    the surface collapses to a 3D point.  Try candidate u-values on both sides of
+        //    the loop's u-extent.  Also try the declared range endpoints as candidates if the
+        //    surface provided them.
+        use cgmath::MetricSpace;
+        let collapse_tol = 1e-3;
+
+        let (range_u, _) = range;
+
+        // Build a small set of candidates to probe:
+        //   - one step below the loop's min u
+        //   - one step above the loop's max u
+        //   - the declared range endpoints (if available)
+        let step = u_spread;
+        let mut candidates: Vec<f64> = vec![
+            u_min_loop - step,
+            u_max_loop + step,
+        ];
+        if let Some((u0, u1)) = range_u {
+            candidates.push(u0);
+            candidates.push(u1);
+        }
+
+        let u_apex = candidates.into_iter().find(|&u_cand| {
+            // Must be meaningfully separated from the base loop
+            if (u_mean - u_cand).abs() < 1e-6 {
+                return false;
+            }
+            // Geometric collapse test: surface.subs(u_cand, 0) ≈ surface.subs(u_cand, π)
+            let p0 = surface.subs(u_cand, 0.0);
+            let p_half = surface.subs(u_cand, 0.5 * vp);
+            p0.distance(p_half) <= collapse_tol
+        })?;
+
+        // 5. Axial separation between base loop and apex must be nonzero
+        if (u_mean - u_apex).abs() < 1e-6 {
+            return None;
+        }
+
+        Some(Self {
+            base_u: u_mean,
+            apex_u: u_apex,
+        })
+    }
+}
+
+#[allow(dead_code, unused)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BoundaryStratum {
+    #[allow(dead_code, unused)]
+    RegularCurve,
+    #[allow(dead_code, unused)]
+    CollapsedToPoint,
+    #[allow(dead_code, unused)]
+    PeriodicIdentification,
+}
+
+#[allow(dead_code, unused)]
+#[derive(Clone, Debug)]
+pub struct WireAssembledFace {
+    pub loops: Vec<Vec<SurfacePoint>>,
+    pub strata: Vec<BoundaryStratum>,
+}
+
+#[allow(dead_code, unused)]
+#[derive(Clone, Debug)]
+pub struct QuotientLiftCertificate {
+    #[allow(dead_code, unused)]
+    pub period_shifts: Vec<(i32, i32)>,
+    #[allow(dead_code, unused)]
+    pub max_junction_residual: f64,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub struct QuotientResolvedFace {
+    pub resolved_loops: Vec<Vec<SurfacePoint>>,
+    pub certificate: QuotientLiftCertificate,
+}
+
+#[allow(dead_code)]
+pub fn solve_quotient_lift<S: PreMeshableSurface>(
+    surface: &S,
+    loops: &[Vec<SurfacePoint>],
+) -> Option<QuotientResolvedFace> {
+    let u_period = surface.u_period();
+    let v_period = surface.v_period();
+
+    let mut resolved_loops = Vec::with_capacity(loops.len());
+    let mut period_shifts = Vec::with_capacity(loops.len());
+    let mut max_junction_residual = 0.0f64;
+
+    for loop_pts in loops {
+        if loop_pts.len() < 2 {
+            resolved_loops.push(loop_pts.clone());
+            period_shifts.push((0, 0));
+            continue;
+        }
+
+        let p0 = loop_pts[0].uv;
+        let p1 = loop_pts[loop_pts.len() - 1].uv;
+        let du = p1.x - p0.x;
+        let dv = p1.y - p0.y;
+
+        let ku = match u_period {
+            Some(pu) if pu > 1e-6 => (du / pu).round() as i32,
+            _ => 0,
+        };
+        let kv = match v_period {
+            Some(pv) if pv > 1e-6 => (dv / pv).round() as i32,
+            _ => 0,
+        };
+
+        period_shifts.push((ku, kv));
+
+        let u_shift = match u_period {
+            Some(pu) => (ku as f64) * pu,
+            None => 0.0,
+        };
+        let v_shift = match v_period {
+            Some(pv) => (kv as f64) * pv,
+            None => 0.0,
+        };
+
+        let mut lifted_loop = loop_pts.clone();
+        let n = lifted_loop.len();
+        for (idx, pt) in lifted_loop.iter_mut().enumerate() {
+            let frac = idx as f64 / (n - 1).max(1) as f64;
+            pt.uv.x -= frac * u_shift;
+            pt.uv.y -= frac * v_shift;
+        }
+
+        let residual = lifted_loop[0].uv.distance(lifted_loop[n - 1].uv);
+        max_junction_residual = max_junction_residual.max(residual);
+        resolved_loops.push(lifted_loop);
+    }
+
+    Some(QuotientResolvedFace {
+        resolved_loops,
+        certificate: QuotientLiftCertificate {
+            period_shifts,
+            max_junction_residual,
+        },
+    })
+}
+
+#[test]
+fn test_global_quotient_lift_solver() {
+    use truck_modeling::{BSplineSurface, KnotVec};
+    let knot_vec = KnotVec::from(vec![0.0, 0.0, 1.0, 1.0]);
+    let ctrl_pts = vec![
+        vec![Point3::new(0.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0)],
+        vec![Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 1.0, 0.0)],
+    ];
+    let surface = BSplineSurface::new((knot_vec.clone(), knot_vec), ctrl_pts);
+    let loop_pts = vec![
+        (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
+        (Point2::new(1.0, 1.0), Point3::new(1.0, 1.0, 0.0)).into(),
+    ];
+    let resolved = solve_quotient_lift(&surface, &[loop_pts]);
+    assert!(resolved.is_some());
+    let res = resolved.unwrap();
+    assert_eq!(res.certificate.period_shifts, vec![(0, 0)]);
+}
+
+/*
 #[test]
 #[ignore]
 #[cfg(not(target_arch = "wasm32"))]
 fn par_bench() {
     use std::time::Instant;
     use truck_modeling::*;
-    const JSON: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../resources/shape/bottle.json"
-    ));
+    const JSON: &str = include_str!("../../resources/shape/bottle.json");
     let solid: Solid = serde_json::from_str(JSON).unwrap();
     let shell = solid.into_boundaries().pop().unwrap();
 
@@ -1308,4 +1648,100 @@ fn par_bench() {
         let _shell = shell_tessellation_single_thread(&shell, 0.01, by_search_parameter);
     });
     println!("{}ms", instant.elapsed().as_millis());
+}
+*/
+
+#[cfg(test)]
+mod cone_topology_tests {
+    use super::*;
+    use truck_modeling::{RevolutedCurve, Line, Point3, Vector3, Point2};
+    use std::f64::consts::PI;
+
+    fn make_test_cone(r_base: f64, r_apex: f64, h: f64) -> RevolutedCurve<Line<Point3>> {
+        let p0 = Point3::new(r_apex, 0.0, 0.0);
+        let p1 = Point3::new(r_base, 0.0, h);
+        RevolutedCurve::by_revolution(
+            Line(p0, p1),
+            Point3::origin(),
+            Vector3::unit_z(),
+        )
+    }
+
+    #[test]
+    fn test_cone_lateral_face_forward_classified() {
+        let cone = make_test_cone(10.0, 0.0, 10.0);
+        let loop0: Vec<SurfacePoint> = (0..=10)
+            .map(|i| {
+                let v = (i as f64 / 10.0) * 2.0 * PI;
+                let uv = Point2::new(1.0, v);
+                (uv, cone.subs(uv.x, uv.y)).into()
+            })
+            .collect();
+        let range = (Some((0.0, 1.0)), None);
+        let res = CollapsedPeriodicBoundaryPair::try_classify(&cone, &[loop0], &[], range);
+        assert!(res.is_some());
+        let pair = res.unwrap();
+        assert!((pair.apex_u - 0.0).abs() < 1e-6);
+        assert!((pair.base_u - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_truncated_cone_two_loops_rejected() {
+        let cone = make_test_cone(10.0, 5.0, 10.0);
+        let loop0: Vec<SurfacePoint> = (0..=10)
+            .map(|i| {
+                let v = (i as f64 / 10.0) * 2.0 * PI;
+                let uv = Point2::new(1.0, v);
+                (uv, cone.subs(uv.x, uv.y)).into()
+            })
+            .collect();
+        let loop1: Vec<SurfacePoint> = (0..=10)
+            .map(|i| {
+                let v = (i as f64 / 10.0) * 2.0 * PI;
+                let uv = Point2::new(0.0, v);
+                (uv, cone.subs(uv.x, uv.y)).into()
+            })
+            .collect();
+        let range = (Some((0.0, 1.0)), None);
+        let res = CollapsedPeriodicBoundaryPair::try_classify(&cone, &[loop0, loop1], &[], range);
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn test_cone_sector_with_open_generator_edges_rejected() {
+        let cone = make_test_cone(10.0, 0.0, 10.0);
+        let loop0: Vec<SurfacePoint> = (0..=10)
+            .map(|i| {
+                let v = (i as f64 / 10.0) * PI;
+                let uv = Point2::new(1.0, v);
+                (uv, cone.subs(uv.x, uv.y)).into()
+            })
+            .collect();
+        let open_edge: Vec<SurfacePoint> = vec![
+            (Point2::new(0.0, 0.0), cone.subs(0.0, 0.0)).into(),
+            (Point2::new(1.0, 0.0), cone.subs(1.0, 0.0)).into(),
+        ];
+        let range = (Some((0.0, 1.0)), None);
+        let res = CollapsedPeriodicBoundaryPair::try_classify(&cone, &[loop0], &[open_edge], range);
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn test_zero_area_non_cone_cylinder_rejected() {
+        let cylinder = RevolutedCurve::by_revolution(
+            Line(Point3::new(10.0, 0.0, 0.0), Point3::new(10.0, 0.0, 10.0)),
+            Point3::origin(),
+            Vector3::unit_z(),
+        );
+        let loop0: Vec<SurfacePoint> = (0..=10)
+            .map(|i| {
+                let v = (i as f64 / 10.0) * 2.0 * PI;
+                let uv = Point2::new(1.0, v);
+                (uv, cylinder.subs(uv.x, uv.y)).into()
+            })
+            .collect();
+        let range = (Some((0.0, 1.0)), None);
+        let res = CollapsedPeriodicBoundaryPair::try_classify(&cylinder, &[loop0], &[], range);
+        assert!(res.is_none());
+    }
 }

@@ -2,32 +2,44 @@ use super::*;
 
 impl ToSameGeometry<Curve2D> for Line<Point2> {
     #[inline]
-    fn to_same_geometry(&self) -> Curve2D { Curve2D::Line(*self) }
+    fn to_same_geometry(&self) -> Curve2D {
+        Curve2D::Line(*self)
+    }
 }
 
 impl ToSameGeometry<Curve2D> for Processor<TrimmedCurve<UnitCircle<Point2>>, Matrix3> {
     #[inline]
-    fn to_same_geometry(&self) -> Curve2D { Curve2D::Conic(Conic2D::Ellipse(*self)) }
+    fn to_same_geometry(&self) -> Curve2D {
+        Curve2D::Conic(Conic2D::Ellipse(*self))
+    }
 }
 
 impl ToSameGeometry<Curve2D> for BSplineCurve<Point2> {
     #[inline]
-    fn to_same_geometry(&self) -> Curve2D { Curve2D::BSplineCurve(self.clone()) }
+    fn to_same_geometry(&self) -> Curve2D {
+        Curve2D::BSplineCurve(self.clone())
+    }
 }
 
 impl ToSameGeometry<Curve3D> for Line<Point3> {
     #[inline]
-    fn to_same_geometry(&self) -> Curve3D { Curve3D::Line(*self) }
+    fn to_same_geometry(&self) -> Curve3D {
+        Curve3D::Line(*self)
+    }
 }
 
 impl ToSameGeometry<Curve3D> for Processor<TrimmedCurve<UnitCircle<Point3>>, Matrix4> {
     #[inline]
-    fn to_same_geometry(&self) -> Curve3D { Curve3D::Conic(Conic3D::Ellipse(*self)) }
+    fn to_same_geometry(&self) -> Curve3D {
+        Curve3D::Conic(Conic3D::Ellipse(*self))
+    }
 }
 
 impl ToSameGeometry<Curve3D> for BSplineCurve<Point3> {
     #[inline]
-    fn to_same_geometry(&self) -> Curve3D { Curve3D::BSplineCurve(self.clone()) }
+    fn to_same_geometry(&self) -> Curve3D {
+        Curve3D::BSplineCurve(self.clone())
+    }
 }
 
 impl Conic3D {
