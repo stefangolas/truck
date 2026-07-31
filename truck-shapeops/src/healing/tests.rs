@@ -109,7 +109,9 @@ fn test_split_closed_face_simple_cylinder_case() {
         PCurve(PCurve<Line<Point2>, Surface>),
     }
     impl From<PCurve<Line<Point2>, Surface>> for Curve {
-        fn from(value: PCurve<Line<Point2>, Surface>) -> Self { Self::PCurve(value) }
+        fn from(value: PCurve<Line<Point2>, Surface>) -> Self {
+            Self::PCurve(value)
+        }
     }
 
     let vertices = vec![
@@ -188,6 +190,7 @@ fn test_split_closed_face_simple_cylinder_case() {
             },
         ]],
         orientation: true,
+        provenance: Default::default(),
     }];
     let mut shell = CompressedShell {
         vertices,
@@ -274,6 +277,7 @@ fn test_split_closed_face_simple_cylinder_case() {
                 ]],
                 surface,
                 orientation: true,
+                provenance: Default::default(),
             },
             Face {
                 boundaries: vec![vec![
@@ -296,6 +300,7 @@ fn test_split_closed_face_simple_cylinder_case() {
                 ]],
                 surface,
                 orientation: true,
+                provenance: Default::default(),
             },
         ]
     );
@@ -451,6 +456,7 @@ fn test_split_closed_face_cylinder_with_hole() {
             ],
         ],
         orientation: true,
+        provenance: Default::default(),
     }];
     let mut shell = CompressedShell {
         vertices,
@@ -551,6 +557,7 @@ fn test_split_closed_face_cylinder_with_hole() {
                 ]],
                 surface,
                 orientation: true,
+                provenance: Default::default(),
             },
             Face {
                 boundaries: vec![vec![
@@ -581,6 +588,7 @@ fn test_split_closed_face_cylinder_with_hole() {
                 ]],
                 surface,
                 orientation: true,
+                provenance: Default::default(),
             },
         ]
     );
@@ -735,6 +743,7 @@ fn test_split_closed_face_cylinder_with_rotated_hole() {
             ],
         ],
         orientation: true,
+        provenance: Default::default(),
     }];
     let mut shell = CompressedShell {
         vertices,
@@ -843,6 +852,7 @@ fn test_split_closed_face_cylinder_with_rotated_hole() {
                 ]],
                 surface,
                 orientation: true,
+                provenance: Default::default(),
             },
             Face {
                 boundaries: vec![vec![
@@ -877,6 +887,7 @@ fn test_split_closed_face_cylinder_with_rotated_hole() {
                 ]],
                 surface,
                 orientation: true,
+                provenance: Default::default(),
             },
         ]
     );
@@ -898,7 +909,9 @@ fn too_simple_cylinder() {
         PCurve(PCurve<Line<Point2>, Surface>),
     }
     impl From<PCurve<Line<Point2>, Surface>> for Curve {
-        fn from(value: PCurve<Line<Point2>, Surface>) -> Self { Curve::PCurve(value) }
+        fn from(value: PCurve<Line<Point2>, Surface>) -> Self {
+            Curve::PCurve(value)
+        }
     }
     type Surface = RevolutedCurve<Line<Point3>>;
 
@@ -1031,6 +1044,7 @@ fn too_simple_cylinder() {
                 ]],
                 surface,
                 orientation: true,
+                provenance: Default::default(),
             },
             Face {
                 boundaries: vec![vec![
@@ -1053,6 +1067,7 @@ fn too_simple_cylinder() {
                 ]],
                 surface,
                 orientation: true,
+                provenance: Default::default(),
             },
         ]
     );
@@ -1513,7 +1528,9 @@ fn many_closed_boundary_cylinder() {
 }
 
 fn sp<S>(surface: &S, p: Point3, hint: Option<(f64, f64)>) -> Option<(f64, f64)>
-where S: SearchParameter<D2, Point = Point3> {
+where
+    S: SearchParameter<D2, Point = Point3>,
+{
     surface.search_parameter(p, hint, 10)
 }
 

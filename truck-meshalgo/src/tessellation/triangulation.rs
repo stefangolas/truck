@@ -1027,7 +1027,9 @@ impl PolyBoundary {
                 merged.extend(loop1.into_iter().rev());
                 closed.push(merged);
             }
-        } else if let Some(pair) = CollapsedPeriodicBoundaryPair::try_classify(surface, &closed, &open, range) {
+        } else if let Some(pair) =
+            CollapsedPeriodicBoundaryPair::try_classify(surface, &closed, &open, range)
+        {
             let loop0 = closed.remove(0);
             let loop1: Vec<SurfacePoint> = loop0
                 .iter()
@@ -1430,7 +1432,7 @@ impl CollapsedPeriodicBoundaryPair {
         surface: &S,
         closed: &[Vec<SurfacePoint>],
         open: &[Vec<SurfacePoint>],
-        range: (Option<(f64, f64)>, Option<(f64, f64)>),
+        _range: (Option<(f64, f64)>, Option<(f64, f64)>),
     ) -> Option<Self> {
         // 1. Exactly one regular closed periodic boundary and no open generator/sector curves
         if closed.len() != 1 || !open.is_empty() {
@@ -1441,59 +1443,43 @@ impl CollapsedPeriodicBoundaryPair {
         let loop0 = &closed[0];
 
         // 2. Regular loop must span the periodic parameter (winding ±1, span ~ period)
-        let (v_min, v_max) = loop0.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), p| {
-            (mn.min(p.uv.y), mx.max(p.uv.y))
-        });
+        let (v_min, v_max) = loop0
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), p| {
+                (mn.min(p.uv.y), mx.max(p.uv.y))
+            });
         if (v_max - v_min) < 0.75 * vp {
             return None;
         }
 
-        // 3. Compute actual u-extent of the base loop from its boundary points.
-        //    The declared range bounds from the surface primitive are NOT used to locate the apex
-        //    because RevolutedCurve::parameter_range() deliberately inflates u_max by 10× to
-        //    extend the search domain (PAR-RANGE-INHERITANCE-001), which causes the wrong endpoint
-        //    to be selected as the apex when the inflated bound is farther from u_mean than the
-        //    actual apex.
-
         let u_mean: f64 = loop0.iter().map(|p| p.uv.x).sum::<f64>() / loop0.len() as f64;
-        let (u_min_loop, u_max_loop) = loop0.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), p| {
-            (mn.min(p.uv.x), mx.max(p.uv.x))
-        });
-        let u_spread = (u_max_loop - u_min_loop).abs().max(1e-9);
 
-        // 4. Find the apex u geometrically: the apex is on whichever side of the base loop
-        //    the surface collapses to a 3D point.  Try candidate u-values on both sides of
-        //    the loop's u-extent.  Also try the declared range endpoints as candidates if the
-        //    surface provided them.
-        use cgmath::MetricSpace;
-        let collapse_tol = 1e-3;
+        // 3. Analytically compute exact u_apex where the angular orbit collapses to a point in 3D.
+        //    For any conical surface (revolved line), W(u) = P(u, 0) - P(u, π) is linear in u:
+        //    W(u) = W(0) + u * (W(1) - W(0)).
+        //    The apex is where W(u) = 0 => u_apex = -W(0) . ΔW / ||ΔW||^2.
+        use cgmath::InnerSpace;
+        let w = |u: f64| -> Vector3 {
+            let p0 = surface.subs(u, 0.0);
+            let p_half = surface.subs(u, 0.5 * vp);
+            p0 - p_half
+        };
 
-        let (range_u, _) = range;
+        let w0 = w(0.0);
+        let w1 = w(1.0);
+        let dw = w1 - w0;
+        let dw2 = dw.magnitude2();
 
-        // Build a small set of candidates to probe:
-        //   - one step below the loop's min u
-        //   - one step above the loop's max u
-        //   - the declared range endpoints (if available)
-        let step = u_spread;
-        let mut candidates: Vec<f64> = vec![
-            u_min_loop - step,
-            u_max_loop + step,
-        ];
-        if let Some((u0, u1)) = range_u {
-            candidates.push(u0);
-            candidates.push(u1);
+        if dw2 < 1e-12 {
+            return None;
         }
 
-        let u_apex = candidates.into_iter().find(|&u_cand| {
-            // Must be meaningfully separated from the base loop
-            if (u_mean - u_cand).abs() < 1e-6 {
-                return false;
-            }
-            // Geometric collapse test: surface.subs(u_cand, 0) ≈ surface.subs(u_cand, π)
-            let p0 = surface.subs(u_cand, 0.0);
-            let p_half = surface.subs(u_cand, 0.5 * vp);
-            p0.distance(p_half) <= collapse_tol
-        })?;
+        let u_apex = -w0.dot(dw) / dw2;
+
+        // 4. Certificate guard: verify 3D point collapse at u_apex
+        if w(u_apex).magnitude() > 1e-3 {
+            return None;
+        }
 
         // 5. Axial separation between base loop and apex must be nonzero
         if (u_mean - u_apex).abs() < 1e-6 {
@@ -1654,17 +1640,13 @@ fn par_bench() {
 #[cfg(test)]
 mod cone_topology_tests {
     use super::*;
-    use truck_modeling::{RevolutedCurve, Line, Point3, Vector3, Point2};
     use std::f64::consts::PI;
+    use truck_modeling::{Line, Point2, Point3, RevolutedCurve, Vector3};
 
     fn make_test_cone(r_base: f64, r_apex: f64, h: f64) -> RevolutedCurve<Line<Point3>> {
         let p0 = Point3::new(r_apex, 0.0, 0.0);
         let p1 = Point3::new(r_base, 0.0, h);
-        RevolutedCurve::by_revolution(
-            Line(p0, p1),
-            Point3::origin(),
-            Vector3::unit_z(),
-        )
+        RevolutedCurve::by_revolution(Line(p0, p1), Point3::origin(), Vector3::unit_z())
     }
 
     #[test]
