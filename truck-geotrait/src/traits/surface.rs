@@ -46,27 +46,43 @@ pub trait ParametricSurface: Clone {
     }
     /// `None` in default; `Some(period)` if periodic w.r.t. parameter u.
     #[inline(always)]
-    fn u_period(&self) -> Option<f64> { None }
+    fn u_period(&self) -> Option<f64> {
+        None
+    }
     /// `None` in default; `Some(period)` if periodic w.r.t. parameter v.
     #[inline(always)]
-    fn v_period(&self) -> Option<f64> { None }
+    fn v_period(&self) -> Option<f64> {
+        None
+    }
 }
 
 impl<S: ParametricSurface> ParametricSurface for &S {
     type Point = S::Point;
     type Vector = S::Vector;
     #[inline(always)]
-    fn subs(&self, u: f64, v: f64) -> Self::Point { (*self).subs(u, v) }
+    fn subs(&self, u: f64, v: f64) -> Self::Point {
+        (*self).subs(u, v)
+    }
     #[inline(always)]
-    fn uder(&self, u: f64, v: f64) -> Self::Vector { (*self).uder(u, v) }
+    fn uder(&self, u: f64, v: f64) -> Self::Vector {
+        (*self).uder(u, v)
+    }
     #[inline(always)]
-    fn vder(&self, u: f64, v: f64) -> Self::Vector { (*self).vder(u, v) }
+    fn vder(&self, u: f64, v: f64) -> Self::Vector {
+        (*self).vder(u, v)
+    }
     #[inline(always)]
-    fn uuder(&self, u: f64, v: f64) -> Self::Vector { (*self).uuder(u, v) }
+    fn uuder(&self, u: f64, v: f64) -> Self::Vector {
+        (*self).uuder(u, v)
+    }
     #[inline(always)]
-    fn uvder(&self, u: f64, v: f64) -> Self::Vector { (*self).uvder(u, v) }
+    fn uvder(&self, u: f64, v: f64) -> Self::Vector {
+        (*self).uvder(u, v)
+    }
     #[inline(always)]
-    fn vvder(&self, u: f64, v: f64) -> Self::Vector { (*self).vvder(u, v) }
+    fn vvder(&self, u: f64, v: f64) -> Self::Vector {
+        (*self).vvder(u, v)
+    }
     #[inline(always)]
     fn der_mn(&self, m: usize, n: usize, u: f64, v: f64) -> Self::Vector {
         (*self).der_mn(m, n, u, v)
@@ -76,28 +92,46 @@ impl<S: ParametricSurface> ParametricSurface for &S {
         (*self).ders(max_order, u, v)
     }
     #[inline(always)]
-    fn parameter_range(&self) -> (ParameterRange, ParameterRange) { (*self).parameter_range() }
+    fn parameter_range(&self) -> (ParameterRange, ParameterRange) {
+        (*self).parameter_range()
+    }
     #[inline(always)]
-    fn u_period(&self) -> Option<f64> { (*self).u_period() }
+    fn u_period(&self) -> Option<f64> {
+        (*self).u_period()
+    }
     #[inline(always)]
-    fn v_period(&self) -> Option<f64> { (*self).v_period() }
+    fn v_period(&self) -> Option<f64> {
+        (*self).v_period()
+    }
 }
 
 impl<S: ParametricSurface> ParametricSurface for Box<S> {
     type Point = S::Point;
     type Vector = S::Vector;
     #[inline(always)]
-    fn subs(&self, u: f64, v: f64) -> Self::Point { (**self).subs(u, v) }
+    fn subs(&self, u: f64, v: f64) -> Self::Point {
+        (**self).subs(u, v)
+    }
     #[inline(always)]
-    fn uder(&self, u: f64, v: f64) -> Self::Vector { (**self).uder(u, v) }
+    fn uder(&self, u: f64, v: f64) -> Self::Vector {
+        (**self).uder(u, v)
+    }
     #[inline(always)]
-    fn vder(&self, u: f64, v: f64) -> Self::Vector { (**self).vder(u, v) }
+    fn vder(&self, u: f64, v: f64) -> Self::Vector {
+        (**self).vder(u, v)
+    }
     #[inline(always)]
-    fn uuder(&self, u: f64, v: f64) -> Self::Vector { (**self).uuder(u, v) }
+    fn uuder(&self, u: f64, v: f64) -> Self::Vector {
+        (**self).uuder(u, v)
+    }
     #[inline(always)]
-    fn uvder(&self, u: f64, v: f64) -> Self::Vector { (**self).uvder(u, v) }
+    fn uvder(&self, u: f64, v: f64) -> Self::Vector {
+        (**self).uvder(u, v)
+    }
     #[inline(always)]
-    fn vvder(&self, u: f64, v: f64) -> Self::Vector { (**self).vvder(u, v) }
+    fn vvder(&self, u: f64, v: f64) -> Self::Vector {
+        (**self).vvder(u, v)
+    }
     #[inline(always)]
     fn der_mn(&self, m: usize, n: usize, u: f64, v: f64) -> Self::Vector {
         (**self).der_mn(m, n, u, v)
@@ -107,11 +141,17 @@ impl<S: ParametricSurface> ParametricSurface for Box<S> {
         (**self).ders(max_order, u, v)
     }
     #[inline(always)]
-    fn parameter_range(&self) -> (ParameterRange, ParameterRange) { (**self).parameter_range() }
+    fn parameter_range(&self) -> (ParameterRange, ParameterRange) {
+        (**self).parameter_range()
+    }
     #[inline(always)]
-    fn u_period(&self) -> Option<f64> { (**self).u_period() }
+    fn u_period(&self) -> Option<f64> {
+        (**self).u_period()
+    }
     #[inline(always)]
-    fn v_period(&self) -> Option<f64> { (**self).v_period() }
+    fn v_period(&self) -> Option<f64> {
+        (**self).v_period()
+    }
 }
 
 /// 2D parametric surface
@@ -147,12 +187,16 @@ pub trait ParametricSurface3D: ParametricSurface<Point = Point3, Vector = Vector
 
 impl<S: ParametricSurface3D> ParametricSurface3D for &S {
     #[inline(always)]
-    fn normal(&self, u: f64, v: f64) -> Vector3 { (*self).normal(u, v) }
+    fn normal(&self, u: f64, v: f64) -> Vector3 {
+        (*self).normal(u, v)
+    }
 }
 
 impl<S: ParametricSurface3D> ParametricSurface3D for Box<S> {
     #[inline(always)]
-    fn normal(&self, u: f64, v: f64) -> Vector3 { (**self).normal(u, v) }
+    fn normal(&self, u: f64, v: f64) -> Vector3 {
+        (**self).normal(u, v)
+    }
 }
 
 /// Bounded surface with parametric range i.e. it is guaranteed that the return value of `parameter_range` is not `Bound::Unbounded`.

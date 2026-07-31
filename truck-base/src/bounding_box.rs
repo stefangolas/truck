@@ -9,7 +9,8 @@ pub struct BoundingBox<V>(V, V);
 
 /// The trait for defining the bounding box
 pub trait Bounded:
-    Copy + MetricSpace<Metric = Self::Scalar> + Index<usize, Output = Self::Scalar> + PartialEq {
+    Copy + MetricSpace<Metric = Self::Scalar> + Index<usize, Output = Self::Scalar> + PartialEq
+{
     /// the scalar of vector
     type Scalar: BaseFloat;
     /// the result of subtraction
@@ -95,13 +96,17 @@ impl_bounded!(Vector4, Vector4, 0, 1, 2, 3);
 
 impl<V: Bounded> Default for BoundingBox<V> {
     #[inline(always)]
-    fn default() -> Self { BoundingBox(V::infinity(), V::neg_infinity()) }
+    fn default() -> Self {
+        BoundingBox(V::infinity(), V::neg_infinity())
+    }
 }
 
 impl<V: Bounded> BoundingBox<V> {
     /// Creates an empty bounding box
     #[inline(always)]
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
     /// Adds a point to the bounding box.
     /// # Examples
     /// ```
@@ -165,7 +170,9 @@ impl<V: Bounded> BoundingBox<V> {
     /// assert_eq!(bdd_box.max(), Vector2::from([f64::NEG_INFINITY; 2]));
     /// ```
     #[inline(always)]
-    pub const fn max(self) -> V { self.1 }
+    pub const fn max(self) -> V {
+        self.1
+    }
     /// Returns the reference to the minimal point.
     /// # Examples
     /// ```
@@ -183,7 +190,9 @@ impl<V: Bounded> BoundingBox<V> {
     /// assert_eq!(bdd_box.min(), Vector2::from([f64::INFINITY; 2]));
     /// ```
     #[inline(always)]
-    pub const fn min(self) -> V { self.0 }
+    pub const fn min(self) -> V {
+        self.0
+    }
     /// Returns the diagonal vector.
     /// # Examples
     /// ```
@@ -201,7 +210,9 @@ impl<V: Bounded> BoundingBox<V> {
     /// assert_eq!(bdd_box.diagonal(), Vector2::new(f64::NEG_INFINITY, f64::NEG_INFINITY));
     /// ```
     #[inline(always)]
-    pub fn diagonal(self) -> V::Vector { self.1.diagonal(self.0) }
+    pub fn diagonal(self) -> V::Vector {
+        self.1.diagonal(self.0)
+    }
 
     /// Returns the diameter of the bounding box.
     /// # Examples
@@ -244,7 +255,9 @@ impl<V: Bounded> BoundingBox<V> {
     /// assert_eq!(bdd_box.size(), f64::NEG_INFINITY);
     /// ```
     #[inline(always)]
-    pub fn size(self) -> V::Scalar { V::max_component(self.diagonal()) }
+    pub fn size(self) -> V::Scalar {
+        V::max_component(self.diagonal())
+    }
 
     /// Returns the center of the bounding box.
     /// # Examples
@@ -266,7 +279,9 @@ impl<V: Bounded> BoundingBox<V> {
     /// assert!(center[2].is_nan());
     /// ```
     #[inline(always)]
-    pub fn center(self) -> V { self.0.mid(self.1) }
+    pub fn center(self) -> V {
+        self.0.mid(self.1)
+    }
     /// Returns whether `self` contains `pt` or not.
     /// # Examples
     /// ```
@@ -277,7 +292,9 @@ impl<V: Bounded> BoundingBox<V> {
     /// assert!(!bdd_box.contains(Point2::new(-0.1, 0.5)));
     /// ```
     #[inline(always)]
-    pub fn contains(self, pt: V) -> bool { self + BoundingBox(pt, pt) == self }
+    pub fn contains(self, pt: V) -> bool {
+        self + BoundingBox(pt, pt) == self
+    }
 }
 
 impl<V> BoundingBox<V> where V: Index<usize> {}
@@ -319,7 +336,9 @@ impl<V: Bounded> std::ops::AddAssign<&BoundingBox<V>> for BoundingBox<V> {
     /// assert_eq!(bdd_box.max(), Vector2::new(7.0,  6.0));
     /// ```
     #[inline(always)]
-    fn add_assign(&mut self, other: &BoundingBox<V>) { *self += *other }
+    fn add_assign(&mut self, other: &BoundingBox<V>) {
+        *self += *other
+    }
 }
 
 impl<V: Bounded> std::ops::AddAssign<BoundingBox<V>> for BoundingBox<V> {
@@ -368,7 +387,9 @@ impl<V: Bounded> std::ops::Add<&BoundingBox<V>> for &BoundingBox<V> {
     /// assert_eq!(cloned_bdd_box.max(), Vector2::new(7.0, 6.0));
     /// ```
     #[inline(always)]
-    fn add(self, other: &BoundingBox<V>) -> BoundingBox<V> { *self + *other }
+    fn add(self, other: &BoundingBox<V>) -> BoundingBox<V> {
+        *self + *other
+    }
 }
 
 impl<V: Bounded> std::ops::Add<&BoundingBox<V>> for BoundingBox<V> {
@@ -392,7 +413,9 @@ impl<V: Bounded> std::ops::Add<&BoundingBox<V>> for BoundingBox<V> {
     /// assert_eq!(cloned_bdd_box.max(), Vector2::new(7.0,  6.0));
     /// ```
     #[inline(always)]
-    fn add(self, other: &BoundingBox<V>) -> BoundingBox<V> { self + *other }
+    fn add(self, other: &BoundingBox<V>) -> BoundingBox<V> {
+        self + *other
+    }
 }
 
 impl<V: Bounded> std::ops::Add<BoundingBox<V>> for &BoundingBox<V> {
@@ -416,7 +439,9 @@ impl<V: Bounded> std::ops::Add<BoundingBox<V>> for &BoundingBox<V> {
     /// assert_eq!(cloned_bdd_box.max(), Vector2::new(7.0,  6.0));
     /// ```
     #[inline(always)]
-    fn add(self, other: BoundingBox<V>) -> BoundingBox<V> { other + self }
+    fn add(self, other: BoundingBox<V>) -> BoundingBox<V> {
+        other + self
+    }
 }
 
 impl<V: Bounded> std::ops::Add<BoundingBox<V>> for BoundingBox<V> {
@@ -464,7 +489,9 @@ impl<V: Bounded> std::ops::BitXorAssign<&BoundingBox<V>> for BoundingBox<V> {
     /// assert!(bdd_box.is_empty());
     /// ```
     #[inline(always)]
-    fn bitxor_assign(&mut self, other: &BoundingBox<V>) { *self ^= *other; }
+    fn bitxor_assign(&mut self, other: &BoundingBox<V>) {
+        *self ^= *other;
+    }
 }
 
 impl<V: Bounded> std::ops::BitXorAssign<BoundingBox<V>> for BoundingBox<V> {
@@ -511,7 +538,9 @@ impl<V: Bounded> std::ops::BitXor<&BoundingBox<V>> for &BoundingBox<V> {
     /// assert!(new_empty.is_empty());
     /// ```
     #[inline(always)]
-    fn bitxor(self, other: &BoundingBox<V>) -> BoundingBox<V> { *self ^ *other }
+    fn bitxor(self, other: &BoundingBox<V>) -> BoundingBox<V> {
+        *self ^ *other
+    }
 }
 
 impl<V: Bounded> std::ops::BitXor<&BoundingBox<V>> for BoundingBox<V> {
@@ -534,7 +563,9 @@ impl<V: Bounded> std::ops::BitXor<&BoundingBox<V>> for BoundingBox<V> {
     /// assert!(new_empty.is_empty());
     /// ```
     #[inline(always)]
-    fn bitxor(self, other: &BoundingBox<V>) -> BoundingBox<V> { self ^ *other }
+    fn bitxor(self, other: &BoundingBox<V>) -> BoundingBox<V> {
+        self ^ *other
+    }
 }
 
 impl<V: Bounded> std::ops::BitXor<BoundingBox<V>> for &BoundingBox<V> {
@@ -557,7 +588,9 @@ impl<V: Bounded> std::ops::BitXor<BoundingBox<V>> for &BoundingBox<V> {
     /// assert!(new_empty.is_empty());
     /// ```
     #[inline(always)]
-    fn bitxor(self, other: BoundingBox<V>) -> BoundingBox<V> { other ^ self }
+    fn bitxor(self, other: BoundingBox<V>) -> BoundingBox<V> {
+        other ^ self
+    }
 }
 
 impl<V: Bounded> std::ops::BitXor<BoundingBox<V>> for BoundingBox<V> {

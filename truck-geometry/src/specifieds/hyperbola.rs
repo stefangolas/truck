@@ -3,7 +3,9 @@ use super::*;
 impl<P> UnitHyperbola<P> {
     /// constructor
     #[inline]
-    pub const fn new() -> UnitHyperbola<P> { UnitHyperbola(std::marker::PhantomData) }
+    pub const fn new() -> UnitHyperbola<P> {
+        UnitHyperbola(std::marker::PhantomData)
+    }
 }
 
 impl ParametricCurve for UnitHyperbola<Point2> {
@@ -17,11 +19,17 @@ impl ParametricCurve for UnitHyperbola<Point2> {
         }
     }
     #[inline]
-    fn subs(&self, t: f64) -> Self::Point { Point2::from_vec(self.der_n(0, t)) }
+    fn subs(&self, t: f64) -> Self::Point {
+        Point2::from_vec(self.der_n(0, t))
+    }
     #[inline]
-    fn der(&self, t: f64) -> Self::Vector { self.der_n(1, t) }
+    fn der(&self, t: f64) -> Self::Vector {
+        self.der_n(1, t)
+    }
     #[inline]
-    fn der2(&self, t: f64) -> Self::Vector { self.der_n(2, t) }
+    fn der2(&self, t: f64) -> Self::Vector {
+        self.der_n(2, t)
+    }
 }
 
 impl ParametricCurve for UnitHyperbola<Point3> {
@@ -35,11 +43,17 @@ impl ParametricCurve for UnitHyperbola<Point3> {
         }
     }
     #[inline]
-    fn subs(&self, t: f64) -> Self::Point { Point3::from_vec(self.der_n(0, t)) }
+    fn subs(&self, t: f64) -> Self::Point {
+        Point3::from_vec(self.der_n(0, t))
+    }
     #[inline]
-    fn der(&self, t: f64) -> Self::Vector { self.der_n(1, t) }
+    fn der(&self, t: f64) -> Self::Vector {
+        self.der_n(1, t)
+    }
     #[inline]
-    fn der2(&self, t: f64) -> Self::Vector { self.der_n(2, t) }
+    fn der2(&self, t: f64) -> Self::Vector {
+        self.der_n(2, t)
+    }
 }
 
 impl<P> ParameterDivision1D for UnitHyperbola<P>

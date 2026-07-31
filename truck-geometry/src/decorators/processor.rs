@@ -24,15 +24,27 @@ impl<E, T: One> Processor<E, T> {
 
     /// Returns the reference of entity
     #[inline(always)]
-    pub const fn entity(&self) -> &E { &self.entity }
+    pub const fn entity(&self) -> &E {
+        &self.entity
+    }
+
+    /// Returns the mutable reference of entity
+    #[inline(always)]
+    pub fn entity_mut(&mut self) -> &mut E {
+        &mut self.entity
+    }
 
     /// Returns the reference of transform
     #[inline(always)]
-    pub const fn transform(&self) -> &T { &self.transform }
+    pub const fn transform(&self) -> &T {
+        &self.transform
+    }
 
     /// Returns the orientation of surface
     #[inline(always)]
-    pub const fn orientation(&self) -> bool { self.orientation }
+    pub const fn orientation(&self) -> bool {
+        self.orientation
+    }
 
     #[inline(always)]
     fn sign(&self) -> f64 {
@@ -55,7 +67,9 @@ impl<E, T: One> Processor<E, T> {
     /// apply the function to the entity geometry
     #[inline(always)]
     pub fn map_ref<G, F: FnOnce(&E) -> G>(&self, f: F) -> Processor<G, T>
-    where T: Copy {
+    where
+        T: Copy,
+    {
         Processor {
             entity: f(&self.entity),
             transform: self.transform,
@@ -65,7 +79,9 @@ impl<E, T: One> Processor<E, T> {
 
     /// apply the transform and inverse
     pub fn contract(self) -> E
-    where E: Transformed<T> + Invertible {
+    where
+        E: Transformed<T> + Invertible,
+    {
         let mut res = self.entity;
         res.transform_by(self.transform);
         if !self.orientation {
@@ -77,7 +93,9 @@ impl<E, T: One> Processor<E, T> {
 
 impl<E: Clone, T: Clone> Invertible for Processor<E, T> {
     #[inline(always)]
-    fn invert(&mut self) { self.orientation = !self.orientation; }
+    fn invert(&mut self) {
+        self.orientation = !self.orientation;
+    }
     #[inline(always)]
     fn inverse(&self) -> Self {
         Processor {
@@ -133,9 +151,13 @@ where
         self.transform.transform_vector(self.entity.der2(t))
     }
     #[inline(always)]
-    fn parameter_range(&self) -> ParameterRange { self.entity.parameter_range() }
+    fn parameter_range(&self) -> ParameterRange {
+        self.entity.parameter_range()
+    }
     #[inline(always)]
-    fn period(&self) -> Option<f64> { self.entity.period() }
+    fn period(&self) -> Option<f64> {
+        self.entity.period()
+    }
 }
 
 impl<C, T> BoundedCurve for Processor<C, T>
@@ -286,12 +308,16 @@ where
 impl<E, T> Deref for Processor<E, T> {
     type Target = E;
     #[inline(always)]
-    fn deref(&self) -> &E { &self.entity }
+    fn deref(&self) -> &E {
+        &self.entity
+    }
 }
 
 impl<E, T> DerefMut for Processor<E, T> {
     #[inline(always)]
-    fn deref_mut(&mut self) -> &mut E { &mut self.entity }
+    fn deref_mut(&mut self) -> &mut E {
+        &mut self.entity
+    }
 }
 
 impl<E, T> Transformed<T> for Processor<E, T>
@@ -300,7 +326,9 @@ where
     E: Clone,
 {
     #[inline(always)]
-    fn transform_by(&mut self, trans: T) { self.transform = trans * self.transform; }
+    fn transform_by(&mut self, trans: T) {
+        self.transform = trans * self.transform;
+    }
     #[inline(always)]
     fn transformed(&self, trans: T) -> Self {
         Self {
@@ -329,7 +357,8 @@ where
 }
 
 impl<C> ParameterDivision1D for Processor<C, Matrix3>
-where C: ParameterDivision1D<Point = Point2> + BoundedCurve<Point = Point2>
+where
+    C: ParameterDivision1D<Point = Point2> + BoundedCurve<Point = Point2>,
 {
     type Point = Point2;
     fn parameter_division(&self, range: (f64, f64), tol: f64) -> (Vec<f64>, Vec<Self::Point>) {
@@ -362,7 +391,8 @@ where C: ParameterDivision1D<Point = Point2> + BoundedCurve<Point = Point2>
 }
 
 impl<C> ParameterDivision1D for Processor<C, Matrix4>
-where C: ParameterDivision1D<Point = Point3> + BoundedCurve<Point = Point3>
+where
+    C: ParameterDivision1D<Point = Point3> + BoundedCurve<Point = Point3>,
 {
     type Point = Point3;
     fn parameter_division(&self, range: (f64, f64), tol: f64) -> (Vec<f64>, Vec<Self::Point>) {

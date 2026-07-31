@@ -109,9 +109,13 @@ impl PolygonMesh {
         }
     }
     /// meshing shell
-    pub fn from_shell(shell: Shell, tol: f64) -> PolygonMesh { shell.to_polygon(tol) }
+    pub fn from_shell(shell: Shell, tol: f64) -> PolygonMesh {
+        shell.to_polygon(tol)
+    }
     /// meshing solid
-    pub fn from_solid(solid: Solid, tol: f64) -> PolygonMesh { solid.to_polygon(tol) }
+    pub fn from_solid(solid: Solid, tol: f64) -> PolygonMesh {
+        solid.to_polygon(tol)
+    }
     /// Returns the bonding box
     pub fn bounding_box(&self) -> Vec<f64> {
         let bdd = self.0.bounding_box();
@@ -120,17 +124,27 @@ impl PolygonMesh {
         vec![min[0], min[1], min[2], max[0], max[1], max[2]]
     }
     /// merge two polygons: `self` and `other`.
-    pub fn merge(&mut self, other: PolygonMesh) { self.0.merge(other.0); }
+    pub fn merge(&mut self, other: PolygonMesh) {
+        self.0.merge(other.0);
+    }
 }
 
 #[wasm_bindgen]
 impl PolygonBuffer {
     /// vertex buffer. One attribute contains `position: [f32; 3]`, `uv_coord: [f32; 2]` and `normal: [f32; 3]`.
-    pub fn vertex_buffer(&self) -> Vec<f32> { self.vertices.clone() }
+    pub fn vertex_buffer(&self) -> Vec<f32> {
+        self.vertices.clone()
+    }
     /// the length (bytes) of vertex buffer. (Num of attributes) * 8 components * 4 bytes.
-    pub fn vertex_buffer_size(&self) -> usize { self.vertices.len() * 4 }
+    pub fn vertex_buffer_size(&self) -> usize {
+        self.vertices.len() * 4
+    }
     /// index buffer. `u32`.
-    pub fn index_buffer(&self) -> Vec<u32> { self.indices.clone() }
+    pub fn index_buffer(&self) -> Vec<u32> {
+        self.indices.clone()
+    }
     /// the length (bytes) of index buffer. (Num of triangles) * 3 vertices * 4 bytes.
-    pub fn index_buffer_size(&self) -> usize { self.indices.len() * 4 }
+    pub fn index_buffer_size(&self) -> usize {
+        self.indices.len() * 4
+    }
 }

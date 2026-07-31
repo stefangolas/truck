@@ -333,7 +333,9 @@ impl Table {
     ) {
         use cgmath::Transform;
         use step_geometry::*;
-        let Surface::ElementarySurface(ElementarySurface::ConicalSurface(ref mut processor)) = surface else {
+        let Surface::ElementarySurface(ElementarySurface::ConicalSurface(ref mut processor)) =
+            surface
+        else {
             return;
         };
 
@@ -371,11 +373,7 @@ impl Table {
 
         let tan = dr / dz;
         let r0 = p0.x - p0.z * tan;
-        let z_apex = if tan.abs() > 1.0e-12 {
-            -r0 / tan
-        } else {
-            0.0
-        };
+        let z_apex = if tan.abs() > 1.0e-12 { -r0 / tan } else { 0.0 };
 
         let mut z_min = f64::INFINITY;
         let mut z_max = f64::NEG_INFINITY;

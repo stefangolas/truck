@@ -212,7 +212,9 @@ where
 }
 
 impl<P, C, S> StepLength for StepShell<'_, P, C, S> {
-    fn step_length(&self) -> usize { self.indices.ep_points + self.entity.vertices.len() }
+    fn step_length(&self) -> usize {
+        self.indices.ep_points + self.entity.vertices.len()
+    }
 }
 
 #[doc(hidden)]
@@ -321,7 +323,9 @@ where
     C: StepLength,
     S: StepLength,
 {
-    fn from(solid: &'a CompressedSolid<P, C, S>) -> Self { Self::Solid(StepSolid::new(solid)) }
+    fn from(solid: &'a CompressedSolid<P, C, S>) -> Self {
+        Self::Solid(StepSolid::new(solid))
+    }
 }
 
 impl<'a, P, C, S> FromIterator<&'a CompressedShell<P, C, S>> for StepModel<'a, P, C, S>

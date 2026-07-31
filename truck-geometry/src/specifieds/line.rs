@@ -5,7 +5,9 @@ impl<P: Copy> Line<P> {
     /// initialize line from vector
     #[inline]
     pub fn from_origin_direction<V>(origin: P, direction: V) -> Self
-    where P: std::ops::Add<V, Output = P> {
+    where
+        P: std::ops::Add<V, Output = P>,
+    {
         Self(origin, origin + direction)
     }
 }
@@ -106,14 +108,22 @@ impl<P: ControlPoint<f64>> ParametricCurve for Line<P> {
         }
     }
     #[inline]
-    fn subs(&self, t: f64) -> Self::Point { self.0 + (self.1 - self.0) * t }
+    fn subs(&self, t: f64) -> Self::Point {
+        self.0 + (self.1 - self.0) * t
+    }
     #[inline]
-    fn der(&self, _: f64) -> Self::Vector { self.1 - self.0 }
+    fn der(&self, _: f64) -> Self::Vector {
+        self.1 - self.0
+    }
     #[inline]
-    fn der2(&self, _: f64) -> Self::Vector { Self::Vector::zero() }
+    fn der2(&self, _: f64) -> Self::Vector {
+        Self::Vector::zero()
+    }
     /// Return `0.0..=1.0` i.e. we regard it as a segment
     #[inline]
-    fn parameter_range(&self) -> ParameterRange { (Bound::Included(0.0), Bound::Included(1.0)) }
+    fn parameter_range(&self) -> ParameterRange {
+        (Bound::Included(0.0), Bound::Included(1.0))
+    }
 }
 
 impl<P: ControlPoint<f64>> BoundedCurve for Line<P> {}
@@ -141,9 +151,13 @@ impl<P: ControlPoint<f64>> ParameterDivision1D for Line<P> {
 
 impl<P: Copy> Invertible for Line<P> {
     #[inline]
-    fn invert(&mut self) { *self = Self(self.1, self.0); }
+    fn invert(&mut self) {
+        *self = Self(self.1, self.0);
+    }
     #[inline]
-    fn inverse(&self) -> Self { Self(self.1, self.0) }
+    fn inverse(&self) -> Self {
+        Self(self.1, self.0)
+    }
 }
 
 impl<P> SearchNearestParameter<D1> for Line<P>
@@ -195,7 +209,9 @@ impl<P> From<Line<P>> for BSplineCurve<P> {
 }
 
 impl<P: Copy> ToSameGeometry<BSplineCurve<P>> for Line<P> {
-    fn to_same_geometry(&self) -> BSplineCurve<P> { BSplineCurve::from(*self) }
+    fn to_same_geometry(&self) -> BSplineCurve<P> {
+        BSplineCurve::from(*self)
+    }
 }
 
 #[test]

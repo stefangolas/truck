@@ -28,14 +28,18 @@ impl<P> Vertex<P> {
     /// ```
     #[inline(always)]
     pub fn news(points: impl AsRef<[P]>) -> Vec<Vertex<P>>
-    where P: Copy {
+    where
+        P: Copy,
+    {
         points.as_ref().iter().map(|p| Vertex::new(*p)).collect()
     }
 
     /// Returns the point of vertex.
     #[inline(always)]
     pub fn point(&self) -> P
-    where P: Clone {
+    where
+        P: Clone,
+    {
         self.point.lock().clone()
     }
 
@@ -58,7 +62,9 @@ impl<P> Vertex<P> {
     /// assert_eq!(v1.point(), 1);
     /// ```
     #[inline(always)]
-    pub fn set_point(&self, point: P) { *self.point.lock() = point; }
+    pub fn set_point(&self, point: P) {
+        *self.point.lock() = point;
+    }
 
     /// Returns vertex whose point is converted by `point_mapping`.
     /// # Remarks
@@ -92,7 +98,9 @@ impl<P> Vertex<P> {
 
     /// Returns the id of the vertex.
     #[inline(always)]
-    pub fn id(&self) -> VertexID<P> { ID::new(Arc::as_ptr(&self.point)) }
+    pub fn id(&self) -> VertexID<P> {
+        ID::new(Arc::as_ptr(&self.point))
+    }
 
     /// Returns how many same vertices.
     ///
@@ -114,7 +122,9 @@ impl<P> Vertex<P> {
     /// assert_eq!(v0.count(), 1);
     /// ```
     #[inline(always)]
-    pub fn count(&self) -> usize { Arc::strong_count(&self.point) }
+    pub fn count(&self) -> usize {
+        Arc::strong_count(&self.point)
+    }
 
     /// Create display struct for debugging the vertex.
     /// # Examples
@@ -162,14 +172,18 @@ impl<P> Clone for Vertex<P> {
 
 impl<P> PartialEq for Vertex<P> {
     #[inline(always)]
-    fn eq(&self, other: &Self) -> bool { self.id() == other.id() }
+    fn eq(&self, other: &Self) -> bool {
+        self.id() == other.id()
+    }
 }
 
 impl<P> Eq for Vertex<P> {}
 
 impl<P> Hash for Vertex<P> {
     #[inline(always)]
-    fn hash<H: Hasher>(&self, state: &mut H) { std::ptr::hash(Arc::as_ptr(&self.point), state); }
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::ptr::hash(Arc::as_ptr(&self.point), state);
+    }
 }
 
 impl<P: Debug> Debug for DebugDisplay<'_, Vertex<P>, VertexDisplayFormat> {

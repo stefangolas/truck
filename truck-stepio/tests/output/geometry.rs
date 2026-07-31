@@ -2,7 +2,9 @@ use truck_geometry::prelude::*;
 use truck_stepio::out::*;
 
 fn step_test<T: StepLength>(x: T, ans: &str, length: usize)
-where for<'a> StepDataDisplay<&'a T>: std::fmt::Display {
+where
+    for<'a> StepDataDisplay<&'a T>: std::fmt::Display,
+{
     let display = StepDataDisplay::new(&x, 1);
     assert_eq!(&display.to_string(), ans);
     assert_eq!(x.step_length(), length);

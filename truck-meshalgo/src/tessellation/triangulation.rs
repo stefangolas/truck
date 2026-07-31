@@ -1726,4 +1726,38 @@ mod cone_topology_tests {
         let res = CollapsedPeriodicBoundaryPair::try_classify(&cylinder, &[loop0], &[], range);
         assert!(res.is_none());
     }
+
+    #[test]
+    fn test_traversal_semantics_periodic_circle() {
+        use crate::tessellation::domain::projection::TraversalSemantics;
+        use truck_geometry::prelude::*;
+        let circle = UnitCircle::<Point3>::new();
+        let cone = make_test_cone(10.0, 0.0, 10.0);
+        let semantics = TraversalSemantics::resolve(&circle, &cone, 1e-4);
+        assert!(matches!(semantics, TraversalSemantics::FullPeriod { .. }));
+    }
+
+    #[test]
+    fn test_traversal_semantics_degenerate_point() {
+        use crate::tessellation::domain::projection::TraversalSemantics;
+        use truck_geometry::prelude::*;
+        let line = Line(Point3::new(0.0, 0.0, 0.0), Point3::new(0.0, 0.0, 0.0));
+        let cone = make_test_cone(10.0, 0.0, 10.0);
+        let semantics = TraversalSemantics::resolve(&line, &cone, 1e-4);
+        assert_eq!(semantics, TraversalSemantics::DegeneratePoint);
+    }
+
+    #[test]
+    fn test_shared_boundary_projection_processor_wrapped_cone() {
+        use crate::tessellation::domain::projection::{project_boundary_curve, TraversalSemantics};
+        use truck_geometry::prelude::*;
+        let cone = make_test_cone(10.0, 0.0, 10.0);
+        let p_uv = cone.subs(0.5, 0.0);
+        let tr = Matrix4::from_translation(Vector3::new(10.0, 20.0, 30.0));
+        let proc_cone = Processor::with_transform(cone, tr);
+        let circle = Processor::with_transform(TrimmedCurve::new(Line(p_uv, p_uv), (0.0, 1.0)), tr);
+        let sem = TraversalSemantics::resolve(&circle, &proc_cone, 1e-4);
+        let path = project_boundary_curve(&circle, &proc_cone, sem, 1.0).unwrap();
+        assert!(!path.samples.is_empty());
+    }
 }

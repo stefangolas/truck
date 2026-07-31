@@ -148,7 +148,9 @@ impl StructuredMesh {
 
     /// Returns the matrix of all positions.
     #[inline(always)]
-    pub const fn positions(&self) -> &Vec<Vec<Point3>> { &self.positions }
+    pub const fn positions(&self) -> &Vec<Vec<Point3>> {
+        &self.positions
+    }
 
     /// Returns the vector of the mutable references to the rows of the positions matrix.
     #[inline(always)]
@@ -172,7 +174,9 @@ impl StructuredMesh {
 
     /// Returns the matrix of all normals.
     #[inline(always)]
-    pub const fn normals(&self) -> Option<&Vec<Vec<Vector3>>> { self.normals.as_ref() }
+    pub const fn normals(&self) -> Option<&Vec<Vec<Vector3>>> {
+        self.normals.as_ref()
+    }
 
     /// Returns the vector of the mutable references to the rows of the normals matrix.
     #[inline(always)]
@@ -232,7 +236,9 @@ impl StructuredMesh {
 
 impl<'de> Deserialize<'de> for StructuredMesh {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where D: serde::Deserializer<'de> {
+    where
+        D: serde::Deserializer<'de>,
+    {
         #[derive(Deserialize)]
         pub struct StructuredMesh_ {
             positions: Vec<Vec<Point3>>,

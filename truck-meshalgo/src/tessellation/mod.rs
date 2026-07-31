@@ -20,7 +20,8 @@ pub use parallelizable::*;
 
 /// Gathered the traits used in tessellation.
 pub trait PolylineableCurve:
-    ParametricCurve3D + BoundedCurve + ParameterDivision1D<Point = Point3> + Parallelizable {
+    ParametricCurve3D + BoundedCurve + ParameterDivision1D<Point = Point3> + Parallelizable
+{
 }
 impl<
         C: ParametricCurve3D + BoundedCurve + ParameterDivision1D<Point = Point3> + Parallelizable,
@@ -38,7 +39,8 @@ impl<S: PreMeshableSurface + SearchParameter<D2, Point = Point3>> MeshableSurfac
 
 /// The generated mesh can be trimmed if the boundary curves does not ride strictly on a surface.
 pub trait RobustMeshableSurface:
-    MeshableSurface + SearchNearestParameter<D2, Point = Point3> {
+    MeshableSurface + SearchNearestParameter<D2, Point = Point3>
+{
 }
 impl<S: MeshableSurface + SearchNearestParameter<D2, Point = Point3>> RobustMeshableSurface for S {}
 
@@ -76,7 +78,8 @@ impl MeshedShape for Shell<Point3, PolylineCurve, Option<PolygonMesh>> {
 }
 
 impl<P, C, S> MeshedShape for Solid<P, C, S>
-where Shell<P, C, S>: MeshedShape
+where
+    Shell<P, C, S>: MeshedShape,
 {
     fn to_polygon(&self) -> PolygonMesh {
         let mut polygon = PolygonMesh::default();
@@ -114,7 +117,8 @@ impl MeshedShape for CompressedShell<Point3, PolylineCurve, Option<PolygonMesh>>
 }
 
 impl<P, C, S> MeshedShape for CompressedSolid<P, C, S>
-where CompressedShell<P, C, S>: MeshedShape
+where
+    CompressedShell<P, C, S>: MeshedShape,
 {
     fn to_polygon(&self) -> PolygonMesh {
         let mut polygon = PolygonMesh::default();
@@ -357,4 +361,6 @@ impl<C: PolylineableCurve, S: RobustMeshableSurface> RobustMeshableShape
     }
 }
 
+pub mod domain;
 mod triangulation;
+pub use triangulation::print_taxonomy_summary;

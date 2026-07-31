@@ -150,7 +150,9 @@ impl App for MyRender {
         app
     }
 
-    fn app_title<'a>() -> Option<&'a str> { Some("rotate objects") }
+    fn app_title<'a>() -> Option<&'a str> {
+        Some("rotate objects")
+    }
 
     fn dropped_file(&mut self, path: std::path::PathBuf) -> ControlFlow {
         self.path = Some(path);
@@ -293,4 +295,6 @@ impl App for MyRender {
     }
 }
 
-fn main() { MyRender::run() }
+fn main() {
+    MyRender::run()
+}

@@ -18,28 +18,44 @@ impl<C0, S0, C1, S1, F0, F1> EdgeBlendSurface<C0, S0, F0, C1, S1, F1> {
     }
     /// Returns the first pcurve.
     #[inline]
-    pub fn pcurve0(&self) -> &PCurve<C0, S0> { &self.pcurve0 }
+    pub fn pcurve0(&self) -> &PCurve<C0, S0> {
+        &self.pcurve0
+    }
     /// Returns the second pcurve.
     #[inline]
-    pub fn pcurve1(&self) -> &PCurve<C1, S1> { &self.pcurve1 }
+    pub fn pcurve1(&self) -> &PCurve<C1, S1> {
+        &self.pcurve1
+    }
     /// Returns the first pcurve.
     #[inline]
-    pub fn pcurve0_mut(&mut self) -> &mut PCurve<C0, S0> { &mut self.pcurve0 }
+    pub fn pcurve0_mut(&mut self) -> &mut PCurve<C0, S0> {
+        &mut self.pcurve0
+    }
     /// Returns the second pcurve.
     #[inline]
-    pub fn pcurve1_mut(&mut self) -> &mut PCurve<C1, S1> { &mut self.pcurve1 }
+    pub fn pcurve1_mut(&mut self) -> &mut PCurve<C1, S1> {
+        &mut self.pcurve1
+    }
     /// Returns the first magnitude.
     #[inline]
-    pub fn magnitude0(&self) -> &F0 { &self.magnitude0 }
+    pub fn magnitude0(&self) -> &F0 {
+        &self.magnitude0
+    }
     /// Returns the second magnitude.
     #[inline]
-    pub fn magnitude1(&self) -> &F1 { &self.magnitude1 }
+    pub fn magnitude1(&self) -> &F1 {
+        &self.magnitude1
+    }
     /// Returns the first magnitude.
     #[inline]
-    pub fn magnitude0_mut(&mut self) -> &mut F0 { &mut self.magnitude0 }
+    pub fn magnitude0_mut(&mut self) -> &mut F0 {
+        &mut self.magnitude0
+    }
     /// Returns the second magnitude.
     #[inline]
-    pub fn magnitude1_mut(&mut self) -> &mut F1 { &mut self.magnitude1 }
+    pub fn magnitude1_mut(&mut self) -> &mut F1 {
+        &mut self.magnitude1
+    }
 }
 
 const fn bezier_3rd_basis(n: usize, u: f64) -> [f64; 4] {
@@ -152,17 +168,29 @@ where
         self.ders(m + n, u, v)[m][n]
     }
     #[inline]
-    fn subs(&self, u: f64, v: f64) -> Self::Point { Point3::from_vec(self.ders(0, u, v)[0][0]) }
+    fn subs(&self, u: f64, v: f64) -> Self::Point {
+        Point3::from_vec(self.ders(0, u, v)[0][0])
+    }
     #[inline]
-    fn uder(&self, u: f64, v: f64) -> Self::Vector { self.der_mn(1, 0, u, v) }
+    fn uder(&self, u: f64, v: f64) -> Self::Vector {
+        self.der_mn(1, 0, u, v)
+    }
     #[inline]
-    fn vder(&self, u: f64, v: f64) -> Self::Vector { self.der_mn(0, 1, u, v) }
+    fn vder(&self, u: f64, v: f64) -> Self::Vector {
+        self.der_mn(0, 1, u, v)
+    }
     #[inline]
-    fn uuder(&self, u: f64, v: f64) -> Self::Vector { self.der_mn(2, 0, u, v) }
+    fn uuder(&self, u: f64, v: f64) -> Self::Vector {
+        self.der_mn(2, 0, u, v)
+    }
     #[inline]
-    fn uvder(&self, u: f64, v: f64) -> Self::Vector { self.der_mn(1, 1, u, v) }
+    fn uvder(&self, u: f64, v: f64) -> Self::Vector {
+        self.der_mn(1, 1, u, v)
+    }
     #[inline]
-    fn vvder(&self, u: f64, v: f64) -> Self::Vector { self.der_mn(0, 2, u, v) }
+    fn vvder(&self, u: f64, v: f64) -> Self::Vector {
+        self.der_mn(0, 2, u, v)
+    }
     #[inline]
     fn parameter_range(&self) -> (ParameterRange, ParameterRange) {
         let range0 = self.pcurve0.parameter_range();

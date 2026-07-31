@@ -199,7 +199,9 @@ impl ConstStepLength for EdgeDisplay<'_> {
 
 impl StepLength for EdgeDisplay<'_> {
     #[inline]
-    fn step_length(&self) -> usize { Self::LENGTH }
+    fn step_length(&self) -> usize {
+        Self::LENGTH
+    }
 }
 
 impl<Model, Models, Matrix> Display for StepDesign<Model, Models, Matrix>

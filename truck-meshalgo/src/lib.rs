@@ -35,6 +35,8 @@ pub mod filters;
 /// Tessellates shapes.
 #[cfg(feature = "tessellation")]
 pub mod tessellation;
+#[cfg(feature = "tessellation")]
+pub use tessellation::print_taxonomy_summary;
 
 /// VTK Output
 #[cfg(feature = "vtk")]

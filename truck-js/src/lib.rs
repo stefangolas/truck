@@ -21,7 +21,9 @@ pub trait IntoWasm: Sized {
     /// wasm wrapper struct
     type WasmWrapper: From<Self>;
     /// Into wasm wrapper
-    fn into_wasm(self) -> Self::WasmWrapper { self.into() }
+    fn into_wasm(self) -> Self::WasmWrapper {
+        self.into()
+    }
 }
 
 mod shape;

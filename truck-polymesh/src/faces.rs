@@ -10,7 +10,9 @@ pub trait AsVertexSlice: AsRef<[Self::V]> {
 }
 
 impl From<&Vertex> for Vertex {
-    fn from(v: &Vertex) -> Vertex { *v }
+    fn from(v: &Vertex) -> Vertex {
+        *v
+    }
 }
 
 impl<T: AsVertexSlice> AsVertexSlice for &T {
@@ -180,23 +182,33 @@ impl<V: Copy> Faces<V> {
 
     /// Returns the vector of triangles.
     #[inline(always)]
-    pub const fn tri_faces(&self) -> &Vec<[V; 3]> { &self.tri_faces }
+    pub const fn tri_faces(&self) -> &Vec<[V; 3]> {
+        &self.tri_faces
+    }
 
     /// Returns the mutable slice of triangles.
     #[inline(always)]
-    pub fn tri_faces_mut(&mut self) -> &mut [[V; 3]] { &mut self.tri_faces }
+    pub fn tri_faces_mut(&mut self) -> &mut [[V; 3]] {
+        &mut self.tri_faces
+    }
 
     /// Returns the vector of quadrangles.
     #[inline(always)]
-    pub const fn quad_faces(&self) -> &Vec<[V; 4]> { &self.quad_faces }
+    pub const fn quad_faces(&self) -> &Vec<[V; 4]> {
+        &self.quad_faces
+    }
 
     /// Returns the mutable slice of quadrangles.
     #[inline(always)]
-    pub fn quad_faces_mut(&mut self) -> &mut [[V; 4]] { &mut self.quad_faces }
+    pub fn quad_faces_mut(&mut self) -> &mut [[V; 4]] {
+        &mut self.quad_faces
+    }
 
     /// Returns the vector of n-gons (n > 4).
     #[inline(always)]
-    pub const fn other_faces(&self) -> &Vec<Vec<V>> { &self.other_faces }
+    pub const fn other_faces(&self) -> &Vec<Vec<V>> {
+        &self.other_faces
+    }
 
     /// Returns the mutable iterator of n-gons (n > 4).
     #[inline(always)]
@@ -250,7 +262,9 @@ impl<V: Copy> Faces<V> {
 
     /// Returns true if the faces is empty.
     #[inline(always)]
-    pub fn is_empty(&self) -> bool { self.len() == 0 }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 
     /// Returns the number of faces.
     #[inline(always)]
@@ -268,7 +282,9 @@ impl<V: Copy> Faces<V> {
 
     #[inline(always)]
     pub(super) fn is_compatible(&self, attrs: &impl Attributes<V>) -> Result<(), Error<V>>
-    where V: std::fmt::Debug {
+    where
+        V: std::fmt::Debug,
+    {
         self.face_iter()
             .flatten()
             .try_for_each(|v| match attrs.get(*v) {
@@ -344,7 +360,9 @@ impl<V> std::ops::Index<usize> for Faces<V> {
 
 impl<V: Copy> Invertible for Faces<V> {
     #[inline(always)]
-    fn invert(&mut self) { self.face_iter_mut().for_each(|f| f.reverse()); }
+    fn invert(&mut self) {
+        self.face_iter_mut().for_each(|f| f.reverse());
+    }
     #[inline(always)]
     fn inverse(&self) -> Self {
         let tri_faces: Vec<_> = self
@@ -432,7 +450,9 @@ impl<V: Copy> Iterator for TriangleIterator<'_, V> {
         }
     }
     #[inline(always)]
-    fn size_hint(&self) -> (usize, Option<usize>) { (self.len, Some(self.len)) }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.len, Some(self.len))
+    }
 }
 
 impl<V: Copy> ExactSizeIterator for TriangleIterator<'_, V> {}

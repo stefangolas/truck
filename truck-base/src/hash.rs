@@ -64,47 +64,95 @@ fn hash4_value<S: Float + FromPrimitive + ToPrimitive>(values: &[S]) -> [S; 4] {
 }
 
 impl<S: Float + FromPrimitive + ToPrimitive> HashGen<S> for S {
-    fn hash1(gen: Self) -> S { hash_value(&[gen], 0) }
-    fn hash2(gen: Self) -> [S; 2] { hash2_value(&[gen]) }
-    fn hash3(gen: Self) -> [S; 3] { hash3_value(&[gen]) }
-    fn hash4(gen: Self) -> [S; 4] { hash4_value(&[gen]) }
+    fn hash1(gen: Self) -> S {
+        hash_value(&[gen], 0)
+    }
+    fn hash2(gen: Self) -> [S; 2] {
+        hash2_value(&[gen])
+    }
+    fn hash3(gen: Self) -> [S; 3] {
+        hash3_value(&[gen])
+    }
+    fn hash4(gen: Self) -> [S; 4] {
+        hash4_value(&[gen])
+    }
 }
 
 impl<S: Float + FromPrimitive + ToPrimitive> HashGen<S> for [S; 1] {
-    fn hash1(gen: Self) -> S { hash_value(&gen, 0) }
-    fn hash2(gen: Self) -> [S; 2] { hash2_value(&gen) }
-    fn hash3(gen: Self) -> [S; 3] { hash3_value(&gen) }
-    fn hash4(gen: Self) -> [S; 4] { hash4_value(&gen) }
+    fn hash1(gen: Self) -> S {
+        hash_value(&gen, 0)
+    }
+    fn hash2(gen: Self) -> [S; 2] {
+        hash2_value(&gen)
+    }
+    fn hash3(gen: Self) -> [S; 3] {
+        hash3_value(&gen)
+    }
+    fn hash4(gen: Self) -> [S; 4] {
+        hash4_value(&gen)
+    }
 }
 
 impl<S: Float + FromPrimitive + ToPrimitive> HashGen<S> for [S; 2] {
-    fn hash1(gen: Self) -> S { hash_value(&gen, 0) }
-    fn hash2(gen: Self) -> [S; 2] { hash2_value(&gen) }
-    fn hash3(gen: Self) -> [S; 3] { hash3_value(&gen) }
-    fn hash4(gen: Self) -> [S; 4] { hash4_value(&gen) }
+    fn hash1(gen: Self) -> S {
+        hash_value(&gen, 0)
+    }
+    fn hash2(gen: Self) -> [S; 2] {
+        hash2_value(&gen)
+    }
+    fn hash3(gen: Self) -> [S; 3] {
+        hash3_value(&gen)
+    }
+    fn hash4(gen: Self) -> [S; 4] {
+        hash4_value(&gen)
+    }
 }
 
 impl<S: Float + FromPrimitive + ToPrimitive> HashGen<S> for [S; 3] {
-    fn hash1(gen: Self) -> S { hash_value(&gen, 0) }
-    fn hash2(gen: Self) -> [S; 2] { hash2_value(&gen) }
-    fn hash3(gen: Self) -> [S; 3] { hash3_value(&gen) }
-    fn hash4(gen: Self) -> [S; 4] { hash4_value(&gen) }
+    fn hash1(gen: Self) -> S {
+        hash_value(&gen, 0)
+    }
+    fn hash2(gen: Self) -> [S; 2] {
+        hash2_value(&gen)
+    }
+    fn hash3(gen: Self) -> [S; 3] {
+        hash3_value(&gen)
+    }
+    fn hash4(gen: Self) -> [S; 4] {
+        hash4_value(&gen)
+    }
 }
 
 impl<S: Float + FromPrimitive + ToPrimitive> HashGen<S> for [S; 4] {
-    fn hash1(gen: Self) -> S { hash_value(&gen, 0) }
-    fn hash2(gen: Self) -> [S; 2] { hash2_value(&gen) }
-    fn hash3(gen: Self) -> [S; 3] { hash3_value(&gen) }
-    fn hash4(gen: Self) -> [S; 4] { hash4_value(&gen) }
+    fn hash1(gen: Self) -> S {
+        hash_value(&gen, 0)
+    }
+    fn hash2(gen: Self) -> [S; 2] {
+        hash2_value(&gen)
+    }
+    fn hash3(gen: Self) -> [S; 3] {
+        hash3_value(&gen)
+    }
+    fn hash4(gen: Self) -> [S; 4] {
+        hash4_value(&gen)
+    }
 }
 
 macro_rules! derive_hashgen {
     ($from: ty, $into: ty) => {
         impl<S: Float + FromPrimitive + ToPrimitive> HashGen<S> for $from {
-            fn hash1(gen: Self) -> S { <$into>::hash1(gen.into()) }
-            fn hash2(gen: Self) -> [S; 2] { <$into>::hash2(gen.into()) }
-            fn hash3(gen: Self) -> [S; 3] { <$into>::hash3(gen.into()) }
-            fn hash4(gen: Self) -> [S; 4] { <$into>::hash4(gen.into()) }
+            fn hash1(gen: Self) -> S {
+                <$into>::hash1(gen.into())
+            }
+            fn hash2(gen: Self) -> [S; 2] {
+                <$into>::hash2(gen.into())
+            }
+            fn hash3(gen: Self) -> [S; 3] {
+                <$into>::hash3(gen.into())
+            }
+            fn hash4(gen: Self) -> [S; 4] {
+                <$into>::hash4(gen.into())
+            }
         }
     };
 }

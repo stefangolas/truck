@@ -14,19 +14,27 @@ pub const OPENGL_TO_WGPU_MATRIX: Matrix4 = Matrix4::new(
 impl Ray {
     /// Returns the origin of the ray
     #[inline(always)]
-    pub const fn origin(&self) -> Point3 { self.origin }
+    pub const fn origin(&self) -> Point3 {
+        self.origin
+    }
     /// Returns the (normalized) direction of the ray
     #[inline(always)]
-    pub const fn direction(&self) -> Vector3 { self.direction }
+    pub const fn direction(&self) -> Vector3 {
+        self.direction
+    }
 }
 
 impl ProjectionMethod {
     /// Returns `ProjectionMethod::Perspective { fov }`.
     #[inline(always)]
-    pub const fn perspective(fov: Rad<f64>) -> Self { Self::Perspective { fov } }
+    pub const fn perspective(fov: Rad<f64>) -> Self {
+        Self::Perspective { fov }
+    }
     /// Returns `ProjectionMethod::Parallel { screen_size }`.
     #[inline(always)]
-    pub const fn parallel(screen_size: f64) -> Self { Self::Parallel { screen_size } }
+    pub const fn parallel(screen_size: f64) -> Self {
+        Self::Parallel { screen_size }
+    }
 }
 
 impl Camera {
@@ -42,7 +50,9 @@ impl Camera {
     /// assert_eq!(camera.position(), Point3::new(1.0, 2.0, 3.0));
     /// ```
     #[inline(always)]
-    pub fn position(&self) -> Point3 { Point3::from_vec(self.matrix[3].truncate()) }
+    pub fn position(&self) -> Point3 {
+        Point3::from_vec(self.matrix[3].truncate())
+    }
 
     /// Returns the eye direction of camera.
     /// the inverse of the z-axis of the camera matrix.
@@ -60,7 +70,9 @@ impl Camera {
     /// assert!(camera.eye_direction().near(&-Vector3::unit_x()));
     /// ```
     #[inline(always)]
-    pub fn eye_direction(&self) -> Vector3 { -self.matrix[2].truncate() }
+    pub fn eye_direction(&self) -> Vector3 {
+        -self.matrix[2].truncate()
+    }
 
     /// Returns the direction of the head vector, the y-axis of the camera matrix.
     /// # Examples
@@ -76,7 +88,9 @@ impl Camera {
     /// assert!(camera.head_direction().near(&Vector3::unit_z()));
     /// ```
     #[inline(always)]
-    pub fn head_direction(&self) -> Vector3 { self.matrix[1].truncate() }
+    pub fn head_direction(&self) -> Vector3 {
+        self.matrix[1].truncate()
+    }
 
     /// Returns the projection matrix into the normalized view volume.
     /// # Arguments

@@ -171,7 +171,9 @@ impl App for MyApp {
         app
     }
 
-    fn app_title<'a>() -> Option<&'a str> { Some("simple obj viewer") }
+    fn app_title<'a>() -> Option<&'a str> {
+        Some("simple obj viewer")
+    }
 
     fn dropped_file(&mut self, path: std::path::PathBuf) -> ControlFlow {
         let file = std::fs::File::open(path).unwrap();
@@ -305,7 +307,11 @@ impl App for MyApp {
         Self::default_control_flow()
     }
 
-    fn render(&mut self) { self.scene.render_frame(); }
+    fn render(&mut self) {
+        self.scene.render_frame();
+    }
 }
 
-fn main() { MyApp::run(); }
+fn main() {
+    MyApp::run();
+}

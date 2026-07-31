@@ -17,7 +17,8 @@ where
     StepHolder: Holder<Table = Table>,
     Truck: for<'a> From<&'a StepHolder::Owned> + Debug + PartialEq,
     for<'a> StepDataDisplay<&'a Truck>: Display,
-    Table: EntityTable<StepHolder>, {
+    Table: EntityTable<StepHolder>,
+{
     let step_display = StepDataDisplay::new(&t, 1);
     let step = format!("DATA;\n{step_display}ENDSEC;");
     println!("{step}");
@@ -30,7 +31,8 @@ where
     Truck: for<'a> TryFrom<&'a StepHolder::Owned> + Debug + PartialEq,
     for<'a> <Truck as TryFrom<&'a StepHolder::Owned>>::Error: Debug,
     for<'a> StepDataDisplay<&'a Truck>: Display,
-    Table: EntityTable<StepHolder>, {
+    Table: EntityTable<StepHolder>,
+{
     let step_display = StepDataDisplay::new(&t, 1);
     let step = format!("DATA;\n{step_display}ENDSEC;");
     println!("{step}");
@@ -41,7 +43,8 @@ fn itest<Truck, StepHolder>(t: Truck, step: &str)
 where
     Truck: for<'a> From<&'a StepHolder::Owned> + Debug + PartialEq,
     StepHolder: Holder<Table = Table>,
-    Table: EntityTable<StepHolder>, {
+    Table: EntityTable<StepHolder>,
+{
     let data_section = DataSection::from_str(step).unwrap();
     let table = Table::from_data_section(&data_section);
     let step_data: StepHolder::Owned = EntityTable::get_owned(&table, 1).unwrap();
@@ -54,7 +57,8 @@ where
     Truck: for<'a> TryFrom<&'a StepHolder::Owned> + Debug + PartialEq,
     for<'a> <Truck as TryFrom<&'a StepHolder::Owned>>::Error: Debug,
     StepHolder: Holder<Table = Table>,
-    Table: EntityTable<StepHolder>, {
+    Table: EntityTable<StepHolder>,
+{
     let data_section = DataSection::from_str(step).unwrap();
     let table = Table::from_data_section(&data_section);
     let step_data: StepHolder::Owned = EntityTable::get_owned(&table, 1).unwrap();

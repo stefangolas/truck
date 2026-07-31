@@ -149,7 +149,9 @@ pub trait DisplayByStep {
 }
 
 impl<T: DisplayByStep> DisplayByStep for &T {
-    fn fmt(&self, idx: usize, f: &mut Formatter<'_>) -> Result { DisplayByStep::fmt(*self, idx, f) }
+    fn fmt(&self, idx: usize, f: &mut Formatter<'_>) -> Result {
+        DisplayByStep::fmt(*self, idx, f)
+    }
 }
 
 impl<T: DisplayByStep> DisplayByStep for Box<T> {
@@ -172,7 +174,8 @@ pub struct StepDataDisplay<T> {
 }
 
 impl<T> Display for SliceDisplay<'_, StepDataDisplay<T>>
-where StepDataDisplay<T>: Display
+where
+    StepDataDisplay<T>: Display,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         self.0.iter().try_for_each(|x| Display::fmt(x, f))
@@ -182,17 +185,25 @@ where StepDataDisplay<T>: Display
 impl<T> StepDataDisplay<T> {
     /// constructor
     #[inline]
-    pub const fn new(entity: T, idx: usize) -> Self { Self { entity, idx } }
+    pub const fn new(entity: T, idx: usize) -> Self {
+        Self { entity, idx }
+    }
     /// return entity
     #[inline]
-    pub const fn entity(&self) -> &T { &self.entity }
+    pub const fn entity(&self) -> &T {
+        &self.entity
+    }
     /// return index
     #[inline]
-    pub const fn index(&self) -> usize { self.idx }
+    pub const fn index(&self) -> usize {
+        self.idx
+    }
 }
 
 impl<T: DisplayByStep> Display for StepDataDisplay<T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result { DisplayByStep::fmt(&self.entity, self.idx, f) }
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        DisplayByStep::fmt(&self.entity, self.idx, f)
+    }
 }
 
 /// Calculate how many lines are used in outputting an object to a STEP file
@@ -203,12 +214,16 @@ pub trait StepLength {
 
 impl<T: StepLength> StepLength for &T {
     #[inline(always)]
-    fn step_length(&self) -> usize { StepLength::step_length(*self) }
+    fn step_length(&self) -> usize {
+        StepLength::step_length(*self)
+    }
 }
 
 impl<T: StepLength> StepLength for Box<T> {
     #[inline(always)]
-    fn step_length(&self) -> usize { self.as_ref().step_length() }
+    fn step_length(&self) -> usize {
+        self.as_ref().step_length()
+    }
 }
 
 /// Constant numbers of lines for outputting an object to a STEP file.
@@ -242,34 +257,46 @@ macro_rules! impl_const_step_length {
 pub trait StepCurve {
     /// the parameter `same_sense`.
     #[inline(always)]
-    fn same_sense(&self) -> bool { true }
+    fn same_sense(&self) -> bool {
+        true
+    }
 }
 
 impl<T: StepCurve> StepCurve for &T {
     #[inline(always)]
-    fn same_sense(&self) -> bool { (*self).same_sense() }
+    fn same_sense(&self) -> bool {
+        (*self).same_sense()
+    }
 }
 
 impl<T: StepCurve> StepCurve for Box<T> {
     #[inline(always)]
-    fn same_sense(&self) -> bool { self.as_ref().same_sense() }
+    fn same_sense(&self) -> bool {
+        self.as_ref().same_sense()
+    }
 }
 
 /// Additional information for output to `face_surface`.
 pub trait StepSurface {
     /// the parameter `same_sense`.
     #[inline(always)]
-    fn same_sense(&self) -> bool { true }
+    fn same_sense(&self) -> bool {
+        true
+    }
 }
 
 impl<T: StepSurface> StepSurface for &T {
     #[inline(always)]
-    fn same_sense(&self) -> bool { (*self).same_sense() }
+    fn same_sense(&self) -> bool {
+        (*self).same_sense()
+    }
 }
 
 impl<T: StepSurface> StepSurface for Box<T> {
     #[inline(always)]
-    fn same_sense(&self) -> bool { self.as_ref().same_sense() }
+    fn same_sense(&self) -> bool {
+        self.as_ref().same_sense()
+    }
 }
 
 /// Describe STEP file header

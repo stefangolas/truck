@@ -25,7 +25,9 @@ pub enum ArcConstraint {
 /// # assert_eq!(vertex.point(), Point2::new(1.0, 2.0));
 /// ```
 #[inline(always)]
-pub fn vertex<P: Into<Point2>>(point: P) -> Vertex { Vertex::new(point.into()) }
+pub fn vertex<P: Into<Point2>>(point: P) -> Vertex {
+    Vertex::new(point.into())
+}
 
 /// Creates and returns vertices by two dimensional points.
 /// # Examples
@@ -59,7 +61,9 @@ pub fn vertices<P: Into<Point2>>(points: impl IntoIterator<Item = P>) -> Vec<Ver
 /// # assert_near!(curve.subs(1.0), Point2::new(2.0, 1.0));
 /// ```
 pub fn try_line<C>(vertex0: &Vertex, vertex1: &Vertex) -> Result<Edge<C>, Error>
-where Line<Point2>: ToSameGeometry<C> {
+where
+    Line<Point2>: ToSameGeometry<C>,
+{
     let point0 = vertex0.point();
     let point1 = vertex1.point();
     Ok(Edge::try_new(
@@ -83,7 +87,9 @@ where Line<Point2>: ToSameGeometry<C> {
 /// # assert_near!(curve.subs(1.0), Point2::new(2.0, 1.0));
 /// ```
 pub fn line<C>(vertex0: &Vertex, vertex1: &Vertex) -> Edge<C>
-where Line<Point2>: ToSameGeometry<C> {
+where
+    Line<Point2>: ToSameGeometry<C>,
+{
     try_line(vertex0, vertex1).unwrap()
 }
 
@@ -102,10 +108,10 @@ where Line<Point2>: ToSameGeometry<C> {
 /// #     vec![Point2::new(0.0, 0.0), Point2::new(1.0, 0.0), Point2::new(1.0, 2.0)],
 /// # );
 /// ```
-pub fn try_polyline<'a, C>(
-    vertices: impl IntoIterator<Item = &'a Vertex>,
-) -> Result<Wire<C>, Error>
-where Line<Point2>: ToSameGeometry<C> {
+pub fn try_polyline<'a, C>(vertices: impl IntoIterator<Item = &'a Vertex>) -> Result<Wire<C>, Error>
+where
+    Line<Point2>: ToSameGeometry<C>,
+{
     vertices
         .into_iter()
         .tuple_windows()
@@ -129,7 +135,9 @@ where Line<Point2>: ToSameGeometry<C> {
 /// # );
 /// ```
 pub fn polyline<'a, C>(vertices: impl IntoIterator<Item = &'a Vertex>) -> Wire<C>
-where Line<Point2>: ToSameGeometry<C> {
+where
+    Line<Point2>: ToSameGeometry<C>,
+{
     try_polyline(vertices).unwrap()
 }
 
@@ -235,7 +243,9 @@ where
 /// # assert_near!(curve.subs(1.0), Point2::new(3.0, 0.0));
 /// ```
 pub fn bezier<C>(vertex0: &Vertex, vertex1: &Vertex, mut inter_points: Vec<Point2>) -> Edge<C>
-where BSplineCurve<Point2>: ToSameGeometry<C> {
+where
+    BSplineCurve<Point2>: ToSameGeometry<C>,
+{
     let point0 = vertex0.point();
     let point1 = vertex1.point();
     let mut control_points = vec![point0];

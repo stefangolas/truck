@@ -11,10 +11,14 @@ pub const TOLERANCE2: f64 = TOLERANCE * TOLERANCE;
 /// Defines a tolerance in the whole package
 pub trait Tolerance: AbsDiffEq<Epsilon = f64> + Debug {
     /// The "distance" is less than `TOLERANCE`.
-    fn near(&self, other: &Self) -> bool { self.abs_diff_eq(other, TOLERANCE) }
+    fn near(&self, other: &Self) -> bool {
+        self.abs_diff_eq(other, TOLERANCE)
+    }
 
     /// The "distance" is less than `TOLERANCR2`.
-    fn near2(&self, other: &Self) -> bool { self.abs_diff_eq(other, TOLERANCE2) }
+    fn near2(&self, other: &Self) -> bool {
+        self.abs_diff_eq(other, TOLERANCE2)
+    }
 }
 
 impl<T: AbsDiffEq<Epsilon = f64> + Debug> Tolerance for T {}
@@ -61,11 +65,15 @@ macro_rules! prop_assert_near {
 
 #[test]
 #[should_panic]
-fn assert_near_without_msg() { assert_near!(1.0, 2.0) }
+fn assert_near_without_msg() {
+    assert_near!(1.0, 2.0)
+}
 
 #[test]
 #[should_panic]
-fn assert_near_with_msg() { assert_near!(1.0, 2.0, "{}", "test OK") }
+fn assert_near_with_msg() {
+    assert_near!(1.0, 2.0, "{}", "test OK")
+}
 
 /// Asserts that `left.near2(&right)` (using `Tolerance`).
 #[macro_export]
@@ -109,21 +117,29 @@ macro_rules! prop_assert_near2 {
 
 #[test]
 #[should_panic]
-fn assert_near2_without_msg() { assert_near2!(1.0, 2.0) }
+fn assert_near2_without_msg() {
+    assert_near2!(1.0, 2.0)
+}
 
 #[test]
 #[should_panic]
-fn assert_near2_with_msg() { assert_near2!(1.0, 2.0, "{}", "test OK") }
+fn assert_near2_with_msg() {
+    assert_near2!(1.0, 2.0, "{}", "test OK")
+}
 
 /// The structs defined the origin. `f64`, `Vector`, and so on.
 pub trait Origin: Tolerance + Zero {
     /// near origin
     #[inline(always)]
-    fn so_small(&self) -> bool { self.near(&Self::zero()) }
+    fn so_small(&self) -> bool {
+        self.near(&Self::zero())
+    }
 
     /// near origin in square order
     #[inline(always)]
-    fn so_small2(&self) -> bool { self.near2(&Self::zero()) }
+    fn so_small2(&self) -> bool {
+        self.near2(&Self::zero())
+    }
 }
 
 impl<T: Tolerance + Zero> Origin for T {}

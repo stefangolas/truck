@@ -2,20 +2,30 @@ use super::{rbf_surface::*, *};
 
 impl<S0, S1> ApproxFilletSurface<S0, S1> {
     /// Returns the first surface.
-    pub const fn surface0(&self) -> &S0 { &self.surface0 }
+    pub const fn surface0(&self) -> &S0 {
+        &self.surface0
+    }
     /// Returns the second surface.
-    pub const fn surface1(&self) -> &S1 { &self.surface1 }
+    pub const fn surface1(&self) -> &S1 {
+        &self.surface1
+    }
     /// Returns the knot vector for the parameter `v`.
-    pub const fn vknot_vec(&self) -> &KnotVec { &self.knot_vec }
+    pub const fn vknot_vec(&self) -> &KnotVec {
+        &self.knot_vec
+    }
     /// Returns side curve on the first surface.
     pub fn side_pcurve0(&self) -> PCurve<BSplineCurve<Point2>, S0>
-    where S0: Clone {
+    where
+        S0: Clone,
+    {
         let bsp = BSplineCurve::new(self.knot_vec.clone(), self.side_control_points0.clone());
         PCurve::new(bsp, self.surface0.clone())
     }
     /// Returns side curve on the second surface.
     pub fn side_pcurve1(&self) -> PCurve<BSplineCurve<Point2>, S1>
-    where S1: Clone {
+    where
+        S1: Clone,
+    {
         let bsp = BSplineCurve::new(self.knot_vec.clone(), self.side_control_points1.clone());
         PCurve::new(bsp, self.surface1.clone())
     }
@@ -23,7 +33,8 @@ impl<S0, S1> ApproxFilletSurface<S0, S1> {
     pub fn fillet_bezier(&self, v: f64) -> NurbsCurve<Vector4>
     where
         S0: ParametricSurface3D,
-        S1: ParametricSurface3D, {
+        S1: ParametricSurface3D,
+    {
         let Self {
             knot_vec,
             surface0,
@@ -51,11 +62,17 @@ impl<S0, S1> ApproxFilletSurface<S0, S1> {
             vec![pt0, pt1, pt2, pt3],
         ))
     }
-    fn vdegree(&self) -> usize { self.knot_vec.len() - self.weights.len() - 1 }
+    fn vdegree(&self) -> usize {
+        self.knot_vec.len() - self.weights.len() - 1
+    }
 }
 
-fn pmul<P: EuclideanSpace>((b, p): (&P::Scalar, &P)) -> P::Diff { p.to_vec() * *b }
-fn tmul<S: Copy, T: Copy + Mul<S>>((b, v): (&S, &T)) -> <T as Mul<S>>::Output { *v * *b }
+fn pmul<P: EuclideanSpace>((b, p): (&P::Scalar, &P)) -> P::Diff {
+    p.to_vec() * *b
+}
+fn tmul<S: Copy, T: Copy + Mul<S>>((b, v): (&S, &T)) -> <T as Mul<S>>::Output {
+    *v * *b
+}
 
 type SurfaceTriple<'a, S> = (S, &'a Vec<Point2>, &'a Vec<Vector2>);
 fn u_control_points<S: ParametricSurface3D>(
@@ -224,11 +241,21 @@ where
         let b = bezier_3rd_basis(0, u);
         Point3::from_homogeneous(b[0] * pt0 + b[1] * pt1 + b[2] * pt2 + b[3] * pt3)
     }
-    fn uder(&self, u: f64, v: f64) -> Self::Vector { self.der_mn(1, 0, u, v) }
-    fn vder(&self, u: f64, v: f64) -> Self::Vector { self.der_mn(0, 1, u, v) }
-    fn uuder(&self, u: f64, v: f64) -> Self::Vector { self.der_mn(2, 0, u, v) }
-    fn uvder(&self, u: f64, v: f64) -> Self::Vector { self.der_mn(1, 1, u, v) }
-    fn vvder(&self, u: f64, v: f64) -> Self::Vector { self.der_mn(0, 2, u, v) }
+    fn uder(&self, u: f64, v: f64) -> Self::Vector {
+        self.der_mn(1, 0, u, v)
+    }
+    fn vder(&self, u: f64, v: f64) -> Self::Vector {
+        self.der_mn(0, 1, u, v)
+    }
+    fn uuder(&self, u: f64, v: f64) -> Self::Vector {
+        self.der_mn(2, 0, u, v)
+    }
+    fn uvder(&self, u: f64, v: f64) -> Self::Vector {
+        self.der_mn(1, 1, u, v)
+    }
+    fn vvder(&self, u: f64, v: f64) -> Self::Vector {
+        self.der_mn(0, 2, u, v)
+    }
     fn parameter_range(&self) -> (ParameterRange, ParameterRange) {
         use std::ops::Bound::*;
         let (a, b) = (self.knot_vec[0], *self.knot_vec.last().unwrap());

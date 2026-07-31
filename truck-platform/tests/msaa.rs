@@ -45,4 +45,6 @@ fn exec_msaa_test(backend: Backends, out_dir: &str) {
 }
 
 #[test]
-fn msaa_test() { common::os_alt_exec_test(exec_msaa_test); }
+fn msaa_test() {
+    common::os_alt_exec_test(exec_msaa_test);
+}

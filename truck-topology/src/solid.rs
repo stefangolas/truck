@@ -53,10 +53,14 @@ impl<P, C, S> Solid<P, C, S> {
 
     /// Returns the reference of boundary shells
     #[inline(always)]
-    pub const fn boundaries(&self) -> &Vec<Shell<P, C, S>> { &self.boundaries }
+    pub const fn boundaries(&self) -> &Vec<Shell<P, C, S>> {
+        &self.boundaries
+    }
     /// Returns the boundary shells
     #[inline(always)]
-    pub fn into_boundaries(self) -> Vec<Shell<P, C, S>> { self.boundaries }
+    pub fn into_boundaries(self) -> Vec<Shell<P, C, S>> {
+        self.boundaries
+    }
 
     /// Returns an iterator over the faces.
     #[inline(always)]
@@ -140,7 +144,8 @@ impl<P, C, S> Solid<P, C, S> {
     where
         P: Tolerance,
         C: BoundedCurve<Point = P>,
-        S: IncludeCurve<C>, {
+        S: IncludeCurve<C>,
+    {
         self.boundaries()
             .iter()
             .all(|shell| shell.is_geometric_consistent())
@@ -170,7 +175,8 @@ impl<P, C, S> Solid<P, C, S> {
     pub fn remove_vertex_by_concat_edges(&mut self, vertex_id: VertexID<P>) -> Option<Edge<P, C>>
     where
         P: Debug,
-        C: Concat<C, Point = P, Output = C> + Invertible + ParameterTransform, {
+        C: Concat<C, Point = P, Output = C> + Invertible + ParameterTransform,
+    {
         let res = self
             .boundaries
             .iter_mut()
@@ -183,7 +189,9 @@ impl<P, C, S> Solid<P, C, S> {
     /// Cut a face with `face_id` by edge.
     #[inline(always)]
     pub fn cut_face_by_edge(&mut self, face_id: FaceID<S>, edge: Edge<P, C>) -> bool
-    where S: Clone {
+    where
+        S: Clone,
+    {
         let tuple = self.boundaries.iter_mut().find_map(|shell| {
             let find_res = shell
                 .face_iter_mut()
@@ -224,7 +232,9 @@ impl<P: Clone, C: Clone, S: Clone> Solid<P, C, Option<S>> {
 }
 
 impl<P, C, S> PartialEq for Solid<P, C, S> {
-    fn eq(&self, other: &Self) -> bool { self.boundaries == other.boundaries }
+    fn eq(&self, other: &Self) -> bool {
+        self.boundaries == other.boundaries
+    }
 }
 
 impl<P, C, S> Eq for Solid<P, C, S> {}
@@ -317,4 +327,6 @@ pub(super) fn cube() -> Solid<(), (), ()> {
 }
 
 #[test]
-fn cube_test() { cube(); }
+fn cube_test() {
+    cube();
+}

@@ -45,7 +45,9 @@ where
     }
     /// Returns the range of `entity`
     #[inline(always)]
-    fn parameter_range(&self) -> (ParameterRange, ParameterRange) { self.entity.parameter_range() }
+    fn parameter_range(&self) -> (ParameterRange, ParameterRange) {
+        self.entity.parameter_range()
+    }
     #[inline(always)]
     fn u_period(&self) -> Option<f64> {
         match (self.entity.u_period(), self.offset.u_period()) {
@@ -100,11 +102,17 @@ where
             + self.entity.normal(u, v) * self.scalar.vder(u, v)
     }
     #[inline(always)]
-    fn uuder(&self, u: f64, v: f64) -> Self::Vector { self.der_mn(2, 0, u, v) }
+    fn uuder(&self, u: f64, v: f64) -> Self::Vector {
+        self.der_mn(2, 0, u, v)
+    }
     #[inline(always)]
-    fn uvder(&self, u: f64, v: f64) -> Self::Vector { self.der_mn(1, 1, u, v) }
+    fn uvder(&self, u: f64, v: f64) -> Self::Vector {
+        self.der_mn(1, 1, u, v)
+    }
     #[inline(always)]
-    fn vvder(&self, u: f64, v: f64) -> Self::Vector { self.der_mn(0, 2, u, v) }
+    fn vvder(&self, u: f64, v: f64) -> Self::Vector {
+        self.der_mn(0, 2, u, v)
+    }
 }
 
 impl<S, N> ParametricSurface3D for Offset<S, N>

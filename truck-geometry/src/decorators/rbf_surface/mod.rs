@@ -15,21 +15,31 @@ impl<C, S0, S1, R> RbfSurface<C, S0, S1, R> {
 
     /// returns edge curve
     #[inline]
-    pub const fn edge_curve(&self) -> &C { &self.edge_curve }
+    pub const fn edge_curve(&self) -> &C {
+        &self.edge_curve
+    }
     /// returns first surface
     #[inline]
-    pub const fn surface0(&self) -> &S0 { &self.surface0 }
+    pub const fn surface0(&self) -> &S0 {
+        &self.surface0
+    }
     /// returns second surface
     #[inline]
-    pub const fn surface1(&self) -> &S1 { &self.surface1 }
+    pub const fn surface1(&self) -> &S1 {
+        &self.surface1
+    }
     /// returns radius function
     #[inline]
-    pub const fn radius(&self) -> &R { &self.radius }
+    pub const fn radius(&self) -> &R {
+        &self.radius
+    }
 
     /// returns the orbit curve of contact point with `surface0`.
     #[inline]
     pub fn contact_curve0(&self) -> RbfContactCurve<C, S0, S1, R>
-    where Self: Clone {
+    where
+        Self: Clone,
+    {
         RbfContactCurve {
             surface: self.clone(),
             index: 0,
@@ -38,7 +48,9 @@ impl<C, S0, S1, R> RbfSurface<C, S0, S1, R> {
     /// returns the orbit curve of contact point with `surface1`.
     #[inline]
     pub fn contact_curve1(&self) -> RbfContactCurve<C, S0, S1, R>
-    where Self: Clone {
+    where
+        Self: Clone,
+    {
         RbfContactCurve {
             surface: self.clone(),
             index: 1,
@@ -56,7 +68,9 @@ pub trait InvertibleRadiusFunction: ScalarFunctionD1 {
 
 impl InvertibleRadiusFunction for f64 {
     #[inline(always)]
-    fn inverse(&self) -> Self { *self }
+    fn inverse(&self) -> Self {
+        *self
+    }
     #[inline(always)]
     fn invert(&mut self) {}
 }
@@ -72,12 +86,16 @@ pub struct ContactPoint {
 
 impl From<(Point3, Point2)> for ContactPoint {
     #[inline]
-    fn from((point, uv): (Point3, Point2)) -> Self { Self { point, uv } }
+    fn from((point, uv): (Point3, Point2)) -> Self {
+        Self { point, uv }
+    }
 }
 
 impl From<ContactPoint> for (Point3, (f64, f64)) {
     #[inline]
-    fn from(cp: ContactPoint) -> Self { (cp.point, (cp.uv.x, cp.uv.y)) }
+    fn from(cp: ContactPoint) -> Self {
+        (cp.point, (cp.uv.x, cp.uv.y))
+    }
 }
 
 /// Contact circle for rolling ball fillet.
@@ -134,12 +152,18 @@ where
     fn der_mn(&self, m: usize, n: usize, u: f64, v: f64) -> Vector3 {
         self.sub_der_mn(m, n, u, self.contact_circle(v).unwrap())
     }
-    fn subs(&self, u: f64, v: f64) -> Point3 { self.contact_circle(v).unwrap().subs(u) }
-    fn uder(&self, u: f64, v: f64) -> Vector3 { self.contact_circle(v).unwrap().der(u) }
+    fn subs(&self, u: f64, v: f64) -> Point3 {
+        self.contact_circle(v).unwrap().subs(u)
+    }
+    fn uder(&self, u: f64, v: f64) -> Vector3 {
+        self.contact_circle(v).unwrap().der(u)
+    }
     fn vder(&self, u: f64, v: f64) -> Vector3 {
         self.vder_info(self.contact_circle(v).unwrap(), 1).vder(u)
     }
-    fn uuder(&self, u: f64, v: f64) -> Self::Vector { self.contact_circle(v).unwrap().der2(u) }
+    fn uuder(&self, u: f64, v: f64) -> Self::Vector {
+        self.contact_circle(v).unwrap().der2(u)
+    }
     fn uvder(&self, u: f64, v: f64) -> Self::Vector {
         self.vder_info(self.contact_circle(v).unwrap(), 1).uvder(u)
     }
@@ -153,7 +177,9 @@ where
             self.edge_curve.parameter_range(),
         )
     }
-    fn v_period(&self) -> Option<f64> { self.edge_curve.period() }
+    fn v_period(&self) -> Option<f64> {
+        self.edge_curve.period()
+    }
 }
 
 impl<C, S0, S1, R> ParametricSurface3D for RbfSurface<C, S0, S1, R>
@@ -208,10 +234,14 @@ impl<C, S0, S1, R> From<RbfSurface<C, S0, S1, R>> for RbfSurface<Box<C>, Box<S0>
 impl<C, S0, S1, R> RbfContactCurve<C, S0, S1, R> {
     /// original fillet surface
     #[inline]
-    pub const fn fillet_surface(&self) -> &RbfSurface<C, S0, S1, R> { &self.surface }
+    pub const fn fillet_surface(&self) -> &RbfSurface<C, S0, S1, R> {
+        &self.surface
+    }
     /// curve index: curve on `surface0` => 0, curve on `surface1` => 1.
     #[inline]
-    pub const fn index(&self) -> usize { self.index }
+    pub const fn index(&self) -> usize {
+        self.index
+    }
 }
 
 impl<C, S0, S1, R> ParametricCurve for RbfContactCurve<C, S0, S1, R>
@@ -235,7 +265,9 @@ where
             _ => cc_ders.contact1_ders,
         }
     }
-    fn der_n(&self, n: usize, t: f64) -> Self::Vector { self.ders(n, t)[n] }
+    fn der_n(&self, n: usize, t: f64) -> Self::Vector {
+        self.ders(n, t)[n]
+    }
     fn subs(&self, t: f64) -> Self::Point {
         let cc = self.surface.contact_circle(t).unwrap();
         match self.index {
@@ -244,12 +276,20 @@ where
         }
     }
 
-    fn der(&self, t: f64) -> Self::Vector { self.der_n(1, t) }
-    fn der2(&self, t: f64) -> Self::Vector { self.der_n(2, t) }
+    fn der(&self, t: f64) -> Self::Vector {
+        self.der_n(1, t)
+    }
+    fn der2(&self, t: f64) -> Self::Vector {
+        self.der_n(2, t)
+    }
     #[inline]
-    fn parameter_range(&self) -> ParameterRange { self.surface.edge_curve.parameter_range() }
+    fn parameter_range(&self) -> ParameterRange {
+        self.surface.edge_curve.parameter_range()
+    }
     #[inline]
-    fn period(&self) -> Option<f64> { self.surface.edge_curve.period() }
+    fn period(&self) -> Option<f64> {
+        self.surface.edge_curve.period()
+    }
 }
 
 impl<C, S0, S1, R> BoundedCurve for RbfContactCurve<C, S0, S1, R>

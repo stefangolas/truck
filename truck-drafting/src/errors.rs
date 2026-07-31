@@ -53,9 +53,13 @@ pub enum Error {
 }
 
 impl From<truck_geometry::errors::Error> for Error {
-    fn from(value: truck_geometry::errors::Error) -> Self { Self::GeometricError(value) }
+    fn from(value: truck_geometry::errors::Error) -> Self {
+        Self::GeometricError(value)
+    }
 }
 
 impl From<truck_topology::errors::Error> for Error {
-    fn from(value: truck_topology::errors::Error) -> Self { Self::TopologicalError(value) }
+    fn from(value: truck_topology::errors::Error) -> Self {
+        Self::TopologicalError(value)
+    }
 }

@@ -352,29 +352,40 @@ mod test_geom_impl {
 
 impl<T: Clone> GeometricMapping<T> for () {
     #[inline]
-    fn mapping(self) -> impl Fn(&T) -> T { Clone::clone }
+    fn mapping(self) -> impl Fn(&T) -> T {
+        Clone::clone
+    }
 }
 impl<T: Transformed<Matrix4>> GeometricMapping<T> for Matrix4 {
     #[inline]
-    fn mapping(self) -> impl Fn(&T) -> T { move |t| t.transformed(self) }
+    fn mapping(self) -> impl Fn(&T) -> T {
+        move |t| t.transformed(self)
+    }
 }
 impl<T> GeometricMapping<T> for fn(&T) -> T {
     #[inline]
-    fn mapping(self) -> impl Fn(&T) -> T { self }
+    fn mapping(self) -> impl Fn(&T) -> T {
+        self
+    }
 }
 
 impl<T, H> Connector<T, H> for fn(&T, &T) -> H {
     #[inline]
-    fn connector(self) -> impl Fn(&T, &T) -> H { self }
+    fn connector(self) -> impl Fn(&T, &T) -> H {
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct LineConnector;
 
 impl<C> Connector<Point3, C> for LineConnector
-where Line<Point3>: ToSameGeometry<C>
+where
+    Line<Point3>: ToSameGeometry<C>,
 {
-    fn connector(self) -> impl Fn(&Point3, &Point3) -> C { |p, q| Line(*p, *q).to_same_geometry() }
+    fn connector(self) -> impl Fn(&Point3, &Point3) -> C {
+        |p, q| Line(*p, *q).to_same_geometry()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -400,7 +411,8 @@ pub struct ArcConnector {
 }
 
 impl<C> Connector<Point3, C> for ArcConnector
-where Processor<TrimmedCurve<UnitCircle<Point3>>, Matrix4>: ToSameGeometry<C>
+where
+    Processor<TrimmedCurve<UnitCircle<Point3>>, Matrix4>: ToSameGeometry<C>,
 {
     fn connector(self) -> impl Fn(&Point3, &Point3) -> C {
         let Self {

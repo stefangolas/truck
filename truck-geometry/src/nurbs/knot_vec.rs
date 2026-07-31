@@ -5,7 +5,9 @@ use std::vec::Vec;
 
 impl KnotVec {
     /// empty constructor
-    pub const fn new() -> KnotVec { KnotVec(Vec::new()) }
+    pub const fn new() -> KnotVec {
+        KnotVec(Vec::new())
+    }
 
     /// Returns the length of range.
     /// # Examples
@@ -48,7 +50,9 @@ impl KnotVec {
 
     /// Removes one item.
     #[inline(always)]
-    pub fn remove(&mut self, idx: usize) -> f64 { self.0.remove(idx) }
+    pub fn remove(&mut self, idx: usize) -> f64 {
+        self.0.remove(idx)
+    }
 
     /// Returns the maximum index `i` of `self[i] <= x`
     /// Return `None` if `x < self[0] or self.len() == 0`.
@@ -60,7 +64,9 @@ impl KnotVec {
     /// assert_eq!(idx, 2);
     /// ```
     #[inline(always)]
-    pub fn floor(&self, x: f64) -> Option<usize> { self.iter().rposition(|t| *t <= x) }
+    pub fn floor(&self, x: f64) -> Option<usize> {
+        self.iter().rposition(|t| *t <= x)
+    }
 
     /// Returns the multiplicity of the `i`th knot
     /// # Examples
@@ -382,7 +388,9 @@ impl KnotVec {
     /// let res : Vec<f64> = knot_vec.into();
     /// assert_eq!(res, vec![4.0, 4.0, 5.0, 6.0, 7.0, 8.0, 8.0]);
     /// ```
-    pub fn translate(&mut self, x: f64) -> &mut Self { self.transform(1.0, x) }
+    pub fn translate(&mut self, x: f64) -> &mut Self {
+        self.transform(1.0, x)
+    }
 
     /// Inverts the knot vector
     /// # Example
@@ -513,31 +521,222 @@ impl KnotVec {
         }
         (knots, mults)
     }
+}
 
-    /// Constructs from single-multi description.
-    /// # Examples
-    /// ```
-    /// use truck_geometry::prelude::KnotVec;
-    /// let knots = vec![0.0, 1.0, 2.0, 3.0];
-    /// let mults = vec![3, 1, 4, 2];
-    /// let knot_vec = KnotVec::from_single_multi(knots, mults).unwrap();
-    /// assert_eq!(knot_vec, KnotVec::from(vec![0.0, 0.0, 0.0, 1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0]));
-    /// ```
+// -----------------------------------------------------------------------------
+// Validated Knot Vector & Spline Source Witness Infrastructure
+// -----------------------------------------------------------------------------
+
+/// Source-preservation witness capturing raw STEP entity B-spline knot representation
+#[derive(Clone, Debug, PartialEq)]
+pub struct SplineSourceWitness {
+    /// Optional STEP entity ID
+    pub entity_id: Option<u32>,
+    /// Raw knot sequence supplied by the STEP file
+    pub raw_knots: Vec<f64>,
+    /// Raw knot multiplicity array supplied by the STEP file
+    pub raw_multiplicities: Vec<usize>,
+    /// Spline degree k
+    pub degree: usize,
+    /// Control point count N
+    pub control_point_count: usize,
+    /// Fully expanded knot vector T
+    pub expanded_knots: Vec<f64>,
+    /// Active domain range [T_k, T_N]
+    pub active_domain: (f64, f64),
+    /// First index i where raw_knots[i-1] > raw_knots[i]
+    pub first_inversion_index: Option<usize>,
+}
+
+/// Errors during B-spline knot vector validation
+#[derive(Clone, Debug, PartialEq)]
+pub enum SplineConstructionError {
+    /// Raw knot sequence supplied by the file is non-monotonic (unsorted)
+    UnsortedRawKnots {
+        /// Source preservation witness
+        witness: SplineSourceWitness,
+    },
+    /// Active domain range [T_k, T_N] has zero or near-zero length (T_N - T_k <= 1e-12)
+    DegenerateActiveDomain {
+        /// Source preservation witness
+        witness: SplineSourceWitness,
+    },
+    /// Expanded knot count |T| is less than N + k + 1
+    ControlPointCountMismatch {
+        /// Source preservation witness
+        witness: SplineSourceWitness,
+    },
+}
+
+impl std::fmt::Display for SplineConstructionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsortedRawKnots { witness } => write!(
+                f,
+                "Unsorted raw knots in spline (entity #{:?}, inv_idx={:?})",
+                witness.entity_id, witness.first_inversion_index
+            ),
+            Self::DegenerateActiveDomain { witness } => write!(
+                f,
+                "Degenerate active domain [{:.6e}, {:.6e}] in spline (entity #{:?})",
+                witness.active_domain.0, witness.active_domain.1, witness.entity_id
+            ),
+            Self::ControlPointCountMismatch { witness } => write!(
+                f,
+                "Control point count mismatch (|T|={}, N={}, k={}) in spline (entity #{:?})",
+                witness.expanded_knots.len(),
+                witness.control_point_count,
+                witness.degree,
+                witness.entity_id
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SplineConstructionError {}
+
+/// Obligation-carrying validated knot vector typestate
+#[derive(Clone, Debug, PartialEq)]
+pub struct ValidatedKnotVector {
+    knots: KnotVec,
+    degree: usize,
+    control_point_count: usize,
+    active_domain: (f64, f64),
+}
+
+impl ValidatedKnotVector {
+    /// Validates raw spline knot inputs and constructs an obligation-carrying certificate
+    pub fn validate(
+        raw_knots: Vec<f64>,
+        raw_multiplicities: Vec<usize>,
+        degree: usize,
+        control_point_count: usize,
+        entity_id: Option<u32>,
+    ) -> std::result::Result<Self, SplineConstructionError> {
+        if raw_knots.len() != raw_multiplicities.len() {
+            let witness = SplineSourceWitness {
+                entity_id,
+                raw_knots: raw_knots.clone(),
+                raw_multiplicities: raw_multiplicities.clone(),
+                degree,
+                control_point_count,
+                expanded_knots: Vec::new(),
+                active_domain: (0.0, 0.0),
+                first_inversion_index: None,
+            };
+            return Err(SplineConstructionError::ControlPointCountMismatch { witness });
+        }
+
+        let mut first_inversion = None;
+        for i in 1..raw_knots.len() {
+            if raw_knots[i - 1] > raw_knots[i] {
+                first_inversion = Some(i);
+                break;
+            }
+        }
+
+        let mut expanded = Vec::new();
+        for (k, m) in raw_knots.iter().zip(&raw_multiplicities) {
+            for _ in 0..*m {
+                expanded.push(*k);
+            }
+        }
+
+        if let Some(inv_idx) = first_inversion {
+            let witness = SplineSourceWitness {
+                entity_id,
+                raw_knots,
+                raw_multiplicities,
+                degree,
+                control_point_count,
+                expanded_knots: expanded,
+                active_domain: (0.0, 0.0),
+                first_inversion_index: Some(inv_idx),
+            };
+            return Err(SplineConstructionError::UnsortedRawKnots { witness });
+        }
+
+        if expanded.len() < control_point_count + degree + 1 {
+            let witness = SplineSourceWitness {
+                entity_id,
+                raw_knots,
+                raw_multiplicities,
+                degree,
+                control_point_count,
+                expanded_knots: expanded,
+                active_domain: (0.0, 0.0),
+                first_inversion_index: None,
+            };
+            return Err(SplineConstructionError::ControlPointCountMismatch { witness });
+        }
+
+        let u_min = expanded[degree];
+        let u_max = expanded[control_point_count];
+
+        if u_max - u_min <= 1.0e-12 {
+            let witness = SplineSourceWitness {
+                entity_id,
+                raw_knots,
+                raw_multiplicities,
+                degree,
+                control_point_count,
+                expanded_knots: expanded,
+                active_domain: (u_min, u_max),
+                first_inversion_index: None,
+            };
+            return Err(SplineConstructionError::DegenerateActiveDomain { witness });
+        }
+
+        Ok(Self {
+            knots: KnotVec(expanded),
+            degree,
+            control_point_count,
+            active_domain: (u_min, u_max),
+        })
+    }
+
+    /// Returns the active domain range [T_k, T_N]
+    #[inline(always)]
+    pub fn active_domain(&self) -> (f64, f64) {
+        self.active_domain
+    }
+
+    /// Returns a reference to the inner KnotVec
+    #[inline(always)]
+    pub fn inner(&self) -> &KnotVec {
+        &self.knots
+    }
+
+    /// Consumes self and returns the inner KnotVec
+    #[inline(always)]
+    pub fn into_inner(self) -> KnotVec {
+        self.knots
+    }
+}
+
+impl KnotVec {
+    /// Constructs from knots and multiplicities array.
     pub fn from_single_multi(knots: Vec<f64>, mults: Vec<usize>) -> Result<KnotVec> {
+        if knots.len() != mults.len() {
+            return Err(Error::ZeroRange);
+        }
         for i in 1..knots.len() {
             if knots[i - 1] > knots[i] {
                 return Err(Error::NotSortedVector);
             }
         }
-
         let mut vec = Vec::new();
-        for i in 0..knots.len() {
-            for _ in 0..mults[i] {
-                vec.push(knots[i]);
+        for (k, m) in knots.into_iter().zip(mults) {
+            for _ in 0..m {
+                vec.push(k);
             }
+        }
+        if vec.is_empty() || vec[vec.len() - 1] - vec[0] <= 1.0e-12 {
+            return Err(Error::ZeroRange);
         }
         Ok(KnotVec(vec))
     }
+
     /// Constructs from `Vec<f64>`. do not sort, only check sorted.
     pub fn try_from(vec: Vec<f64>) -> Result<KnotVec> {
         for i in 1..vec.len() {
@@ -636,7 +835,9 @@ impl From<KnotVec> for Vec<f64> {
     /// assert_eq!(vec, vec0);
     /// ```
     #[inline(always)]
-    fn from(knotvec: KnotVec) -> Vec<f64> { knotvec.0 }
+    fn from(knotvec: KnotVec) -> Vec<f64> {
+        knotvec.0
+    }
 }
 
 impl FromIterator<f64> for KnotVec {
@@ -650,23 +851,31 @@ impl<'a> IntoIterator for &'a KnotVec {
     type Item = &'a f64;
     type IntoIter = std::slice::Iter<'a, f64>;
     #[inline(always)]
-    fn into_iter(self) -> Self::IntoIter { self.0.iter() }
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
 }
 
 impl std::ops::Deref for KnotVec {
     type Target = Vec<f64>;
     #[inline(always)]
-    fn deref(&self) -> &Vec<f64> { &self.0 }
+    fn deref(&self) -> &Vec<f64> {
+        &self.0
+    }
 }
 
 impl AsRef<[f64]> for KnotVec {
     #[inline(always)]
-    fn as_ref(&self) -> &[f64] { &self.0 }
+    fn as_ref(&self) -> &[f64] {
+        &self.0
+    }
 }
 
 impl<'de> Deserialize<'de> for KnotVec {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where D: serde::Deserializer<'de> {
+    where
+        D: serde::Deserializer<'de>,
+    {
         let vec = Vec::<f64>::deserialize(deserializer)?;
         Self::try_from(vec).map_err(serde::de::Error::custom)
     }
@@ -675,7 +884,9 @@ impl<'de> Deserialize<'de> for KnotVec {
 impl BasisWindow {
     /// Returns the base index
     #[inline(always)]
-    pub const fn base(&self) -> usize { self.base }
+    pub const fn base(&self) -> usize {
+        self.base
+    }
     /// Extracts a slice containing the entire vector.
     #[inline(always)]
     pub fn as_slice(&self) -> &[f64] {
@@ -713,5 +924,7 @@ impl BasisWindow {
 
 impl AsRef<[f64]> for BasisWindow {
     #[inline(always)]
-    fn as_ref(&self) -> &[f64] { self.as_slice() }
+    fn as_ref(&self) -> &[f64] {
+        self.as_slice()
+    }
 }

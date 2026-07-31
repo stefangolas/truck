@@ -17,10 +17,14 @@ macro_rules! intopt {
 
 /// Creates and returns a vertex by a three dimensional point.
 #[wasm_bindgen]
-pub fn vertex(x: f64, y: f64, z: f64) -> Vertex { builder::vertex(Point3::new(x, y, z)).into() }
+pub fn vertex(x: f64, y: f64, z: f64) -> Vertex {
+    builder::vertex(Point3::new(x, y, z)).into()
+}
 /// Returns a line from `vertex0` to `vertex1`.
 #[wasm_bindgen]
-pub fn line(vertex0: &Vertex, vertex1: &Vertex) -> Edge { builder::line(vertex0, vertex1).into() }
+pub fn line(vertex0: &Vertex, vertex1: &Vertex) -> Edge {
+    builder::line(vertex0, vertex1).into()
+}
 /// Returns a circle arc from `vertex0` to `vertex1` via `transit`.
 #[wasm_bindgen]
 pub fn circle_arc(vertex0: &Vertex, vertex1: &Vertex, transit: &[f64]) -> Edge {
@@ -42,7 +46,9 @@ pub fn bezier(vertex0: &Vertex, vertex1: &Vertex, inter_points: &[f64]) -> Edge 
 }
 /// Returns a homotopic face from `edge0` to `edge1`.
 #[wasm_bindgen]
-pub fn homotopy(edge0: &Edge, edge1: &Edge) -> Face { builder::homotopy(edge0, edge1).into() }
+pub fn homotopy(edge0: &Edge, edge1: &Edge) -> Face {
+    builder::homotopy(edge0, edge1).into()
+}
 /// Try attatiching a plane whose boundary is `wire`.
 #[wasm_bindgen]
 pub fn try_attach_plane(wire: &Wire) -> Option<Face> {

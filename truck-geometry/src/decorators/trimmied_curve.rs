@@ -3,28 +3,44 @@ use super::*;
 impl<C> TrimmedCurve<C> {
     /// constructor
     #[inline(always)]
-    pub const fn new(curve: C, range: (f64, f64)) -> Self { Self { curve, range } }
+    pub const fn new(curve: C, range: (f64, f64)) -> Self {
+        Self { curve, range }
+    }
     /// Returns the reference of non-trimmed curve
     #[inline(always)]
-    pub const fn curve(&self) -> &C { &self.curve }
+    pub const fn curve(&self) -> &C {
+        &self.curve
+    }
     /// Returns the mutable reference of non-trimmed curve
     #[inline(always)]
-    pub fn curve_mut(&mut self) -> &mut C { &mut self.curve }
+    pub fn curve_mut(&mut self) -> &mut C {
+        &mut self.curve
+    }
 }
 
 impl<C: ParametricCurve> ParametricCurve for TrimmedCurve<C> {
     type Point = C::Point;
     type Vector = C::Vector;
     #[inline(always)]
-    fn der_n(&self, n: usize, t: f64) -> Self::Vector { self.curve.der_n(n, t) }
+    fn der_n(&self, n: usize, t: f64) -> Self::Vector {
+        self.curve.der_n(n, t)
+    }
     #[inline(always)]
-    fn subs(&self, t: f64) -> Self::Point { self.curve.subs(t) }
+    fn subs(&self, t: f64) -> Self::Point {
+        self.curve.subs(t)
+    }
     #[inline(always)]
-    fn der(&self, t: f64) -> Self::Vector { self.curve.der(t) }
+    fn der(&self, t: f64) -> Self::Vector {
+        self.curve.der(t)
+    }
     #[inline(always)]
-    fn der2(&self, t: f64) -> Self::Vector { self.curve.der2(t) }
+    fn der2(&self, t: f64) -> Self::Vector {
+        self.curve.der2(t)
+    }
     #[inline(always)]
-    fn period(&self) -> Option<f64> { self.curve.period() }
+    fn period(&self) -> Option<f64> {
+        self.curve.period()
+    }
     #[inline(always)]
     fn parameter_range(&self) -> ParameterRange {
         (Bound::Included(self.range.0), Bound::Included(self.range.1))

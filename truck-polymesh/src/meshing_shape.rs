@@ -3,7 +3,9 @@ use crate::*;
 impl<P> PolylineCurve<P> {
     /// meshing the curve
     pub fn from_curve<C>(curve: C, range: (f64, f64), tol: f64) -> Self
-    where C: ParameterDivision1D<Point = P> {
+    where
+        C: ParameterDivision1D<Point = P>,
+    {
         PolylineCurve(curve.parameter_division(range, tol).1)
     }
 }
@@ -13,11 +15,7 @@ impl StructuredMesh {
     /// # Arguments
     /// * `bspsurface` - bspline surface to meshed
     /// * `tol` - standard tolerance for meshing
-    pub fn from_surface<S>(
-        surface: &S,
-        range: ((f64, f64), (f64, f64)),
-        tol: f64,
-    ) -> StructuredMesh
+    pub fn from_surface<S>(surface: &S, range: ((f64, f64), (f64, f64)), tol: f64) -> StructuredMesh
     where
         S: ParametricSurface3D + ParameterDivision2D,
     {
@@ -27,7 +25,9 @@ impl StructuredMesh {
 }
 
 fn create_mesh<S>(surface: &S, div0: Vec<f64>, div1: Vec<f64>) -> StructuredMesh
-where S: ParametricSurface3D {
+where
+    S: ParametricSurface3D,
+{
     let mut positions = vec![Vec::with_capacity(div1.len()); div0.len()];
     let mut normals = vec![Vec::with_capacity(div1.len()); div0.len()];
     div0.iter()

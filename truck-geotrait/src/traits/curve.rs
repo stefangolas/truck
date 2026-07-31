@@ -27,7 +27,9 @@ pub trait ParametricCurve: Clone {
     }
     /// Returns default parameter range
     #[inline(always)]
-    fn parameter_range(&self) -> ParameterRange { (Bound::Unbounded, Bound::Unbounded) }
+    fn parameter_range(&self) -> ParameterRange {
+        (Bound::Unbounded, Bound::Unbounded)
+    }
     /// Return the ends of `parameter_range` by tuple.
     /// If the range is unbounded, return `None`.
     #[inline(always)]
@@ -37,14 +39,18 @@ pub trait ParametricCurve: Clone {
     }
     /// `None` in default implementation; `Some(period)` if periodic.
     #[inline(always)]
-    fn period(&self) -> Option<f64> { None }
+    fn period(&self) -> Option<f64> {
+        None
+    }
 }
 
 /// bounded parametric curves i.e. it is guaranteed that the return value of `parameter_range` is not `Bound::Unbounded`.
 pub trait BoundedCurve: ParametricCurve {
     /// Return the ends of `parameter_range` by tuple.
     #[inline(always)]
-    fn range_tuple(&self) -> (f64, f64) { self.try_range_tuple().expect(UNBOUNDED_ERROR) }
+    fn range_tuple(&self) -> (f64, f64) {
+        self.try_range_tuple().expect(UNBOUNDED_ERROR)
+    }
     /// The front end point of the curve.
     #[inline(always)]
     fn front(&self) -> Self::Point {
@@ -63,16 +69,24 @@ pub trait BoundedCurve: ParametricCurve {
 impl ParametricCurve for (usize, usize) {
     type Point = usize;
     type Vector = usize;
-    fn der_n(&self, _: usize, _: f64) -> Self::Vector { self.1 - self.0 }
+    fn der_n(&self, _: usize, _: f64) -> Self::Vector {
+        self.1 - self.0
+    }
     fn subs(&self, t: f64) -> Self::Point {
         match t < 0.5 {
             true => self.0,
             false => self.1,
         }
     }
-    fn der(&self, _: f64) -> Self::Vector { self.1 - self.0 }
-    fn der2(&self, _: f64) -> Self::Vector { self.1 - self.0 }
-    fn parameter_range(&self) -> ParameterRange { (Bound::Included(0.0), Bound::Included(1.0)) }
+    fn der(&self, _: f64) -> Self::Vector {
+        self.1 - self.0
+    }
+    fn der2(&self, _: f64) -> Self::Vector {
+        self.1 - self.0
+    }
+    fn parameter_range(&self) -> ParameterRange {
+        (Bound::Included(0.0), Bound::Included(1.0))
+    }
 }
 
 /// Implementation for the test of topological methods.
@@ -81,56 +95,94 @@ impl BoundedCurve for (usize, usize) {}
 impl<C: ParametricCurve> ParametricCurve for &C {
     type Point = C::Point;
     type Vector = C::Vector;
-    fn subs(&self, t: f64) -> Self::Point { (*self).subs(t) }
+    fn subs(&self, t: f64) -> Self::Point {
+        (*self).subs(t)
+    }
     #[inline(always)]
-    fn der(&self, t: f64) -> Self::Vector { (*self).der(t) }
+    fn der(&self, t: f64) -> Self::Vector {
+        (*self).der(t)
+    }
     #[inline(always)]
-    fn der2(&self, t: f64) -> Self::Vector { (*self).der2(t) }
+    fn der2(&self, t: f64) -> Self::Vector {
+        (*self).der2(t)
+    }
     #[inline(always)]
-    fn der_n(&self, n: usize, t: f64) -> Self::Vector { (*self).der_n(n, t) }
+    fn der_n(&self, n: usize, t: f64) -> Self::Vector {
+        (*self).der_n(n, t)
+    }
     #[inline(always)]
-    fn ders(&self, n: usize, t: f64) -> CurveDers<Self::Vector> { (*self).ders(n, t) }
+    fn ders(&self, n: usize, t: f64) -> CurveDers<Self::Vector> {
+        (*self).ders(n, t)
+    }
     #[inline(always)]
-    fn parameter_range(&self) -> ParameterRange { (*self).parameter_range() }
+    fn parameter_range(&self) -> ParameterRange {
+        (*self).parameter_range()
+    }
     #[inline(always)]
-    fn period(&self) -> Option<f64> { (*self).period() }
+    fn period(&self) -> Option<f64> {
+        (*self).period()
+    }
 }
 
 impl<C: BoundedCurve> BoundedCurve for &C {
     #[inline(always)]
-    fn front(&self) -> Self::Point { (*self).front() }
+    fn front(&self) -> Self::Point {
+        (*self).front()
+    }
     #[inline(always)]
-    fn back(&self) -> Self::Point { (*self).back() }
+    fn back(&self) -> Self::Point {
+        (*self).back()
+    }
 }
 
 impl<C: ParametricCurve> ParametricCurve for Box<C> {
     type Point = C::Point;
     type Vector = C::Vector;
-    fn subs(&self, t: f64) -> Self::Point { (**self).subs(t) }
+    fn subs(&self, t: f64) -> Self::Point {
+        (**self).subs(t)
+    }
     #[inline(always)]
-    fn der(&self, t: f64) -> Self::Vector { (**self).der(t) }
+    fn der(&self, t: f64) -> Self::Vector {
+        (**self).der(t)
+    }
     #[inline(always)]
-    fn der2(&self, t: f64) -> Self::Vector { (**self).der2(t) }
+    fn der2(&self, t: f64) -> Self::Vector {
+        (**self).der2(t)
+    }
     #[inline(always)]
-    fn der_n(&self, n: usize, t: f64) -> Self::Vector { (**self).der_n(n, t) }
+    fn der_n(&self, n: usize, t: f64) -> Self::Vector {
+        (**self).der_n(n, t)
+    }
     #[inline(always)]
-    fn ders(&self, n: usize, t: f64) -> CurveDers<Self::Vector> { (**self).ders(n, t) }
+    fn ders(&self, n: usize, t: f64) -> CurveDers<Self::Vector> {
+        (**self).ders(n, t)
+    }
     #[inline(always)]
-    fn parameter_range(&self) -> ParameterRange { (**self).parameter_range() }
+    fn parameter_range(&self) -> ParameterRange {
+        (**self).parameter_range()
+    }
     #[inline(always)]
-    fn period(&self) -> Option<f64> { (**self).period() }
+    fn period(&self) -> Option<f64> {
+        (**self).period()
+    }
 }
 
 impl<C: BoundedCurve> BoundedCurve for Box<C> {
     #[inline(always)]
-    fn front(&self) -> Self::Point { (**self).front() }
+    fn front(&self) -> Self::Point {
+        (**self).front()
+    }
     #[inline(always)]
-    fn back(&self) -> Self::Point { (**self).back() }
+    fn back(&self) -> Self::Point {
+        (**self).back()
+    }
 }
 
 impl<C: Cut> Cut for Box<C> {
     #[inline(always)]
-    fn cut(&mut self, t: f64) -> Self { Box::new((**self).cut(t)) }
+    fn cut(&mut self, t: f64) -> Self {
+        Box::new((**self).cut(t))
+    }
 }
 
 macro_rules! impl_constant_curve {
@@ -139,11 +191,17 @@ macro_rules! impl_constant_curve {
             type Point = $ty;
             type Vector = $vec;
             #[inline(always)]
-            fn subs(&self, _: f64) -> Self::Point { *self }
+            fn subs(&self, _: f64) -> Self::Point {
+                *self
+            }
             #[inline(always)]
-            fn der(&self, _: f64) -> Self::Vector { <$vec>::zero() }
+            fn der(&self, _: f64) -> Self::Vector {
+                <$vec>::zero()
+            }
             #[inline(always)]
-            fn der2(&self, _: f64) -> Self::Vector { <$vec>::zero() }
+            fn der2(&self, _: f64) -> Self::Vector {
+                <$vec>::zero()
+            }
             #[inline(always)]
             fn der_n(&self, n: usize, _: f64) -> Self::Vector {
                 match n {
@@ -250,7 +308,9 @@ impl<C: ParameterTransform> ParameterTransform for Box<C> {
 /// Concats two curves
 pub trait Concat<Rhs: BoundedCurve<Point = Self::Point, Vector = Self::Vector>>:
     BoundedCurve
-where Self::Point: Debug {
+where
+    Self::Point: Debug,
+{
     /// The result of concat two curves
     type Output: BoundedCurve<Point = Self::Point, Vector = Self::Vector>;
     /// Try concat two curves.
@@ -275,7 +335,9 @@ where
     fn try_concat(&self, rhs: &Rhs) -> Result<Self::Output, ConcatError<C::Point>> {
         (**self).try_concat(rhs)
     }
-    fn concat(&self, rhs: &Rhs) -> Self::Output { (**self).concat(rhs) }
+    fn concat(&self, rhs: &Rhs) -> Self::Output {
+        (**self).concat(rhs)
+    }
 }
 
 /// Error for concat curves
@@ -293,7 +355,9 @@ impl<T: Debug> ConcatError<T> {
     /// into the
     #[inline(always)]
     pub fn point_map<U: Debug, F>(self, f: F) -> ConcatError<U>
-    where F: Fn(T) -> U {
+    where
+        F: Fn(T) -> U,
+    {
         match self {
             ConcatError::DisconnectedParameters(a, b) => ConcatError::DisconnectedParameters(a, b),
             ConcatError::DisconnectedPoints(p, q) => ConcatError::DisconnectedPoints(f(p), f(q)),
@@ -317,7 +381,8 @@ impl<C> CurveCollector<C> {
     where
         C: Concat<Rhs, Output = C>,
         C::Point: Debug,
-        Rhs: BoundedCurve<Point = C::Point, Vector = C::Vector> + Into<C>, {
+        Rhs: BoundedCurve<Point = C::Point, Vector = C::Vector> + Into<C>,
+    {
         match self {
             CurveCollector::Singleton => {
                 *self = CurveCollector::Curve(curve.clone().into());
@@ -334,7 +399,8 @@ impl<C> CurveCollector<C> {
     where
         C: Concat<Rhs, Output = C>,
         C::Point: Debug,
-        Rhs: BoundedCurve<Point = C::Point, Vector = C::Vector> + Into<C>, {
+        Rhs: BoundedCurve<Point = C::Point, Vector = C::Vector> + Into<C>,
+    {
         self.try_concat(curve)
             .unwrap_or_else(|error| panic!("{}", error))
     }
@@ -380,7 +446,8 @@ pub fn parameter_transform_random_test<C>(curve: &C, trials: usize)
 where
     C: ParameterTransform,
     C::Point: Debug + Tolerance,
-    C::Vector: Debug + Tolerance + std::ops::Mul<f64, Output = C::Vector>, {
+    C::Vector: Debug + Tolerance + std::ops::Mul<f64, Output = C::Vector>,
+{
     (0..trials).for_each(move |_| exec_parameter_transform_random_test(curve))
 }
 
@@ -388,7 +455,8 @@ fn exec_parameter_transform_random_test<C>(curve: &C)
 where
     C: ParameterTransform,
     C::Point: Debug + Tolerance,
-    C::Vector: Debug + Tolerance + std::ops::Mul<f64, Output = C::Vector>, {
+    C::Vector: Debug + Tolerance + std::ops::Mul<f64, Output = C::Vector>,
+{
     let a = rand::random::<f64>() + 0.5;
     let b = rand::random::<f64>() * 2.0;
     let transformed = curve.parameter_transformed(a, b);
@@ -412,7 +480,8 @@ where
     C0::Point: Debug + Tolerance,
     C0::Vector: Debug + Tolerance,
     C0::Output: BoundedCurve<Point = C0::Point, Vector = C0::Vector> + Debug,
-    C1: BoundedCurve<Point = C0::Point, Vector = C0::Vector>, {
+    C1: BoundedCurve<Point = C0::Point, Vector = C0::Vector>,
+{
     (0..trials).for_each(move |_| exec_concat_random_test(curve0, curve1))
 }
 
@@ -422,7 +491,8 @@ where
     C0::Point: Debug + Tolerance,
     C0::Vector: Debug + Tolerance,
     C0::Output: BoundedCurve<Point = C0::Point, Vector = C0::Vector> + Debug,
-    C1: BoundedCurve<Point = C0::Point, Vector = C0::Vector>, {
+    C1: BoundedCurve<Point = C0::Point, Vector = C0::Vector>,
+{
     let concatted = curve0.try_concat(curve1).unwrap();
     let (t0, t1) = curve0.range_tuple();
     let (_, t2) = curve1.range_tuple();
@@ -449,7 +519,8 @@ pub fn cut_random_test<C>(curve: &C, trials: usize)
 where
     C: Cut,
     C::Point: Debug + Tolerance,
-    C::Vector: Debug + Tolerance, {
+    C::Vector: Debug + Tolerance,
+{
     (0..trials).for_each(move |_| exec_cut_random_test(curve))
 }
 
@@ -457,7 +528,8 @@ fn exec_cut_random_test<C>(curve: &C)
 where
     C: Cut,
     C::Point: Debug + Tolerance,
-    C::Vector: Debug + Tolerance, {
+    C::Vector: Debug + Tolerance,
+{
     let mut part0 = curve.clone();
     let (t0, t1) = curve.range_tuple();
     let p = rand::random::<f64>();

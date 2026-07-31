@@ -40,7 +40,9 @@ pub struct CompressedEdgeIndex {
 }
 
 impl From<(usize, bool)> for CompressedEdgeIndex {
-    fn from((index, orientation): (usize, bool)) -> Self { Self { index, orientation } }
+    fn from((index, orientation): (usize, bool)) -> Self {
+        Self { index, orientation }
+    }
 }
 
 /// The identity of an entity in the document an object was imported from.
@@ -63,9 +65,13 @@ pub struct SourceEntityId(u64);
 
 impl SourceEntityId {
     /// Name an entity of the document being imported.
-    pub const fn new(value: u64) -> Self { Self(value) }
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
     /// The underlying number, for printing and for importer-side lookups.
-    pub const fn get(self) -> u64 { self.0 }
+    pub const fn get(self) -> u64 {
+        self.0
+    }
 }
 
 impl std::fmt::Display for SourceEntityId {
@@ -447,7 +453,9 @@ where
     S: Clone + Deserialize<'de>,
 {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where D: serde::Deserializer<'de> {
+    where
+        D: serde::Deserializer<'de>,
+    {
         use serde::de::Error;
         let compressed = CompressedShell::<P, C, S>::deserialize(deserializer)?;
         Shell::extract(compressed).map_err(D::Error::custom)
@@ -478,7 +486,9 @@ where
     S: Clone + Deserialize<'de>,
 {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where D: serde::Deserializer<'de> {
+    where
+        D: serde::Deserializer<'de>,
+    {
         use serde::de::Error;
         let compressed = CompressedSolid::<P, C, S>::deserialize(deserializer)?;
         Solid::extract(compressed).map_err(D::Error::custom)
@@ -509,7 +519,9 @@ where
     S: Clone + Deserialize<'de>,
 {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where D: serde::Deserializer<'de> {
+    where
+        D: serde::Deserializer<'de>,
+    {
         Shell::deserialize(deserializer).map(|mut shell| shell.pop().unwrap())
     }
 }

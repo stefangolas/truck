@@ -2,14 +2,18 @@ use crate::topo_traits::*;
 use truck_topology::*;
 
 impl<P, T> Mapped<T> for Vertex<P>
-where T: GeometricMapping<P> + Copy
+where
+    T: GeometricMapping<P> + Copy,
 {
     #[inline(always)]
-    fn mapped(&self, trans: T) -> Self { self.mapped(trans.mapping()) }
+    fn mapped(&self, trans: T) -> Self {
+        self.mapped(trans.mapping())
+    }
 }
 
 impl<P, C, T> Mapped<T> for Edge<P, C>
-where T: GeometricMapping<P> + GeometricMapping<C> + Copy
+where
+    T: GeometricMapping<P> + GeometricMapping<C> + Copy,
 {
     #[inline(always)]
     fn mapped(&self, trans: T) -> Self {
@@ -20,7 +24,8 @@ where T: GeometricMapping<P> + GeometricMapping<C> + Copy
 }
 
 impl<P, C, T> Mapped<T> for Wire<P, C>
-where T: GeometricMapping<P> + GeometricMapping<C> + Copy
+where
+    T: GeometricMapping<P> + GeometricMapping<C> + Copy,
 {
     #[inline(always)]
     fn mapped(&self, trans: T) -> Self {
@@ -31,7 +36,8 @@ where T: GeometricMapping<P> + GeometricMapping<C> + Copy
 }
 
 impl<P, C, S, T> Mapped<T> for Face<P, C, S>
-where T: GeometricMapping<P> + GeometricMapping<C> + GeometricMapping<S> + Copy
+where
+    T: GeometricMapping<P> + GeometricMapping<C> + GeometricMapping<S> + Copy,
 {
     #[inline(always)]
     fn mapped(&self, trans: T) -> Self {
@@ -43,7 +49,8 @@ where T: GeometricMapping<P> + GeometricMapping<C> + GeometricMapping<S> + Copy
 }
 
 impl<P, C, S, T> Mapped<T> for Shell<P, C, S>
-where T: GeometricMapping<P> + GeometricMapping<C> + GeometricMapping<S> + Copy
+where
+    T: GeometricMapping<P> + GeometricMapping<C> + GeometricMapping<S> + Copy,
 {
     #[inline(always)]
     fn mapped(&self, trans: T) -> Self {
@@ -55,7 +62,8 @@ where T: GeometricMapping<P> + GeometricMapping<C> + GeometricMapping<S> + Copy
 }
 
 impl<P, C, S, T> Mapped<T> for Solid<P, C, S>
-where T: GeometricMapping<P> + GeometricMapping<C> + GeometricMapping<S> + Copy
+where
+    T: GeometricMapping<P> + GeometricMapping<C> + GeometricMapping<S> + Copy,
 {
     #[inline(always)]
     fn mapped(&self, trans: T) -> Self {

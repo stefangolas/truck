@@ -343,7 +343,8 @@ fn split_into_nondegenerate(poly: Vec<Vertex>) -> Vec<Vec<Vertex>> {
 }
 
 trait CastIntVector:
-    Sized + ElementWise<Self> + Mul<f64, Output = Self> + Div<f64, Output = Self> {
+    Sized + ElementWise<Self> + Mul<f64, Output = Self> + Div<f64, Output = Self>
+{
     type IntVector: IntVector;
     fn cast_int(self) -> Self::IntVector;
     fn round(self, tol: f64) -> Self::IntVector;
@@ -359,8 +360,12 @@ macro_rules! impl_cast_int {
                     .unwrap_or_else(|| panic!("failed to cast: {self:?}"))
                     .into()
             }
-            fn round(self, tol: f64) -> Self::IntVector { (self / tol).cast_int() }
-            fn zero() -> Self { Self::from([0.0; $n]) }
+            fn round(self, tol: f64) -> Self::IntVector {
+                (self / tol).cast_int()
+            }
+            fn zero() -> Self {
+                Self::from([0.0; $n])
+            }
         }
     };
 }
@@ -430,7 +435,9 @@ impl IntVector for [i64; 3] {
 mod tests {
     use super::*;
 
-    fn into_vertices(iter: &[usize]) -> Vec<Vertex> { iter.iter().map(|i| i.into()).collect() }
+    fn into_vertices(iter: &[usize]) -> Vec<Vertex> {
+        iter.iter().map(|i| i.into()).collect()
+    }
 
     #[test]
     fn degenerate_polygon_test() {

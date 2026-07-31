@@ -188,7 +188,9 @@ pub fn convert_parameter_value(
 ) -> f64 {
     match dimension {
         ParameterDimension::PlaneAngle => value * plane_angle_factor,
-        ParameterDimension::Length | ParameterDimension::Dimensionless | ParameterDimension::NativeCurveParameter => value,
+        ParameterDimension::Length
+        | ParameterDimension::Dimensionless
+        | ParameterDimension::NativeCurveParameter => value,
     }
 }
 
@@ -1548,7 +1550,9 @@ impl<P: for<'a> From<&'a CartesianPoint>> TryFrom<&BSplineCurveWithKnots> for BS
         let ctrl_count = ctrpts.len();
         let kv = match ValidatedKnotVector::validate(knots, multi, degree, ctrl_count, None) {
             Ok(v) => v.into_inner(),
-            Err(e @ truck_geometry::nurbs::SplineConstructionError::UnsortedRawKnots { .. }) => return Err(e.into()),
+            Err(e @ truck_geometry::nurbs::SplineConstructionError::UnsortedRawKnots { .. }) => {
+                return Err(e.into())
+            }
             Err(_) => quasi_uniform_knots(ctrl_count, degree),
         };
         Ok(Self::try_new(kv, ctrpts)?)
@@ -2364,17 +2368,33 @@ impl TryFrom<&BSplineSurfaceWithKnots> for BSplineSurface<Point3> {
 
         let u_degree = surface.u_degree as usize;
         let u_ctrl_count = ctrls.len();
-        let u_kv = match ValidatedKnotVector::validate(uknots.clone(), umulti.clone(), u_degree, u_ctrl_count, None) {
+        let u_kv = match ValidatedKnotVector::validate(
+            uknots.clone(),
+            umulti.clone(),
+            u_degree,
+            u_ctrl_count,
+            None,
+        ) {
             Ok(v) => v.into_inner(),
-            Err(e @ truck_geometry::nurbs::SplineConstructionError::UnsortedRawKnots { .. }) => return Err(e.into()),
+            Err(e @ truck_geometry::nurbs::SplineConstructionError::UnsortedRawKnots { .. }) => {
+                return Err(e.into())
+            }
             Err(_) => quasi_uniform_knots(u_ctrl_count, u_degree),
         };
 
         let v_degree = surface.v_degree as usize;
         let v_ctrl_count = if ctrls.is_empty() { 0 } else { ctrls[0].len() };
-        let v_kv = match ValidatedKnotVector::validate(vknots.clone(), vmulti.clone(), v_degree, v_ctrl_count, None) {
+        let v_kv = match ValidatedKnotVector::validate(
+            vknots.clone(),
+            vmulti.clone(),
+            v_degree,
+            v_ctrl_count,
+            None,
+        ) {
             Ok(v) => v.into_inner(),
-            Err(e @ truck_geometry::nurbs::SplineConstructionError::UnsortedRawKnots { .. }) => return Err(e.into()),
+            Err(e @ truck_geometry::nurbs::SplineConstructionError::UnsortedRawKnots { .. }) => {
+                return Err(e.into())
+            }
             Err(_) => quasi_uniform_knots(v_ctrl_count, v_degree),
         };
 
@@ -3594,13 +3614,34 @@ mod parameter_value_conversion_tests {
         let deg_to_rad = std::f64::consts::PI / 180.0;
 
         // PlaneAngle dimension converts degrees to radians
-        assert!((convert_parameter_value(90.0, ParameterDimension::PlaneAngle, deg_to_rad) - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
-        assert!((convert_parameter_value(180.0, ParameterDimension::PlaneAngle, deg_to_rad) - std::f64::consts::PI).abs() < 1e-12);
+        assert!(
+            (convert_parameter_value(90.0, ParameterDimension::PlaneAngle, deg_to_rad)
+                - std::f64::consts::FRAC_PI_2)
+                .abs()
+                < 1e-12
+        );
+        assert!(
+            (convert_parameter_value(180.0, ParameterDimension::PlaneAngle, deg_to_rad)
+                - std::f64::consts::PI)
+                .abs()
+                < 1e-12
+        );
 
         // Length and Dimensionless parameters are untouched regardless of plane angle unit factor
-        assert!((convert_parameter_value(90.0, ParameterDimension::Length, deg_to_rad) - 90.0).abs() < 1e-12);
-        assert!((convert_parameter_value(90.0, ParameterDimension::Dimensionless, deg_to_rad) - 90.0).abs() < 1e-12);
-        assert!((convert_parameter_value(90.0, ParameterDimension::NativeCurveParameter, deg_to_rad) - 90.0).abs() < 1e-12);
+        assert!(
+            (convert_parameter_value(90.0, ParameterDimension::Length, deg_to_rad) - 90.0).abs()
+                < 1e-12
+        );
+        assert!(
+            (convert_parameter_value(90.0, ParameterDimension::Dimensionless, deg_to_rad) - 90.0)
+                .abs()
+                < 1e-12
+        );
+        assert!(
+            (convert_parameter_value(90.0, ParameterDimension::NativeCurveParameter, deg_to_rad)
+                - 90.0)
+                .abs()
+                < 1e-12
+        );
     }
 }
-

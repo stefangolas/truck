@@ -374,13 +374,19 @@ pub trait ScalarFunctionD1: Clone {
     fn der_n(&self, n: usize, t: f64) -> f64;
     /// Substitutes the parameter `t`.
     #[inline]
-    fn subs(&self, t: f64) -> f64 { self.der_n(0, t) }
+    fn subs(&self, t: f64) -> f64 {
+        self.der_n(0, t)
+    }
     /// Returns the derivation.
     #[inline]
-    fn der(&self, t: f64) -> f64 { self.der_n(1, t) }
+    fn der(&self, t: f64) -> f64 {
+        self.der_n(1, t)
+    }
     /// Returns the 2nd-order derivation.
     #[inline]
-    fn der2(&self, t: f64) -> f64 { self.der_n(2, t) }
+    fn der2(&self, t: f64) -> f64 {
+        self.der_n(2, t)
+    }
     /// Substitutes the higher-order derivations to `out`.
     #[inline]
     fn ders(&self, max_order: usize, t: f64) -> CurveDers<f64> {
@@ -394,22 +400,34 @@ pub trait ScalarFunctionD2: Clone {
     fn der_mn(&self, m: usize, n: usize, u: f64, v: f64) -> f64;
     /// Substitutes the parameter `(u, v)`.
     #[inline]
-    fn subs(&self, u: f64, v: f64) -> f64 { self.der_mn(0, 0, u, v) }
+    fn subs(&self, u: f64, v: f64) -> f64 {
+        self.der_mn(0, 0, u, v)
+    }
     /// Returns the derivation by `u`.
     #[inline]
-    fn uder(&self, u: f64, v: f64) -> f64 { self.der_mn(1, 0, u, v) }
+    fn uder(&self, u: f64, v: f64) -> f64 {
+        self.der_mn(1, 0, u, v)
+    }
     /// Returns the derivation by `v`.
     #[inline]
-    fn vder(&self, u: f64, v: f64) -> f64 { self.der_mn(0, 1, u, v) }
+    fn vder(&self, u: f64, v: f64) -> f64 {
+        self.der_mn(0, 1, u, v)
+    }
     /// Returns the 2nd-order derivation by `u`.
     #[inline]
-    fn uuder(&self, u: f64, v: f64) -> f64 { self.der_mn(2, 0, u, v) }
+    fn uuder(&self, u: f64, v: f64) -> f64 {
+        self.der_mn(2, 0, u, v)
+    }
     /// Returns the 2nd-order derivation by both `u` and `v`.
     #[inline]
-    fn uvder(&self, u: f64, v: f64) -> f64 { self.der_mn(1, 1, u, v) }
+    fn uvder(&self, u: f64, v: f64) -> f64 {
+        self.der_mn(1, 1, u, v)
+    }
     /// Returns the 2nd-order derivation by `v`.
     #[inline]
-    fn vvder(&self, u: f64, v: f64) -> f64 { self.der_mn(0, 2, u, v) }
+    fn vvder(&self, u: f64, v: f64) -> f64 {
+        self.der_mn(0, 2, u, v)
+    }
     /// Calculates higher degree derivations at the parameter `(u, v)`.
     #[inline]
     fn ders(&self, max_order: usize, u: f64, v: f64) -> SurfaceDers<f64> {
@@ -445,7 +463,8 @@ fn bound2opt<T>(x: Bound<T>) -> Option<T> {
 fn range_common_part<R0, R1>(range0: &R0, range1: &R1) -> ParameterRange
 where
     R0: std::ops::RangeBounds<f64>,
-    R1: std::ops::RangeBounds<f64>, {
+    R1: std::ops::RangeBounds<f64>,
+{
     use std::cmp::Ordering;
     let (t00, t01) = (range0.start_bound(), range0.end_bound());
     let (t10, t11) = (range1.start_bound(), range1.end_bound());
@@ -486,7 +505,8 @@ fn test_range_common_part() {
     where
         R0: RangeBounds<f64>,
         R1: RangeBounds<f64>,
-        R2: RangeBounds<f64>, {
+        R2: RangeBounds<f64>,
+    {
         assert_eq!(
             range_common_part(&range0, &range1),
             to_parameter_range(&range2),

@@ -9,7 +9,8 @@ where
         + ParameterDivision1D<Point = Point3>
         + SearchNearestParameter<D1, Point = Point3>
         + TryFrom<PCurve<Line<Point2>, S>>,
-    S: ParametricSurface3D, {
+    S: ParametricSurface3D,
+{
     let to_poly = closure_to_poly(tol);
     let mut poly_edges: Vec<_> = shell.edges.iter().map(to_poly).collect();
     let len = shell.faces.len();
@@ -904,7 +905,9 @@ fn closure_get_poly<P: Clone>(
 }
 
 fn closure_to_poly<P, C>(tol: f64) -> impl Fn(&Edge<C>) -> PolylineCurve<P> + 'static
-where C: BoundedCurve + ParameterDivision1D<Point = P> {
+where
+    C: BoundedCurve + ParameterDivision1D<Point = P>,
+{
     move |Edge { curve, .. }: &Edge<C>| PolylineCurve::from_curve(curve, curve.range_tuple(), tol)
 }
 

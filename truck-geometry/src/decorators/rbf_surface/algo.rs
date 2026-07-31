@@ -602,7 +602,9 @@ struct VectorVector3(Vector3, Vector3);
 impl Mul<VectorVector3> for Matrix3 {
     type Output = VectorVector3;
     #[inline(always)]
-    fn mul(self, rhs: VectorVector3) -> Self::Output { VectorVector3(self * rhs.0, self * rhs.1) }
+    fn mul(self, rhs: VectorVector3) -> Self::Output {
+        VectorVector3(self * rhs.0, self * rhs.1)
+    }
 }
 
 impl std::ops::Sub<PointVector3> for PointVector3 {

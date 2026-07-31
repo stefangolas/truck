@@ -12,14 +12,18 @@ macro_rules! impl_from {
     ($firsttype: ty, $secondtype: ty) => {
         impl From<$firsttype> for $crate::alternative::Alternative<$firsttype, $secondtype> {
             #[inline(always)]
-            fn from(t: $firsttype) -> Self { $crate::alternative::Alternative::FirstType(t) }
+            fn from(t: $firsttype) -> Self {
+                $crate::alternative::Alternative::FirstType(t)
+            }
         }
     };
 }
 
 impl<T, U> From<U> for Alternative<T, U> {
     #[inline(always)]
-    fn from(u: U) -> Self { Alternative::SecondType(u) }
+    fn from(u: U) -> Self {
+        Alternative::SecondType(u)
+    }
 }
 
 // test for impl_from

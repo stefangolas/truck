@@ -56,7 +56,9 @@ enum Surface {
 }
 
 impl ToSameGeometry<Surface> for ApproxFilletSurface<Surface, Surface> {
-    fn to_same_geometry(&self) -> Surface { Surface::Fillet(self.clone().into()) }
+    fn to_same_geometry(&self) -> Surface {
+        Surface::Fillet(self.clone().into())
+    }
 }
 
 impl Invertible for Surface {

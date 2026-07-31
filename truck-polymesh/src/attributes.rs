@@ -2,7 +2,9 @@ use crate::*;
 
 impl<T: Copy> Attributes<usize> for Vec<T> {
     type Output = T;
-    fn get(&self, idx: usize) -> Option<T> { self.as_slice().get(idx).copied() }
+    fn get(&self, idx: usize) -> Option<T> {
+        self.as_slice().get(idx).copied()
+    }
 }
 
 impl Attributes<StandardVertex> for StandardAttributes {
@@ -25,15 +27,21 @@ impl Attributes<StandardVertex> for StandardAttributes {
 impl StandardAttributes {
     /// Returns the vector of all positions.
     #[inline(always)]
-    pub const fn positions(&self) -> &Vec<Point3> { &self.positions }
+    pub const fn positions(&self) -> &Vec<Point3> {
+        &self.positions
+    }
 
     /// Returns the mutable slice of all positions.
     #[inline(always)]
-    pub fn positions_mut(&mut self) -> &mut [Point3] { &mut self.positions }
+    pub fn positions_mut(&mut self) -> &mut [Point3] {
+        &mut self.positions
+    }
 
     /// Adds a position.
     #[inline(always)]
-    pub fn push_position(&mut self, position: Point3) { self.positions.push(position) }
+    pub fn push_position(&mut self, position: Point3) {
+        self.positions.push(position)
+    }
 
     /// Extend positions by iterator.
     #[inline(always)]
@@ -43,15 +51,21 @@ impl StandardAttributes {
 
     /// Returns the vector of all uv (texture) coordinates.
     #[inline(always)]
-    pub const fn uv_coords(&self) -> &Vec<Vector2> { &self.uv_coords }
+    pub const fn uv_coords(&self) -> &Vec<Vector2> {
+        &self.uv_coords
+    }
 
     /// Returns the mutable slice of all uv (texture) coordinates.
     #[inline(always)]
-    pub fn uv_coords_mut(&mut self) -> &mut [Vector2] { &mut self.uv_coords }
+    pub fn uv_coords_mut(&mut self) -> &mut [Vector2] {
+        &mut self.uv_coords
+    }
 
     /// Adds a uv (texture) coordinate.
     #[inline(always)]
-    pub fn push_uv_coord(&mut self, uv_coord: Vector2) { self.uv_coords.push(uv_coord) }
+    pub fn push_uv_coord(&mut self, uv_coord: Vector2) {
+        self.uv_coords.push(uv_coord)
+    }
 
     /// Extend uv (texture) coordinates by iterator.
     #[inline(always)]
@@ -61,11 +75,15 @@ impl StandardAttributes {
 
     /// Returns the vector of all normals.
     #[inline(always)]
-    pub const fn normals(&self) -> &Vec<Vector3> { &self.normals }
+    pub const fn normals(&self) -> &Vec<Vector3> {
+        &self.normals
+    }
 
     /// Returns the mutable slice of all normals.
     #[inline(always)]
-    pub fn normals_mut(&mut self) -> &mut [Vector3] { &mut self.normals }
+    pub fn normals_mut(&mut self) -> &mut [Vector3] {
+        &mut self.normals
+    }
 
     /// Extend normals by iterator
     #[inline(always)]

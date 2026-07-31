@@ -54,4 +54,6 @@ fn exec_math_util_test(backend: Backends, out_dir: &str) {
 }
 
 #[test]
-fn math_util_test() { common::os_alt_exec_test(exec_math_util_test); }
+fn math_util_test() {
+    common::os_alt_exec_test(exec_math_util_test);
+}

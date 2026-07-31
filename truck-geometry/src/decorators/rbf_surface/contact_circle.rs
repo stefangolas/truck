@@ -2,29 +2,42 @@ use super::*;
 
 /// trait for attach rolling fillet
 pub(super) trait FilletableSurface:
-    ParametricSurface3D + SearchParameter<D2, Point = Point3> {
+    ParametricSurface3D + SearchParameter<D2, Point = Point3>
+{
 }
 impl<S: ParametricSurface3D + SearchParameter<D2, Point = Point3>> FilletableSurface for S {}
 
 impl ContactCircle {
     /// center of the fillet circle
     #[inline]
-    pub const fn center(self) -> Point3 { self.center }
+    pub const fn center(self) -> Point3 {
+        self.center
+    }
     /// axis of the fillet circle
     #[inline]
-    pub const fn axis(self) -> Vector3 { self.axis }
+    pub const fn axis(self) -> Vector3 {
+        self.axis
+    }
     /// angle of the fillet circle-arc
     #[inline]
-    pub const fn angle(self) -> Rad<f64> { self.angle }
+    pub const fn angle(self) -> Rad<f64> {
+        self.angle
+    }
     /// parameter of the edge curve
     #[inline]
-    pub const fn curve_parameter(self) -> f64 { self.t }
+    pub const fn curve_parameter(self) -> f64 {
+        self.t
+    }
     /// contact point of the rolling ball and `surface0`.
     #[inline]
-    pub const fn contact_point0(self) -> ContactPoint { self.contact_point0 }
+    pub const fn contact_point0(self) -> ContactPoint {
+        self.contact_point0
+    }
     /// contact point of the fillet circle and `surface1`.
     #[inline]
-    pub const fn contact_point1(self) -> ContactPoint { self.contact_point1 }
+    pub const fn contact_point1(self) -> ContactPoint {
+        self.contact_point1
+    }
 
     pub(super) fn try_new(
         point_on_curve: (Point3, Vector3),
@@ -75,9 +88,15 @@ impl ParametricCurve for ContactCircle {
         let c = self.center.to_vec() * if n == 0 { 1.0 } else { 0.0 };
         c + rot * radius * self.angle.0.powi(n as i32)
     }
-    fn subs(&self, t: f64) -> Self::Point { Point3::from_vec(self.der_n(0, t)) }
-    fn der(&self, t: f64) -> Self::Vector { self.der_n(1, t) }
-    fn der2(&self, t: f64) -> Self::Vector { self.der_n(2, t) }
+    fn subs(&self, t: f64) -> Self::Point {
+        Point3::from_vec(self.der_n(0, t))
+    }
+    fn der(&self, t: f64) -> Self::Vector {
+        self.der_n(1, t)
+    }
+    fn der2(&self, t: f64) -> Self::Vector {
+        self.der_n(2, t)
+    }
     fn parameter_range(&self) -> ParameterRange {
         use std::ops::Bound;
         (Bound::Included(0.0), Bound::Included(1.0))

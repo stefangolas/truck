@@ -3,7 +3,9 @@ use super::*;
 impl<P> UnitParabola<P> {
     /// constructor
     #[inline]
-    pub const fn new() -> Self { Self(std::marker::PhantomData) }
+    pub const fn new() -> Self {
+        Self(std::marker::PhantomData)
+    }
 }
 
 impl ParametricCurve for UnitParabola<Point2> {
@@ -19,11 +21,17 @@ impl ParametricCurve for UnitParabola<Point2> {
         }
     }
     #[inline]
-    fn subs(&self, t: f64) -> Self::Point { Self::Point::from_vec(self.der_n(0, t)) }
+    fn subs(&self, t: f64) -> Self::Point {
+        Self::Point::from_vec(self.der_n(0, t))
+    }
     #[inline]
-    fn der(&self, t: f64) -> Self::Vector { self.der_n(1, t) }
+    fn der(&self, t: f64) -> Self::Vector {
+        self.der_n(1, t)
+    }
     #[inline]
-    fn der2(&self, t: f64) -> Self::Vector { self.der_n(2, t) }
+    fn der2(&self, t: f64) -> Self::Vector {
+        self.der_n(2, t)
+    }
 }
 
 impl ParametricCurve for UnitParabola<Point3> {
@@ -38,11 +46,17 @@ impl ParametricCurve for UnitParabola<Point3> {
         }
     }
     #[inline]
-    fn subs(&self, t: f64) -> Self::Point { Self::Point::from_vec(self.der_n(0, t)) }
+    fn subs(&self, t: f64) -> Self::Point {
+        Self::Point::from_vec(self.der_n(0, t))
+    }
     #[inline]
-    fn der(&self, t: f64) -> Self::Vector { self.der_n(1, t) }
+    fn der(&self, t: f64) -> Self::Vector {
+        self.der_n(1, t)
+    }
     #[inline]
-    fn der2(&self, t: f64) -> Self::Vector { self.der_n(2, t) }
+    fn der2(&self, t: f64) -> Self::Vector {
+        self.der_n(2, t)
+    }
 }
 
 impl<P> ParameterDivision1D for UnitParabola<P>

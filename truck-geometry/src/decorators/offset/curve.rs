@@ -10,11 +10,17 @@ where
     type Point = C::Point;
     type Vector = C::Vector;
     #[inline(always)]
-    fn subs(&self, t: f64) -> Self::Point { self.entity.subs(t) + self.offset.subs(t) }
+    fn subs(&self, t: f64) -> Self::Point {
+        self.entity.subs(t) + self.offset.subs(t)
+    }
     #[inline(always)]
-    fn der(&self, t: f64) -> Self::Vector { self.entity.der(t) + self.offset.der(t) }
+    fn der(&self, t: f64) -> Self::Vector {
+        self.entity.der(t) + self.offset.der(t)
+    }
     #[inline(always)]
-    fn der2(&self, t: f64) -> Self::Vector { self.entity.der2(t) + self.offset.der2(t) }
+    fn der2(&self, t: f64) -> Self::Vector {
+        self.entity.der2(t) + self.offset.der2(t)
+    }
     #[inline(always)]
     fn der_n(&self, n: usize, t: f64) -> Self::Vector {
         self.entity.der_n(n, t) + self.offset.der_n(n, t)
@@ -27,7 +33,9 @@ where
     }
     /// Returns the range of `entity`
     #[inline(always)]
-    fn parameter_range(&self) -> ParameterRange { self.entity.parameter_range() }
+    fn parameter_range(&self) -> ParameterRange {
+        self.entity.parameter_range()
+    }
     #[inline(always)]
     fn period(&self) -> Option<f64> {
         match (self.entity.period(), self.offset.period()) {
@@ -53,15 +61,25 @@ where
         ders.combinatorial_ders(&scalar_der, |x, y| x * y)
     }
     #[inline(always)]
-    fn subs(&self, t: f64) -> Self::Point { self.ders(0, t)[0] }
+    fn subs(&self, t: f64) -> Self::Point {
+        self.ders(0, t)[0]
+    }
     #[inline(always)]
-    fn der(&self, t: f64) -> Self::Vector { self.ders(1, t)[1] }
+    fn der(&self, t: f64) -> Self::Vector {
+        self.ders(1, t)[1]
+    }
     #[inline(always)]
-    fn der2(&self, t: f64) -> Self::Vector { self.ders(2, t)[2] }
+    fn der2(&self, t: f64) -> Self::Vector {
+        self.ders(2, t)[2]
+    }
     #[inline(always)]
-    fn der_n(&self, n: usize, t: f64) -> Self::Vector { self.ders(n, t)[n] }
+    fn der_n(&self, n: usize, t: f64) -> Self::Vector {
+        self.ders(n, t)[n]
+    }
     #[inline(always)]
-    fn parameter_range(&self) -> ParameterRange { self.entity.parameter_range() }
+    fn parameter_range(&self) -> ParameterRange {
+        self.entity.parameter_range()
+    }
 }
 
 impl<C, N, P, V> BoundedCurve for Offset<C, N>

@@ -136,4 +136,6 @@ impl App for MyApp {
     }
 }
 
-fn main() { MyApp::run() }
+fn main() {
+    MyApp::run()
+}

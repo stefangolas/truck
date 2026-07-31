@@ -112,6 +112,10 @@ impl Topology for Faces {
 }
 
 impl Topology for PolygonMesh {
-    fn extract_boundaries(&self) -> Vec<Vec<usize>> { self.faces().extract_boundaries() }
-    fn shell_condition(&self) -> ShellCondition { self.faces().shell_condition() }
+    fn extract_boundaries(&self) -> Vec<Vec<usize>> {
+        self.faces().extract_boundaries()
+    }
+    fn shell_condition(&self) -> ShellCondition {
+        self.faces().shell_condition()
+    }
 }

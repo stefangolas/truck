@@ -4,19 +4,27 @@ use truck_base::cgmath64::control_point::ControlPoint;
 impl<C, S> PCurve<C, S> {
     /// Creates composited
     #[inline(always)]
-    pub const fn new(curve: C, surface: S) -> PCurve<C, S> { PCurve { curve, surface } }
+    pub const fn new(curve: C, surface: S) -> PCurve<C, S> {
+        PCurve { curve, surface }
+    }
 
     /// Returns the reference to the parameter curve
     #[inline(always)]
-    pub const fn curve(&self) -> &C { &self.curve }
+    pub const fn curve(&self) -> &C {
+        &self.curve
+    }
 
     /// Returns the reference to the surface
     #[inline(always)]
-    pub const fn surface(&self) -> &S { &self.surface }
+    pub const fn surface(&self) -> &S {
+        &self.surface
+    }
 
     /// Decompose the pcurve into its parameter curve and surface.
     #[inline(always)]
-    pub fn decompose(self) -> (C, S) { (self.curve, self.surface) }
+    pub fn decompose(self) -> (C, S) {
+        (self.curve, self.surface)
+    }
 }
 
 impl<C, S> PCurve<C, S>
@@ -97,9 +105,13 @@ where
             + self.surface.vder(pt[0], pt[1]) * der2[1]
     }
     #[inline(always)]
-    fn parameter_range(&self) -> ParameterRange { self.curve.parameter_range() }
+    fn parameter_range(&self) -> ParameterRange {
+        self.curve.parameter_range()
+    }
     #[inline(always)]
-    fn period(&self) -> Option<f64> { self.curve.period() }
+    fn period(&self) -> Option<f64> {
+        self.curve.period()
+    }
 }
 
 impl<C, S> BoundedCurve for PCurve<C, S>
@@ -212,14 +224,19 @@ where
     C: Invertible,
     S: Clone,
 {
-    fn invert(&mut self) { self.curve.invert() }
+    fn invert(&mut self) {
+        self.curve.invert()
+    }
 }
 
 impl<C: Clone, S: Clone, T> Transformed<T> for PCurve<C, S>
-where S: Transformed<T>
+where
+    S: Transformed<T>,
 {
     #[inline(always)]
-    fn transform_by(&mut self, trans: T) { self.surface.transform_by(trans); }
+    fn transform_by(&mut self, trans: T) {
+        self.surface.transform_by(trans);
+    }
     fn transformed(&self, trans: T) -> Self {
         Self {
             curve: self.curve.clone(),

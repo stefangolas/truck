@@ -53,8 +53,12 @@ fn fillet_between_two_spheres() {
         }
     }
     impl InvertibleRadiusFunction for Radius {
-        fn inverse(&self) -> Self { Self(-self.0) }
-        fn invert(&mut self) { self.0 *= -1.0; }
+        fn inverse(&self) -> Self {
+            Self(-self.0)
+        }
+        fn invert(&mut self) {
+            self.0 *= -1.0;
+        }
     }
 
     let fillet = RbfSurface::new(edge_circle, sphere0, sphere1, Radius(1.0));

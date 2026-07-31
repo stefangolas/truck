@@ -12,13 +12,19 @@ impl Plane {
     }
     /// Returns the origin
     #[inline(always)]
-    pub const fn origin(&self) -> Point3 { self.o }
+    pub const fn origin(&self) -> Point3 {
+        self.o
+    }
     /// Returns the u-axis
     #[inline(always)]
-    pub fn u_axis(&self) -> Vector3 { self.p - self.o }
+    pub fn u_axis(&self) -> Vector3 {
+        self.p - self.o
+    }
     /// Returns the v-axis
     #[inline(always)]
-    pub fn v_axis(&self) -> Vector3 { self.q - self.o }
+    pub fn v_axis(&self) -> Vector3 {
+        self.q - self.o
+    }
     /// Returns the normal
     /// # Examples
     /// ```
@@ -31,7 +37,9 @@ impl Plane {
     /// assert_near!(plane.normal(), Vector3::unit_z());
     /// ```
     #[inline(always)]
-    pub fn normal(&self) -> Vector3 { self.u_axis().cross(self.v_axis()).normalize() }
+    pub fn normal(&self) -> Vector3 {
+        self.u_axis().cross(self.v_axis()).normalize()
+    }
     /// Gets the parameter of `pt` in plane's matrix.
     /// # Examples
     /// ```
@@ -104,15 +112,25 @@ impl ParametricSurface for Plane {
         self.o + u * (self.p - self.o) + v * (self.q - self.o)
     }
     #[inline(always)]
-    fn uder(&self, _: f64, _: f64) -> Vector3 { self.p - self.o }
+    fn uder(&self, _: f64, _: f64) -> Vector3 {
+        self.p - self.o
+    }
     #[inline(always)]
-    fn vder(&self, _: f64, _: f64) -> Vector3 { self.q - self.o }
+    fn vder(&self, _: f64, _: f64) -> Vector3 {
+        self.q - self.o
+    }
     #[inline(always)]
-    fn uuder(&self, _: f64, _: f64) -> Vector3 { Vector3::zero() }
+    fn uuder(&self, _: f64, _: f64) -> Vector3 {
+        Vector3::zero()
+    }
     #[inline(always)]
-    fn uvder(&self, _: f64, _: f64) -> Vector3 { Vector3::zero() }
+    fn uvder(&self, _: f64, _: f64) -> Vector3 {
+        Vector3::zero()
+    }
     #[inline(always)]
-    fn vvder(&self, _: f64, _: f64) -> Vector3 { Vector3::zero() }
+    fn vvder(&self, _: f64, _: f64) -> Vector3 {
+        Vector3::zero()
+    }
     /// as square
     #[inline(always)]
     fn parameter_range(&self) -> (ParameterRange, ParameterRange) {
@@ -123,11 +141,17 @@ impl ParametricSurface for Plane {
 
 impl ParametricSurface3D for Plane {
     #[inline(always)]
-    fn normal(&self, _: f64, _: f64) -> Vector3 { self.normal() }
+    fn normal(&self, _: f64, _: f64) -> Vector3 {
+        self.normal()
+    }
     #[inline(always)]
-    fn normal_uder(&self, _: f64, _: f64) -> Vector3 { Vector3::zero() }
+    fn normal_uder(&self, _: f64, _: f64) -> Vector3 {
+        Vector3::zero()
+    }
     #[inline(always)]
-    fn normal_vder(&self, _: f64, _: f64) -> Vector3 { Vector3::zero() }
+    fn normal_vder(&self, _: f64, _: f64) -> Vector3 {
+        Vector3::zero()
+    }
 }
 
 impl BoundedSurface for Plane {}
@@ -142,7 +166,9 @@ impl Invertible for Plane {
         }
     }
     #[inline(always)]
-    fn invert(&mut self) { *self = self.inverse(); }
+    fn invert(&mut self) {
+        *self = self.inverse();
+    }
 }
 
 impl IncludeCurve<Line<Point3>> for Plane {
@@ -249,5 +275,7 @@ impl From<Plane> for BSplineSurface<Point3> {
 }
 
 impl ToSameGeometry<BSplineSurface<Point3>> for Plane {
-    fn to_same_geometry(&self) -> BSplineSurface<Point3> { (*self).into() }
+    fn to_same_geometry(&self) -> BSplineSurface<Point3> {
+        (*self).into()
+    }
 }

@@ -95,29 +95,43 @@ impl<P> BSplineSurface<P> {
     }
     /// Returns the reference of the knot vectors
     #[inline(always)]
-    pub const fn knot_vecs(&self) -> &(KnotVec, KnotVec) { &self.knot_vecs }
+    pub const fn knot_vecs(&self) -> &(KnotVec, KnotVec) {
+        &self.knot_vecs
+    }
 
     /// Returns the u knot vector.
     #[inline(always)]
-    pub const fn uknot_vec(&self) -> &KnotVec { &self.knot_vecs.0 }
+    pub const fn uknot_vec(&self) -> &KnotVec {
+        &self.knot_vecs.0
+    }
     /// Returns the v knot vector.
     #[inline(always)]
-    pub const fn vknot_vec(&self) -> &KnotVec { &self.knot_vecs.1 }
+    pub const fn vknot_vec(&self) -> &KnotVec {
+        &self.knot_vecs.1
+    }
 
     /// Returns the `idx`th u knot.
     #[inline(always)]
-    pub fn uknot(&self, idx: usize) -> f64 { self.knot_vecs.0[idx] }
+    pub fn uknot(&self, idx: usize) -> f64 {
+        self.knot_vecs.0[idx]
+    }
     /// returns the `idx`th v knot.
     #[inline(always)]
-    pub fn vknot(&self, idx: usize) -> f64 { self.knot_vecs.1[idx] }
+    pub fn vknot(&self, idx: usize) -> f64 {
+        self.knot_vecs.1[idx]
+    }
 
     /// Returns the reference of the vector of the control points
     #[inline(always)]
-    pub const fn control_points(&self) -> &Vec<Vec<P>> { &self.control_points }
+    pub const fn control_points(&self) -> &Vec<Vec<P>> {
+        &self.control_points
+    }
 
     /// Returns the reference of the control point corresponding to the index `(idx0, idx1)`.
     #[inline(always)]
-    pub fn control_point(&self, idx0: usize, idx1: usize) -> &P { &self.control_points[idx0][idx1] }
+    pub fn control_point(&self, idx0: usize, idx1: usize) -> &P {
+        &self.control_points[idx0][idx1]
+    }
     /// Apply the given transformation to all control points.
     #[inline(always)]
     pub fn transform_control_points<F: FnMut(&mut P)>(&mut self, f: F) {
@@ -198,7 +212,9 @@ impl<P> BSplineSurface<P> {
     /// assert_eq!(bspsurface.udegree(), 1);
     /// ```
     #[inline(always)]
-    pub fn udegree(&self) -> usize { self.knot_vecs.0.len() - self.control_points.len() - 1 }
+    pub fn udegree(&self) -> usize {
+        self.knot_vecs.0.len() - self.control_points.len() - 1
+    }
 
     /// Returns the degrees of B-spline surface
     /// # Examples
@@ -215,7 +231,9 @@ impl<P> BSplineSurface<P> {
     /// assert_eq!(bspsurface.vdegree(), 2);
     /// ```
     #[inline(always)]
-    pub fn vdegree(&self) -> usize { self.knot_vecs.1.len() - self.control_points[0].len() - 1 }
+    pub fn vdegree(&self) -> usize {
+        self.knot_vecs.1.len() - self.control_points[0].len() - 1
+    }
 
     /// Returns the degrees of B-spline surface
     /// # Examples
@@ -232,7 +250,9 @@ impl<P> BSplineSurface<P> {
     /// assert_eq!(bspsurface.degrees(), (1, 2));
     /// ```
     #[inline(always)]
-    pub fn degrees(&self) -> (usize, usize) { (self.udegree(), self.vdegree()) }
+    pub fn degrees(&self) -> (usize, usize) {
+        (self.udegree(), self.vdegree())
+    }
     /// Returns whether the knot vectors are clamped or not.
     #[inline(always)]
     pub fn is_clamped(&self) -> bool {
@@ -260,7 +280,9 @@ impl<P> BSplineSurface<P> {
     /// assert_eq!(bspsurface0.swap_axes(), &bspsurface1);
     /// ```
     pub fn swap_axes(&mut self) -> &mut Self
-    where P: Clone {
+    where
+        P: Clone,
+    {
         let knot_vec = self.knot_vecs.0.clone();
         self.knot_vecs.0 = self.knot_vecs.1.clone();
         self.knot_vecs.1 = knot_vec;
@@ -312,7 +334,9 @@ impl<P> BSplineSurface<P> {
     /// );
     /// ```
     pub fn column_curve(&self, row_idx: usize) -> BSplineCurve<P>
-    where P: Clone {
+    where
+        P: Clone,
+    {
         let knot_vec = self.vknot_vec().clone();
         let ctrl_pts = self.control_points[row_idx].clone();
         BSplineCurve::new_unchecked(knot_vec, ctrl_pts)
@@ -338,7 +362,9 @@ impl<P> BSplineSurface<P> {
     /// );
     /// ```
     pub fn row_curve(&self, column_idx: usize) -> BSplineCurve<P>
-    where P: Clone {
+    where
+        P: Clone,
+    {
         let knot_vec = self.uknot_vec().clone();
         let ctrl_pts: Vec<_> = self.ctrl_pts_row_iter(column_idx).cloned().collect();
         BSplineCurve::new_unchecked(knot_vec, ctrl_pts)
@@ -348,7 +374,9 @@ impl<P> BSplineSurface<P> {
 impl<P: ControlPoint<f64>> BSplineSurface<P> {
     /// Returns the closure of substitution.
     #[inline(always)]
-    pub fn get_closure(&self) -> impl Fn(f64, f64) -> P + '_ { move |u, v| self.subs(u, v) }
+    pub fn get_closure(&self) -> impl Fn(f64, f64) -> P + '_ {
+        move |u, v| self.subs(u, v)
+    }
 
     #[inline(always)]
     fn udelta_control_points(&self, i: usize, j: usize) -> P::Diff {
@@ -545,20 +573,34 @@ impl<P: ControlPoint<f64>> ParametricSurface for BSplineSurface<P> {
         sum
     }
     #[inline(always)]
-    fn subs(&self, u: f64, v: f64) -> P { P::from_vec(self.der_mn(0, 0, u, v)) }
+    fn subs(&self, u: f64, v: f64) -> P {
+        P::from_vec(self.der_mn(0, 0, u, v))
+    }
     #[inline(always)]
-    fn uder(&self, u: f64, v: f64) -> P::Diff { self.der_mn(1, 0, u, v) }
+    fn uder(&self, u: f64, v: f64) -> P::Diff {
+        self.der_mn(1, 0, u, v)
+    }
     #[inline(always)]
-    fn vder(&self, u: f64, v: f64) -> P::Diff { self.der_mn(0, 1, u, v) }
+    fn vder(&self, u: f64, v: f64) -> P::Diff {
+        self.der_mn(0, 1, u, v)
+    }
     #[inline(always)]
-    fn uuder(&self, u: f64, v: f64) -> P::Diff { self.der_mn(2, 0, u, v) }
+    fn uuder(&self, u: f64, v: f64) -> P::Diff {
+        self.der_mn(2, 0, u, v)
+    }
     #[inline(always)]
-    fn uvder(&self, u: f64, v: f64) -> P::Diff { self.der_mn(1, 1, u, v) }
+    fn uvder(&self, u: f64, v: f64) -> P::Diff {
+        self.der_mn(1, 1, u, v)
+    }
     #[inline(always)]
-    fn vvder(&self, u: f64, v: f64) -> P::Diff { self.der_mn(0, 2, u, v) }
+    fn vvder(&self, u: f64, v: f64) -> P::Diff {
+        self.der_mn(0, 2, u, v)
+    }
 
     #[inline(always)]
-    fn parameter_range(&self) -> (ParameterRange, ParameterRange) { self.parameter_range() }
+    fn parameter_range(&self) -> (ParameterRange, ParameterRange) {
+        self.parameter_range()
+    }
 }
 
 impl<V: Tolerance> BSplineSurface<V> {
@@ -1573,9 +1615,10 @@ impl<V: Bounded> BSplineSurface<V> {
 }
 
 impl<P: ControlPoint<f64>> ParameterDivision2D for BSplineSurface<P>
-where P: EuclideanSpace<Scalar = f64, Diff = <P as ControlPoint<f64>>::Diff>
+where
+    P: EuclideanSpace<Scalar = f64, Diff = <P as ControlPoint<f64>>::Diff>
         + MetricSpace<Metric = f64>
-        + HashGen<f64>
+        + HashGen<f64>,
 {
     #[inline(always)]
     fn parameter_division(
@@ -1593,7 +1636,9 @@ impl<V> BoundedSurface for BSplineSurface<V> where BSplineSurface<V>: Parametric
 
 impl<V: Clone> Invertible for BSplineSurface<V> {
     #[inline(always)]
-    fn invert(&mut self) { self.swap_axes(); }
+    fn invert(&mut self) {
+        self.swap_axes();
+    }
 }
 
 impl<P, V> SearchParameter<D2> for BSplineSurface<P>
@@ -1771,7 +1816,9 @@ macro_rules! impl_mat_multi {
         }
         impl Mul<&BSplineSurface<$vector>> for $matrix {
             type Output = BSplineSurface<$vector>;
-            fn mul(self, spline: &BSplineSurface<$vector>) -> Self::Output { self * spline.clone() }
+            fn mul(self, spline: &BSplineSurface<$vector>) -> Self::Output {
+                self * spline.clone()
+            }
         }
     };
 }
@@ -1781,11 +1828,15 @@ macro_rules! impl_scalar_multi {
         impl_mat_multi!($vector, $scalar);
         impl Mul<$scalar> for &BSplineSurface<$vector> {
             type Output = BSplineSurface<$vector>;
-            fn mul(self, scalar: $scalar) -> Self::Output { scalar * self }
+            fn mul(self, scalar: $scalar) -> Self::Output {
+                scalar * self
+            }
         }
         impl Mul<$scalar> for BSplineSurface<$vector> {
             type Output = BSplineSurface<$vector>;
-            fn mul(self, scalar: $scalar) -> Self::Output { scalar * self }
+            fn mul(self, scalar: $scalar) -> Self::Output {
+                scalar * self
+            }
         }
     };
 }
@@ -1798,7 +1849,8 @@ impl_mat_multi!(Vector4, Matrix4);
 impl_scalar_multi!(Vector4, f64);
 
 impl<M, P: EuclideanSpace<Scalar = f64>> Transformed<M> for BSplineSurface<P>
-where M: Transform<P>
+where
+    M: Transform<P>,
 {
     #[inline(always)]
     fn transform_by(&mut self, trans: M) {
@@ -1810,10 +1862,13 @@ where M: Transform<P>
 }
 
 impl<'de, P> Deserialize<'de> for BSplineSurface<P>
-where P: Deserialize<'de>
+where
+    P: Deserialize<'de>,
 {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where D: serde::Deserializer<'de> {
+    where
+        D: serde::Deserializer<'de>,
+    {
         #[derive(Deserialize)]
         struct BSplineSurface_<P> {
             knot_vecs: (KnotVec, KnotVec),

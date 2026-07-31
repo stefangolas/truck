@@ -121,5 +121,8 @@ fn parameter_division_is_monotone_in_tolerance() {
     let ranges = ((0.0, PI), (0.0, 2.0 * PI));
     let fine = sphere.parameter_division(ranges, 0.001).0.len();
     let coarse = sphere.parameter_division(ranges, 0.5).0.len();
-    assert!(fine >= coarse, "fine {fine} should not be coarser than {coarse}");
+    assert!(
+        fine >= coarse,
+        "fine {fine} should not be coarser than {coarse}"
+    );
 }

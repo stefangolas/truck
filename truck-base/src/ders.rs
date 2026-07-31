@@ -17,7 +17,9 @@ impl<V> CurveDers<V> {
     /// Construct zeroed `CurveDers` with maximum order = `max_order`.
     #[inline]
     pub fn new(max_order: usize) -> Self
-    where V: Zero + Copy {
+    where
+        V: Zero + Copy,
+    {
         Self {
             array: [V::zero(); MAX_DER_ORDER + 1],
             max_order,
@@ -25,7 +27,9 @@ impl<V> CurveDers<V> {
     }
     /// Returns the maximum order
     #[inline]
-    pub const fn max_order(&self) -> usize { self.max_order }
+    pub const fn max_order(&self) -> usize {
+        self.max_order
+    }
     /// Appends an element to the back of a collection.
     #[inline]
     pub fn push(&mut self, value: V) {
@@ -42,7 +46,9 @@ impl<V> CurveDers<V> {
     /// ```
     #[inline]
     pub fn der(&self) -> Self
-    where V: Zero + Copy {
+    where
+        V: Zero + Copy,
+    {
         let mut array = [V::zero(); MAX_DER_ORDER + 1];
         array[..MAX_DER_ORDER].copy_from_slice(&self.array[1..]);
         Self {
@@ -79,7 +85,9 @@ impl<V> CurveDers<V> {
     /// assert_near2!(rat_ders, ans);
     /// ```
     pub fn rat_ders(&self) -> CurveDers<<V::Point as EuclideanSpace>::Diff>
-    where V: Homogeneous {
+    where
+        V: Homogeneous,
+    {
         let from = <V::Scalar as NumCast>::from;
         let mut evals = [<V::Point as EuclideanSpace>::Diff::zero(); MAX_DER_ORDER + 1];
         for i in 0..=self.max_order {
@@ -121,7 +129,8 @@ impl<V> CurveDers<V> {
     pub fn abs_ders(&self) -> CurveDers<V::Scalar>
     where
         V: InnerSpace,
-        V::Scalar: BaseFloat, {
+        V::Scalar: BaseFloat,
+    {
         let mut evals = [V::Scalar::zero(); MAX_DER_ORDER + 1];
         evals[0] = self[0].magnitude();
         (1..=self.max_order).for_each(|m| {
@@ -176,7 +185,8 @@ impl<V> CurveDers<V> {
         V: Copy,
         W: Copy,
         U: std::ops::Add + std::ops::Mul<f64, Output = U> + Zero,
-        B: Fn(V, W) -> U, {
+        B: Fn(V, W) -> U,
+    {
         let mut c = 1;
         (0..=order).fold(U::zero(), |sum, i| {
             let c_mult = c as f64;
@@ -220,7 +230,8 @@ impl<V> CurveDers<V> {
         V: Copy,
         W: Copy,
         U: std::ops::Add + std::ops::Mul<f64, Output = U> + Zero + Copy,
-        B: Fn(V, W) -> U, {
+        B: Fn(V, W) -> U,
+    {
         let max_order = self.max_order.min(other.max_order);
         (0..=max_order)
             .map(|n| self.combinatorial_der(other, &binomial, n))
@@ -244,7 +255,8 @@ impl<V> CurveDers<V> {
         V: Copy,
         W: Copy,
         U: Copy + Zero,
-        B: Fn(V, W) -> U, {
+        B: Fn(V, W) -> U,
+    {
         self.iter()
             .zip(other.iter())
             .map(|(&v, &w)| binomial(v, w))
@@ -260,7 +272,9 @@ impl<V> CurveDers<V> {
     /// assert_eq!(arr, [0.0, 1.0]);
     /// ```
     pub fn to_array<const LEN: usize>(&self) -> [V; LEN]
-    where V: Copy {
+    where
+        V: Copy,
+    {
         if self.max_order > LEN {
             panic!("length of the returned array is longer than given CurveDers");
         }
@@ -271,12 +285,16 @@ impl<V> CurveDers<V> {
 impl<V> std::ops::Deref for CurveDers<V> {
     type Target = [V];
     #[inline]
-    fn deref(&self) -> &[V] { &self.array[..=self.max_order] }
+    fn deref(&self) -> &[V] {
+        &self.array[..=self.max_order]
+    }
 }
 
 impl<V> std::ops::DerefMut for CurveDers<V> {
     #[inline]
-    fn deref_mut(&mut self) -> &mut [V] { &mut self.array[..=self.max_order] }
+    fn deref_mut(&mut self) -> &mut [V] {
+        &mut self.array[..=self.max_order]
+    }
 }
 
 impl<V: Zero + Copy, const N: usize> TryFrom<[V; N]> for CurveDers<V> {
@@ -367,7 +385,9 @@ where
                 .zip(other.iter())
                 .all(|(v, w)| v.abs_diff_eq(w, epsilon))
     }
-    fn default_epsilon() -> Self::Epsilon { V::default_epsilon() }
+    fn default_epsilon() -> Self::Epsilon {
+        V::default_epsilon()
+    }
 }
 
 impl<V: Debug> Debug for CurveDers<V> {
@@ -387,7 +407,9 @@ impl<V> SurfaceDers<V> {
     /// Construct zeroed `SurfaceDers` with maximum order = `max_order`.
     #[inline]
     pub fn new(max_order: usize) -> Self
-    where V: Zero + Copy {
+    where
+        V: Zero + Copy,
+    {
         Self {
             array: [[V::zero(); MAX_DER_ORDER + 1]; MAX_DER_ORDER + 1],
             max_order,
@@ -395,7 +417,9 @@ impl<V> SurfaceDers<V> {
     }
     /// Returns maximum order
     #[inline]
-    pub const fn max_order(&self) -> usize { self.max_order }
+    pub const fn max_order(&self) -> usize {
+        self.max_order
+    }
 
     /// Returns the iterator of slices
     /// # Examples
@@ -467,7 +491,9 @@ impl<V> SurfaceDers<V> {
     /// ```
     #[inline]
     pub fn uder(&self) -> Self
-    where V: Zero + Copy {
+    where
+        V: Zero + Copy,
+    {
         let mut array = [[V::zero(); MAX_DER_ORDER + 1]; MAX_DER_ORDER + 1];
         array[..MAX_DER_ORDER].copy_from_slice(&self.array[1..]);
         Self {
@@ -502,7 +528,9 @@ impl<V> SurfaceDers<V> {
     /// ```
     #[inline]
     pub fn vder(&self) -> Self
-    where V: Zero + Copy {
+    where
+        V: Zero + Copy,
+    {
         let mut array = [[V::zero(); MAX_DER_ORDER + 1]; MAX_DER_ORDER + 1];
         array.iter_mut().zip(&self.array).for_each(|(arr, sarr)| {
             arr[..MAX_DER_ORDER].copy_from_slice(&sarr[1..]);
@@ -569,7 +597,9 @@ impl<V> SurfaceDers<V> {
     /// assert_eq!(rat_ders, ans_ders);
     /// ```
     pub fn rat_ders(&self) -> SurfaceDers<<V::Point as EuclideanSpace>::Diff>
-    where V: Homogeneous {
+    where
+        V: Homogeneous,
+    {
         let zero = <V::Point as EuclideanSpace>::Diff::zero();
         let from = <V::Scalar as NumCast>::from;
         let mut evals = [[zero; MAX_DER_ORDER + 1]; MAX_DER_ORDER + 1];
@@ -630,7 +660,8 @@ impl<V> SurfaceDers<V> {
     pub fn abs_ders(&self) -> SurfaceDers<V::Scalar>
     where
         V: InnerSpace,
-        V::Scalar: BaseFloat, {
+        V::Scalar: BaseFloat,
+    {
         let mut evals = [[V::Scalar::zero(); MAX_DER_ORDER + 1]; MAX_DER_ORDER + 1];
         evals[0][0] = self[0][0].magnitude();
         for m in 0..=self.max_order {
@@ -763,11 +794,7 @@ impl<V> SurfaceDers<V> {
     ///
     /// assert_near2!(res, ans);
     /// ```
-    pub fn combinatorial_ders<W, U, B>(
-        &self,
-        other: &SurfaceDers<W>,
-        binomial: B,
-    ) -> SurfaceDers<U>
+    pub fn combinatorial_ders<W, U, B>(&self, other: &SurfaceDers<W>, binomial: B) -> SurfaceDers<U>
     where
         V: Copy,
         W: Copy,
@@ -815,7 +842,8 @@ impl<V> SurfaceDers<V> {
     pub fn composite_der(&self, curve_ders: &CurveDers<Vector2<V::Scalar>>, order: usize) -> V
     where
         V: VectorSpace,
-        V::Scalar: BaseFloat, {
+        V::Scalar: BaseFloat,
+    {
         if order > self.max_order || order > curve_ders.max_order {
             panic!("calculating derivative with order={order}, but the orders of given derivatives are less than {order}.");
         }
@@ -865,7 +893,8 @@ impl<V> SurfaceDers<V> {
     pub fn composite_ders(&self, curve_ders: &CurveDers<Vector2<V::Scalar>>) -> CurveDers<V>
     where
         V: VectorSpace,
-        V::Scalar: BaseFloat, {
+        V::Scalar: BaseFloat,
+    {
         let max_order = self.max_order.min(curve_ders.max_order);
         let mut res = CurveDers::new(max_order);
         res[0] = self[0][0];
@@ -906,11 +935,7 @@ impl<V> SurfaceDers<V> {
     /// .unwrap();
     /// assert_eq!(ders0.element_wise_ders(&ders1, |x, y| x + y), ans_ders);
     /// ```
-    pub fn element_wise_ders<W, B, U>(
-        &self,
-        other: &SurfaceDers<W>,
-        binomial: B,
-    ) -> SurfaceDers<U>
+    pub fn element_wise_ders<W, B, U>(&self, other: &SurfaceDers<W>, binomial: B) -> SurfaceDers<U>
     where
         V: Copy,
         W: Copy,
@@ -1016,7 +1041,9 @@ where
                         .all(|(v, w)| v.abs_diff_eq(w, epsilon))
                 })
     }
-    fn default_epsilon() -> Self::Epsilon { V::default_epsilon() }
+    fn default_epsilon() -> Self::Epsilon {
+        V::default_epsilon()
+    }
 }
 
 impl<V: Debug> Debug for SurfaceDers<V> {
@@ -1039,7 +1066,9 @@ fn surface_ders_debug() {
     assert_eq!(string, "[[0.0, 0.0, 0.0], [0.0, 0.0], [0.0]]");
 }
 
-fn can_init(len: usize, n: usize, max: usize) -> bool { !(len > n || max * len < n) }
+fn can_init(len: usize, n: usize, max: usize) -> bool {
+    !(len > n || max * len < n)
+}
 
 fn init(array: &mut [usize], n: usize, max: usize) {
     if array.is_empty() {
@@ -1100,7 +1129,9 @@ impl<const MAX: usize> Iterator for CompositionIter<MAX> {
     }
 }
 
-fn factorial(n: usize) -> u128 { (2..=n).fold(1, |f, i| f * i as u128) }
+fn factorial(n: usize) -> u128 {
+    (2..=n).fold(1, |f, i| f * i as u128)
+}
 
 fn multiplicity(array: &[usize]) -> u128 {
     let n = array.iter().sum::<usize>();
@@ -1122,7 +1153,8 @@ fn tensor<S, V, A>(sder: &A, cder: &[Vector2<S>], idx: &[usize]) -> V
 where
     S: BaseFloat,
     V: VectorSpace<Scalar = S>,
-    A: std::ops::Index<usize, Output = [V]>, {
+    A: std::ops::Index<usize, Output = [V]>,
+{
     let n: u128 = 2u128.pow(idx.len() as u32);
     (0..n).fold(V::zero(), |sum, mut i| {
         let (t, mult) = idx.iter().fold((0, S::one()), |(t, mult), &j| {

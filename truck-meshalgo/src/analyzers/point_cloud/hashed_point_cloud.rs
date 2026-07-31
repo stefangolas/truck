@@ -24,7 +24,8 @@ impl HashedPointCloud {
     pub fn from_points<'a, I>(points: I, inf: f64) -> Self
     where
         I: IntoIterator + Clone,
-        I::IntoIter: Iterator<Item = &'a Point3>, {
+        I::IntoIter: Iterator<Item = &'a Point3>,
+    {
         let mut bdb = BoundingBox::<Point3>::new();
         let len = points.clone().into_iter().copied().fold(0, |counter, pt| {
             bdb.push(pt);
@@ -44,7 +45,9 @@ impl HashedPointCloud {
         res
     }
     #[inline(always)]
-    pub fn size(&self) -> [usize; 3] { self.size }
+    pub fn size(&self) -> [usize; 3] {
+        self.size
+    }
     #[inline(always)]
     pub fn push(&mut self, point: Point3) {
         self.num_points += 1;
@@ -52,9 +55,13 @@ impl HashedPointCloud {
         self[idx].push(point);
     }
     #[inline(always)]
-    pub fn distance(&self, t: impl DistanceWithPointCloud) -> f64 { t.distance(self) }
+    pub fn distance(&self, t: impl DistanceWithPointCloud) -> f64 {
+        t.distance(self)
+    }
     #[inline(always)]
-    pub fn distance2(&self, t: impl DistanceWithPointCloud) -> f64 { t.distance2(self) }
+    pub fn distance2(&self, t: impl DistanceWithPointCloud) -> f64 {
+        t.distance2(self)
+    }
     #[inline(always)]
     pub fn is_colliding(&self, t: impl DistanceWithPointCloud, tol: f64) -> bool {
         t.is_colliding(self, tol)
@@ -106,7 +113,9 @@ impl SpaceHash for usize {
 
 pub trait DistanceWithPointCloud: Sized {
     fn distance2(&self, space: &HashedPointCloud) -> f64;
-    fn distance(&self, space: &HashedPointCloud) -> f64 { f64::sqrt(self.distance2(space)) }
+    fn distance(&self, space: &HashedPointCloud) -> f64 {
+        f64::sqrt(self.distance2(space))
+    }
     fn is_colliding(&self, space: &HashedPointCloud, tol: f64) -> bool {
         nonpositive_tolerance!(tol, 0.0);
         self.distance2(space) < tol * tol
@@ -280,4 +289,6 @@ fn exec_space_division_distance() {
 }
 
 #[test]
-fn space_division_distance() { (0..10).for_each(|_| exec_space_division_distance()) }
+fn space_division_distance() {
+    (0..10).for_each(|_| exec_space_division_distance())
+}

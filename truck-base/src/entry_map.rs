@@ -63,12 +63,16 @@ where
 
 impl<K, V, KF, VF, P, S> From<EntryMap<K, V, KF, VF, P, S>> for HashMap<K, V, S> {
     #[inline]
-    fn from(x: EntryMap<K, V, KF, VF, P, S>) -> Self { x.hashmap }
+    fn from(x: EntryMap<K, V, KF, VF, P, S>) -> Self {
+        x.hashmap
+    }
 }
 
 impl<K, V, KF, VF, P, S> IntoIterator for EntryMap<K, V, KF, VF, P, S> {
     type Item = (K, V);
     type IntoIter = <HashMap<K, V, S> as IntoIterator>::IntoIter;
     #[inline]
-    fn into_iter(self) -> Self::IntoIter { self.hashmap.into_iter() }
+    fn into_iter(self) -> Self::IntoIter {
+        self.hashmap.into_iter()
+    }
 }

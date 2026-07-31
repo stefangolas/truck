@@ -41,7 +41,8 @@ pub trait SsnpVector: InnerSpace<Scalar = f64> + Tolerance {
     type Matrix: Jacobian<Self>;
     #[doc(hidden)]
     fn subs<S>(surface: &S, point: Self::Point, param: Self) -> CalcOutput<Self, Self::Matrix>
-    where S: ParametricSurface<Point = Self::Point, Vector = Self>;
+    where
+        S: ParametricSurface<Point = Self::Point, Vector = Self>;
     #[doc(hidden)]
     fn into_param(self) -> (f64, f64);
     #[doc(hidden)]
@@ -64,8 +65,12 @@ impl SsnpVector for Vector2 {
             derivation: Matrix2::from_cols(surface.uder(u, v), surface.vder(u, v)),
         }
     }
-    fn into_param(self) -> (f64, f64) { self.into() }
-    fn from_param(param: (f64, f64)) -> Self { param.into() }
+    fn into_param(self) -> (f64, f64) {
+        self.into()
+    }
+    fn from_param(param: (f64, f64)) -> Self {
+        param.into()
+    }
 }
 
 impl SsnpVector for Vector3 {
@@ -95,8 +100,12 @@ impl SsnpVector for Vector3 {
             ),
         }
     }
-    fn into_param(self) -> (f64, f64) { self.truncate().into() }
-    fn from_param((u, v): (f64, f64)) -> Self { Self::new(u, v, 0.0) }
+    fn into_param(self) -> (f64, f64) {
+        self.truncate().into()
+    }
+    fn from_param((u, v): (f64, f64)) -> Self {
+        Self::new(u, v, 0.0)
+    }
 }
 
 /// Searches the parameter by Newton's method.
@@ -123,7 +132,8 @@ pub trait SspVector: InnerSpace<Scalar = f64> + Tolerance {
     type Point;
     #[doc(hidden)]
     fn subs<S>(surface: &S, point: Self::Point, param: Vector2) -> CalcOutput<Vector2, Matrix2>
-    where S: ParametricSurface<Point = Self::Point, Vector = Self>;
+    where
+        S: ParametricSurface<Point = Self::Point, Vector = Self>;
 }
 
 impl SspVector for Vector2 {

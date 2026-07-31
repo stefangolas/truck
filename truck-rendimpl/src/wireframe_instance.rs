@@ -24,10 +24,14 @@ impl WireFrameInstance {
     }
     /// Returns the wireframe state
     #[inline(always)]
-    pub const fn instance_state(&self) -> &WireFrameState { &self.state }
+    pub const fn instance_state(&self) -> &WireFrameState {
+        &self.state
+    }
     /// Returns the mutable reference to wireframe state
     #[inline(always)]
-    pub fn instance_state_mut(&mut self) -> &mut WireFrameState { &mut self.state }
+    pub fn instance_state_mut(&mut self) -> &mut WireFrameState {
+        &mut self.state
+    }
     /// swap vertex buffers and index buffers
     #[inline(always)]
     pub fn swap_vertex(&mut self, other: &mut WireFrameInstance) {
@@ -38,7 +42,9 @@ impl WireFrameInstance {
 
 impl Instance for WireFrameInstance {
     type Shaders = WireShaders;
-    fn standard_shaders(creator: &InstanceCreator) -> WireShaders { creator.wire_shaders.clone() }
+    fn standard_shaders(creator: &InstanceCreator) -> WireShaders {
+        creator.wire_shaders.clone()
+    }
 }
 
 impl Rendered for WireFrameInstance {

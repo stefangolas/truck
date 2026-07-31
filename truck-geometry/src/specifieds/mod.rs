@@ -104,7 +104,9 @@ mod torus;
 macro_rules! always_true {
     ($ty: tt) => {
         impl<P> PartialEq for $ty<P> {
-            fn eq(&self, _: &Self) -> bool { true }
+            fn eq(&self, _: &Self) -> bool {
+                true
+            }
         }
         impl<P> Eq for $ty<P> {}
     };

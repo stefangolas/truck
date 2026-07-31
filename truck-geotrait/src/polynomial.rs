@@ -20,11 +20,17 @@ impl<P: EuclideanSpace<Scalar = f64>> ParametricCurve for PolynomialCurve<P> {
         res
     }
     #[inline(always)]
-    fn subs(&self, t: f64) -> P { P::from_vec(self.der_n(0, t)) }
+    fn subs(&self, t: f64) -> P {
+        P::from_vec(self.der_n(0, t))
+    }
     #[inline(always)]
-    fn der(&self, t: f64) -> P::Diff { self.der_n(1, t) }
+    fn der(&self, t: f64) -> P::Diff {
+        self.der_n(1, t)
+    }
     #[inline(always)]
-    fn der2(&self, t: f64) -> P::Diff { self.der_n(2, t) }
+    fn der2(&self, t: f64) -> P::Diff {
+        self.der_n(2, t)
+    }
     #[inline(always)]
     fn parameter_range(&self) -> ParameterRange {
         (Bound::Included(-100.0), Bound::Included(100.0))
@@ -34,7 +40,8 @@ impl<P: EuclideanSpace<Scalar = f64>> ParametricCurve for PolynomialCurve<P> {
 impl<P: EuclideanSpace<Scalar = f64>> BoundedCurve for PolynomialCurve<P> {}
 
 impl<P> ParameterDivision1D for PolynomialCurve<P>
-where P: EuclideanSpace<Scalar = f64> + MetricSpace<Metric = f64> + HashGen<f64>
+where
+    P: EuclideanSpace<Scalar = f64> + MetricSpace<Metric = f64> + HashGen<f64>,
 {
     type Point = P;
     fn parameter_division(&self, range: (f64, f64), tol: f64) -> (Vec<f64>, Vec<Self::Point>) {
@@ -149,17 +156,29 @@ impl<P: EuclideanSpace<Scalar = f64>> ParametricSurface for PolynomialSurface<P>
         res
     }
     #[inline(always)]
-    fn subs(&self, u: f64, v: f64) -> P { P::from_vec(self.der_mn(0, 0, u, v)) }
+    fn subs(&self, u: f64, v: f64) -> P {
+        P::from_vec(self.der_mn(0, 0, u, v))
+    }
     #[inline(always)]
-    fn uder(&self, u: f64, v: f64) -> P::Diff { self.der_mn(1, 0, u, v) }
+    fn uder(&self, u: f64, v: f64) -> P::Diff {
+        self.der_mn(1, 0, u, v)
+    }
     #[inline(always)]
-    fn vder(&self, u: f64, v: f64) -> P::Diff { self.der_mn(0, 1, u, v) }
+    fn vder(&self, u: f64, v: f64) -> P::Diff {
+        self.der_mn(0, 1, u, v)
+    }
     #[inline(always)]
-    fn uuder(&self, u: f64, v: f64) -> P::Diff { self.der_mn(2, 0, u, v) }
+    fn uuder(&self, u: f64, v: f64) -> P::Diff {
+        self.der_mn(2, 0, u, v)
+    }
     #[inline(always)]
-    fn uvder(&self, u: f64, v: f64) -> P::Diff { self.der_mn(1, 1, u, v) }
+    fn uvder(&self, u: f64, v: f64) -> P::Diff {
+        self.der_mn(1, 1, u, v)
+    }
     #[inline(always)]
-    fn vvder(&self, u: f64, v: f64) -> P::Diff { self.der_mn(0, 2, u, v) }
+    fn vvder(&self, u: f64, v: f64) -> P::Diff {
+        self.der_mn(0, 2, u, v)
+    }
     #[inline(always)]
     fn parameter_range(&self) -> (ParameterRange, ParameterRange) {
         (
@@ -179,7 +198,8 @@ impl ParametricSurface3D for PolynomialSurface<Point3> {
 impl<P: EuclideanSpace<Scalar = f64>> BoundedSurface for PolynomialSurface<P> {}
 
 impl<P> ParameterDivision2D for PolynomialSurface<P>
-where P: EuclideanSpace<Scalar = f64> + MetricSpace<Metric = f64> + HashGen<f64>
+where
+    P: EuclideanSpace<Scalar = f64> + MetricSpace<Metric = f64> + HashGen<f64>,
 {
     fn parameter_division(
         &self,

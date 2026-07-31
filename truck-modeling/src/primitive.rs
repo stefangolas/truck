@@ -43,7 +43,9 @@ use truck_topology::*;
 /// assert_eq!(rect[3].front().point(), Point3::new(0.0, 1.0, 0.0));
 /// ```
 pub fn rect<C>(r#box: BoundingBox<Point2>, plane: Plane) -> Wire<Point3, C>
-where Line<Point3>: ToSameGeometry<C> {
+where
+    Line<Point3>: ToSameGeometry<C>,
+{
     let (min, max) = (r#box.min(), r#box.max());
     let v = builder::vertices([
         plane.subs(min.x, min.y),
@@ -86,7 +88,9 @@ where Line<Point3>: ToSameGeometry<C> {
 /// }
 /// ```
 pub fn circle<C>(start: Point3, origin: Point3, axis: Vector3, division: usize) -> Wire<Point3, C>
-where Processor<TrimmedCurve<UnitCircle<Point3>>, Matrix4>: ToSameGeometry<C> {
+where
+    Processor<TrimmedCurve<UnitCircle<Point3>>, Matrix4>: ToSameGeometry<C>,
+{
     let origin = origin + (start - origin).dot(axis) * axis;
     let radius = start - origin;
     let y = axis.cross(radius);
@@ -136,7 +140,8 @@ where Processor<TrimmedCurve<UnitCircle<Point3>>, Matrix4>: ToSameGeometry<C> {
 pub fn cuboid<C, S>(r#box: BoundingBox<Point3>) -> Solid<Point3, C, S>
 where
     Line<Point3>: ToSameGeometry<C>,
-    Plane: ToSameGeometry<S>, {
+    Plane: ToSameGeometry<S>,
+{
     let (p, q) = (r#box.min(), r#box.max());
     let v = builder::vertices([
         (p.x, p.y, p.z),

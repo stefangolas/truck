@@ -96,7 +96,9 @@ impl App for MyApp {
         }
     }
 
-    fn app_title<'a>() -> Option<&'a str> { Some("textured cube") }
+    fn app_title<'a>() -> Option<&'a str> {
+        Some("textured cube")
+    }
 
     fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> ControlFlow {
         match button {
@@ -221,7 +223,11 @@ impl App for MyApp {
         Self::default_control_flow()
     }
 
-    fn render(&mut self) { self.scene.render_frame(); }
+    fn render(&mut self) {
+        self.scene.render_frame();
+    }
 }
 
-fn main() { MyApp::run(); }
+fn main() {
+    MyApp::run();
+}

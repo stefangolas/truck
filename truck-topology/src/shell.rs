@@ -17,11 +17,15 @@ trait As<T> {
 }
 
 impl<T> As<T> for T {
-    fn as_(self) -> T { self }
+    fn as_(self) -> T {
+        self
+    }
 }
 
 impl<'a, P, C, S> As<&'a Face<P, C, S>> for AdjacentFace<'a, P, C, S> {
-    fn as_(self) -> &'a Face<P, C, S> { self.face }
+    fn as_(self) -> &'a Face<P, C, S> {
+        self.face
+    }
 }
 
 type FaceAdjacencyMap<'a, P, C, S> = HashMap<&'a Face<P, C, S>, Vec<AdjacentFace<'a, P, C, S>>>;
@@ -44,15 +48,21 @@ impl<P, C, S> Shell<P, C, S> {
 
     /// Returns an iterator over the faces. Practically, an alias of `iter()`.
     #[inline(always)]
-    pub fn face_iter(&self) -> FaceIter<'_, P, C, S> { self.iter() }
+    pub fn face_iter(&self) -> FaceIter<'_, P, C, S> {
+        self.iter()
+    }
 
     /// Returns a mutable iterator over the faces. Practically, an alias of `iter_mut()`.
     #[inline(always)]
-    pub fn face_iter_mut(&mut self) -> FaceIterMut<'_, P, C, S> { self.iter_mut() }
+    pub fn face_iter_mut(&mut self) -> FaceIterMut<'_, P, C, S> {
+        self.iter_mut()
+    }
 
     /// Creates a consuming iterator. Practically, an alias of `into_iter()`.
     #[inline(always)]
-    pub fn face_into_iter(self) -> FaceIntoIter<P, C, S> { self.face_list.into_iter() }
+    pub fn face_into_iter(self) -> FaceIntoIter<P, C, S> {
+        self.face_list.into_iter()
+    }
 
     /// Returns an iterator over the faces. Practically, an alias of `par_iter()`.
     #[inline(always)]
@@ -60,7 +70,8 @@ impl<P, C, S> Shell<P, C, S> {
     where
         P: Send,
         C: Send,
-        S: Send, {
+        S: Send,
+    {
         self.par_iter()
     }
 
@@ -70,7 +81,8 @@ impl<P, C, S> Shell<P, C, S> {
     where
         P: Send,
         C: Send,
-        S: Send, {
+        S: Send,
+    {
         self.par_iter_mut()
     }
 
@@ -80,7 +92,8 @@ impl<P, C, S> Shell<P, C, S> {
     where
         P: Send,
         C: Send,
-        S: Send, {
+        S: Send,
+    {
         self.into_par_iter()
     }
 
@@ -96,7 +109,8 @@ impl<P, C, S> Shell<P, C, S> {
     where
         P: Send,
         C: Send,
-        S: Send, {
+        S: Send,
+    {
         self.face_par_iter().flat_map(Face::boundaries).flatten()
     }
 
@@ -112,7 +126,8 @@ impl<P, C, S> Shell<P, C, S> {
     where
         P: Send,
         C: Send,
-        S: Send, {
+        S: Send,
+    {
         self.edge_par_iter().map(|edge| edge.front().clone())
     }
 
@@ -676,7 +691,8 @@ impl<P, C, S> Shell<P, C, S> {
     where
         P: Tolerance,
         C: BoundedCurve<Point = P>,
-        S: IncludeCurve<C>, {
+        S: IncludeCurve<C>,
+    {
         self.iter().all(|face| face.is_geometric_consistent())
     }
 
@@ -742,7 +758,8 @@ impl<P, C, S> Shell<P, C, S> {
     pub fn remove_vertex_by_concat_edges(&mut self, vertex_id: VertexID<P>) -> Option<Edge<P, C>>
     where
         P: Debug,
-        C: Concat<C, Point = P, Output = C> + Invertible + ParameterTransform, {
+        C: Concat<C, Point = P, Output = C> + Invertible + ParameterTransform,
+    {
         let mut vec: Vec<(&mut Wire<P, C>, usize)> = self
             .face_iter_mut()
             .flat_map(|face| &mut face.boundaries)
@@ -834,7 +851,8 @@ impl<P, C, S> Clone for Shell<P, C, S> {
 }
 
 impl<P, C, S, T> From<T> for Shell<P, C, S>
-where Vec<Face<P, C, S>>: From<T>
+where
+    Vec<Face<P, C, S>>: From<T>,
 {
     #[inline(always)]
     fn from(faces: T) -> Shell<P, C, S> {
@@ -857,45 +875,61 @@ impl<P, C, S> IntoIterator for Shell<P, C, S> {
     type Item = Face<P, C, S>;
     type IntoIter = std::vec::IntoIter<Face<P, C, S>>;
     #[inline(always)]
-    fn into_iter(self) -> Self::IntoIter { self.face_list.into_iter() }
+    fn into_iter(self) -> Self::IntoIter {
+        self.face_list.into_iter()
+    }
 }
 
 impl<'a, P, C, S> IntoIterator for &'a Shell<P, C, S> {
     type Item = &'a Face<P, C, S>;
     type IntoIter = std::slice::Iter<'a, Face<P, C, S>>;
     #[inline(always)]
-    fn into_iter(self) -> Self::IntoIter { self.face_list.iter() }
+    fn into_iter(self) -> Self::IntoIter {
+        self.face_list.iter()
+    }
 }
 
 impl<P, C, S> AsRef<Vec<Face<P, C, S>>> for Shell<P, C, S> {
     #[inline(always)]
-    fn as_ref(&self) -> &Vec<Face<P, C, S>> { &self.face_list }
+    fn as_ref(&self) -> &Vec<Face<P, C, S>> {
+        &self.face_list
+    }
 }
 
 impl<P, C, S> AsRef<[Face<P, C, S>]> for Shell<P, C, S> {
     #[inline(always)]
-    fn as_ref(&self) -> &[Face<P, C, S>] { &self.face_list }
+    fn as_ref(&self) -> &[Face<P, C, S>] {
+        &self.face_list
+    }
 }
 
 impl<P, C, S> std::ops::Deref for Shell<P, C, S> {
     type Target = Vec<Face<P, C, S>>;
     #[inline(always)]
-    fn deref(&self) -> &Vec<Face<P, C, S>> { &self.face_list }
+    fn deref(&self) -> &Vec<Face<P, C, S>> {
+        &self.face_list
+    }
 }
 
 impl<P, C, S> std::ops::DerefMut for Shell<P, C, S> {
     #[inline(always)]
-    fn deref_mut(&mut self) -> &mut Vec<Face<P, C, S>> { &mut self.face_list }
+    fn deref_mut(&mut self) -> &mut Vec<Face<P, C, S>> {
+        &mut self.face_list
+    }
 }
 
 impl<P, C, S> std::borrow::Borrow<Vec<Face<P, C, S>>> for Shell<P, C, S> {
     #[inline(always)]
-    fn borrow(&self) -> &Vec<Face<P, C, S>> { &self.face_list }
+    fn borrow(&self) -> &Vec<Face<P, C, S>> {
+        &self.face_list
+    }
 }
 
 impl<P, C, S> std::borrow::Borrow<[Face<P, C, S>]> for Shell<P, C, S> {
     #[inline(always)]
-    fn borrow(&self) -> &[Face<P, C, S>] { &self.face_list }
+    fn borrow(&self) -> &[Face<P, C, S>] {
+        &self.face_list
+    }
 }
 
 impl<P, C, S> Extend<Face<P, C, S>> for Shell<P, C, S> {
@@ -915,7 +949,9 @@ impl<P, C, S> Default for Shell<P, C, S> {
 }
 
 impl<P, C, S> PartialEq for Shell<P, C, S> {
-    fn eq(&self, other: &Self) -> bool { self.face_list == other.face_list }
+    fn eq(&self, other: &Self) -> bool {
+        self.face_list == other.face_list
+    }
 }
 
 impl<P, C, S> Eq for Shell<P, C, S> {}
@@ -1127,7 +1163,9 @@ impl<P, C> FromIterator<Edge<P, C>> for Boundaries<C> {
 }
 
 fn check_connectivity<T>(adjacency: &mut HashMap<T, Vec<T>>) -> bool
-where T: Eq + Clone + Hash {
+where
+    T: Eq + Clone + Hash,
+{
     create_one_component(adjacency);
     adjacency.is_empty()
 }
@@ -1135,7 +1173,8 @@ where T: Eq + Clone + Hash {
 fn create_components<T, U>(adjacency: &mut HashMap<T, Vec<U>>) -> Vec<Vec<T>>
 where
     T: Eq + Clone + Hash,
-    U: As<T>, {
+    U: As<T>,
+{
     let mut res = Vec::new();
     loop {
         let component = create_one_component(adjacency);
@@ -1150,7 +1189,8 @@ where
 fn create_one_component<T, U>(adjacency: &mut HashMap<T, Vec<U>>) -> Vec<T>
 where
     T: Eq + Hash + Clone,
-    U: As<T>, {
+    U: As<T>,
+{
     let mut iter = adjacency.keys();
     let first = match iter.next() {
         Some(key) => key.clone(),
@@ -1191,7 +1231,9 @@ impl<P: Debug, C: Debug, S: Debug> Debug for DebugDisplay<'_, Shell<P, C, S>, Sh
 
 impl<P: Send, C: Send, S: Send> FromParallelIterator<Face<P, C, S>> for Shell<P, C, S> {
     fn from_par_iter<I>(par_iter: I) -> Self
-    where I: IntoParallelIterator<Item = Face<P, C, S>> {
+    where
+        I: IntoParallelIterator<Item = Face<P, C, S>>,
+    {
         Self::from(Vec::from_par_iter(par_iter))
     }
 }
@@ -1199,13 +1241,17 @@ impl<P: Send, C: Send, S: Send> FromParallelIterator<Face<P, C, S>> for Shell<P,
 impl<P: Send, C: Send, S: Send> IntoParallelIterator for Shell<P, C, S> {
     type Item = Face<P, C, S>;
     type Iter = FaceParallelIntoIter<P, C, S>;
-    fn into_par_iter(self) -> Self::Iter { self.face_list.into_par_iter() }
+    fn into_par_iter(self) -> Self::Iter {
+        self.face_list.into_par_iter()
+    }
 }
 
 impl<'a, P: Send + 'a, C: Send + 'a, S: Send + 'a> IntoParallelRefIterator<'a> for Shell<P, C, S> {
     type Item = &'a Face<P, C, S>;
     type Iter = FaceParallelIter<'a, P, C, S>;
-    fn par_iter(&'a self) -> Self::Iter { self.face_list.par_iter() }
+    fn par_iter(&'a self) -> Self::Iter {
+        self.face_list.par_iter()
+    }
 }
 
 impl<'a, P: Send + 'a, C: Send + 'a, S: Send + 'a> IntoParallelRefMutIterator<'a>
@@ -1213,12 +1259,16 @@ impl<'a, P: Send + 'a, C: Send + 'a, S: Send + 'a> IntoParallelRefMutIterator<'a
 {
     type Item = &'a mut Face<P, C, S>;
     type Iter = FaceParallelIterMut<'a, P, C, S>;
-    fn par_iter_mut(&'a mut self) -> Self::Iter { self.face_list.par_iter_mut() }
+    fn par_iter_mut(&'a mut self) -> Self::Iter {
+        self.face_list.par_iter_mut()
+    }
 }
 
 impl<P: Send, C: Send, S: Send> ParallelExtend<Face<P, C, S>> for Shell<P, C, S> {
     fn par_extend<I>(&mut self, par_iter: I)
-    where I: IntoParallelIterator<Item = Face<P, C, S>> {
+    where
+        I: IntoParallelIterator<Item = Face<P, C, S>>,
+    {
         self.face_list.par_extend(par_iter)
     }
 }

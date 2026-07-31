@@ -17,15 +17,21 @@ impl Torus {
 
     /// get center
     #[inline(always)]
-    pub const fn center(&self) -> Point3 { self.center }
+    pub const fn center(&self) -> Point3 {
+        self.center
+    }
 
     /// get large radius
     #[inline(always)]
-    pub const fn large_radius(&self) -> f64 { self.large_radius }
+    pub const fn large_radius(&self) -> f64 {
+        self.large_radius
+    }
 
     /// get small radius
     #[inline(always)]
-    pub const fn small_radius(&self) -> f64 { self.small_radius }
+    pub const fn small_radius(&self) -> f64 {
+        self.small_radius
+    }
 }
 
 impl ParametricSurface for Torus {
@@ -96,9 +102,13 @@ impl ParametricSurface for Torus {
         (RANGE, RANGE)
     }
     #[inline(always)]
-    fn u_period(&self) -> Option<f64> { Some(2.0 * PI) }
+    fn u_period(&self) -> Option<f64> {
+        Some(2.0 * PI)
+    }
     #[inline(always)]
-    fn v_period(&self) -> Option<f64> { Some(2.0 * PI) }
+    fn v_period(&self) -> Option<f64> {
+        Some(2.0 * PI)
+    }
 }
 
 impl ParametricSurface3D for Torus {

@@ -12,7 +12,9 @@ pub struct NodeEntity<Shape, NodeAttrs> {
 }
 
 impl<Shape> From<Shape> for NodeEntity<Shape, ()> {
-    fn from(shape: Shape) -> Self { Self { shape, attrs: () } }
+    fn from(shape: Shape) -> Self {
+        Self { shape, attrs: () }
+    }
 }
 
 /// Entity of the edge
@@ -25,7 +27,9 @@ pub struct EdgeEntity<Matrix, EdgeAttrs> {
 }
 
 impl<Matrix> From<Matrix> for EdgeEntity<Matrix, ()> {
-    fn from(matrix: Matrix) -> Self { Self { matrix, attrs: () } }
+    fn from(matrix: Matrix) -> Self {
+        Self { matrix, attrs: () }
+    }
 }
 
 impl<Matrix, EdgeAttrs> Default for EdgeEntity<Matrix, EdgeAttrs>
@@ -62,7 +66,9 @@ impl<'a, Shape, NodeAttrs, Matrix, EdgeAttrs>
     /// ```
     #[inline]
     pub fn matrix(&self) -> Matrix
-    where Matrix: One + Copy + std::ops::Mul<Output = Matrix> {
+    where
+        Matrix: One + Copy + std::ops::Mul<Output = Matrix>,
+    {
         self.edges()
             .iter()
             .fold(Matrix::one(), |matrix, node| matrix * node.entity().matrix)
@@ -74,10 +80,14 @@ impl<'a, Shape, NodeAttrs, Matrix, EdgeAttrs>
 {
     /// Returns the shape
     #[inline]
-    pub fn shape(self) -> &'a Shape { &self.entity().shape }
+    pub fn shape(self) -> &'a Shape {
+        &self.entity().shape
+    }
     /// Returns the node attributes
     #[inline]
-    pub fn attrs(self) -> &'a NodeAttrs { &self.entity().attrs }
+    pub fn attrs(self) -> &'a NodeAttrs {
+        &self.entity().attrs
+    }
 }
 
 impl<'a, Shape, NodeAttrs, Matrix, EdgeAttrs>
@@ -85,28 +95,40 @@ impl<'a, Shape, NodeAttrs, Matrix, EdgeAttrs>
 {
     /// Returns the shape
     #[inline]
-    pub fn shape(&'a mut self) -> &'a mut Shape { &mut self.entity().shape }
+    pub fn shape(&'a mut self) -> &'a mut Shape {
+        &mut self.entity().shape
+    }
     /// Returns the node attributes
     #[inline]
-    pub fn attrs(&'a mut self) -> &'a mut NodeAttrs { &mut self.entity().attrs }
+    pub fn attrs(&'a mut self) -> &'a mut NodeAttrs {
+        &mut self.entity().attrs
+    }
 }
 
 impl<'a, Matrix, EdgeAttrs> Edge<'a, EdgeEntity<Matrix, EdgeAttrs>> {
     /// Returns the shape
     #[inline]
-    pub fn matrix(self) -> &'a Matrix { &self.entity().matrix }
+    pub fn matrix(self) -> &'a Matrix {
+        &self.entity().matrix
+    }
     /// Returns the node attributes
     #[inline]
-    pub fn attrs(self) -> &'a EdgeAttrs { &self.entity().attrs }
+    pub fn attrs(self) -> &'a EdgeAttrs {
+        &self.entity().attrs
+    }
 }
 
 impl<'a, Matrix, EdgeAttrs> EdgeMut<'a, EdgeEntity<Matrix, EdgeAttrs>> {
     /// Returns the shape
     #[inline]
-    pub fn matrix(&'a mut self) -> &'a mut Matrix { &mut self.entity().matrix }
+    pub fn matrix(&'a mut self) -> &'a mut Matrix {
+        &mut self.entity().matrix
+    }
     /// Returns the node attributes
     #[inline]
-    pub fn attrs(&'a mut self) -> &'a mut EdgeAttrs { &mut self.entity().attrs }
+    pub fn attrs(&'a mut self) -> &'a mut EdgeAttrs {
+        &mut self.entity().attrs
+    }
 }
 
 /// have contents which can be removed
@@ -139,16 +161,24 @@ pub trait Takeable {
 
 impl<T> Takeable for Option<T> {
     #[inline]
-    fn take(&mut self) -> Self { self.take() }
+    fn take(&mut self) -> Self {
+        self.take()
+    }
     #[inline]
-    fn is_taken(&self) -> bool { self.is_none() }
+    fn is_taken(&self) -> bool {
+        self.is_none()
+    }
 }
 
 impl<T> Takeable for Vec<T> {
     #[inline]
-    fn take(&mut self) -> Self { self.split_off(0) }
+    fn take(&mut self) -> Self {
+        self.split_off(0)
+    }
     #[inline]
-    fn is_taken(&self) -> bool { self.is_empty() }
+    fn is_taken(&self) -> bool {
+        self.is_empty()
+    }
 }
 
 impl<Shape, NodeAttrs, Matrix, EdgeAttrs> Assembly<Shape, NodeAttrs, Matrix, EdgeAttrs> {
@@ -198,7 +228,8 @@ impl<Shape, NodeAttrs, Matrix, EdgeAttrs> Assembly<Shape, NodeAttrs, Matrix, Edg
         Matrix: Copy + One,
         Shape: Takeable,
         NodeAttrs: Default,
-        EdgeAttrs: Default, {
+        EdgeAttrs: Default,
+    {
         self.node_indices().for_each(|index| {
             let node = self.node(index);
             if !(node.is_terminal() || node.entity().shape.is_taken()) {

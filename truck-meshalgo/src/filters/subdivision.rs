@@ -26,7 +26,9 @@ struct EdgeInfo {
 
 impl Edge {
     #[inline]
-    fn new(v0: usize, v1: usize) -> Self { Edge(usize::min(v0, v1), usize::max(v0, v1)) }
+    fn new(v0: usize, v1: usize) -> Self {
+        Edge(usize::min(v0, v1), usize::max(v0, v1))
+    }
 }
 
 impl EdgeInfo {
@@ -39,7 +41,9 @@ impl EdgeInfo {
         }
     }
     #[inline]
-    fn add_second_wing(&mut self, second_wing: usize) { self.second_wing = Some(second_wing); }
+    fn add_second_wing(&mut self, second_wing: usize) {
+        self.second_wing = Some(second_wing);
+    }
 }
 
 impl Subdivision for PolygonMesh {

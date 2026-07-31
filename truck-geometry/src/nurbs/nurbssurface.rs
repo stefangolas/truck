@@ -4,40 +4,60 @@ use algo::surface::{SsnpVector, SspVector};
 impl<V> NurbsSurface<V> {
     /// constructor
     #[inline(always)]
-    pub const fn new(bspsurface: BSplineSurface<V>) -> Self { NurbsSurface(bspsurface) }
+    pub const fn new(bspsurface: BSplineSurface<V>) -> Self {
+        NurbsSurface(bspsurface)
+    }
 
     /// Returns the nurbs surface before rationalized
     #[inline(always)]
-    pub const fn non_rationalized(&self) -> &BSplineSurface<V> { &self.0 }
+    pub const fn non_rationalized(&self) -> &BSplineSurface<V> {
+        &self.0
+    }
     /// Returns the nurbs surface before rationalized
     #[inline(always)]
-    pub fn non_rationalized_mut(&mut self) -> &mut BSplineSurface<V> { &mut self.0 }
+    pub fn non_rationalized_mut(&mut self) -> &mut BSplineSurface<V> {
+        &mut self.0
+    }
 
     /// Returns the nurbs surface before rationalized
     #[inline(always)]
-    pub fn into_non_rationalized(self) -> BSplineSurface<V> { self.0 }
+    pub fn into_non_rationalized(self) -> BSplineSurface<V> {
+        self.0
+    }
 
     /// Returns the reference of the knot vectors
     #[inline(always)]
-    pub const fn knot_vecs(&self) -> &(KnotVec, KnotVec) { &self.0.knot_vecs }
+    pub const fn knot_vecs(&self) -> &(KnotVec, KnotVec) {
+        &self.0.knot_vecs
+    }
 
     /// Returns the u knot vector.
     #[inline(always)]
-    pub const fn uknot_vec(&self) -> &KnotVec { &self.0.knot_vecs.0 }
+    pub const fn uknot_vec(&self) -> &KnotVec {
+        &self.0.knot_vecs.0
+    }
     /// Returns the v knot vector.
     #[inline(always)]
-    pub const fn vknot_vec(&self) -> &KnotVec { &self.0.knot_vecs.1 }
+    pub const fn vknot_vec(&self) -> &KnotVec {
+        &self.0.knot_vecs.1
+    }
 
     /// Returns the `idx`th u knot.
     #[inline(always)]
-    pub fn uknot(&self, idx: usize) -> f64 { self.0.knot_vecs.0[idx] }
+    pub fn uknot(&self, idx: usize) -> f64 {
+        self.0.knot_vecs.0[idx]
+    }
     /// returns the `idx`th v knot.
     #[inline(always)]
-    pub fn vknot(&self, idx: usize) -> f64 { self.0.knot_vecs.1[idx] }
+    pub fn vknot(&self, idx: usize) -> f64 {
+        self.0.knot_vecs.1[idx]
+    }
 
     /// Returns the reference of the vector of the control points
     #[inline(always)]
-    pub const fn control_points(&self) -> &Vec<Vec<V>> { &self.0.control_points }
+    pub const fn control_points(&self) -> &Vec<Vec<V>> {
+        &self.0.control_points
+    }
 
     /// Returns the reference of the control point corresponding to the index `(idx0, idx1)`.
     #[inline(always)]
@@ -125,7 +145,9 @@ impl<V> NurbsSurface<V> {
     /// assert_eq!(bspsurface.udegree(), 1);
     /// ```
     #[inline(always)]
-    pub fn udegree(&self) -> usize { self.0.udegree() }
+    pub fn udegree(&self) -> usize {
+        self.0.udegree()
+    }
 
     /// Returns the degrees of B-spline surface
     /// # Examples
@@ -142,7 +164,9 @@ impl<V> NurbsSurface<V> {
     /// assert_eq!(bspsurface.vdegree(), 2);
     /// ```
     #[inline(always)]
-    pub fn vdegree(&self) -> usize { self.0.vdegree() }
+    pub fn vdegree(&self) -> usize {
+        self.0.vdegree()
+    }
 
     /// Returns the degrees of B-spline surface
     /// # Examples
@@ -159,29 +183,41 @@ impl<V> NurbsSurface<V> {
     /// assert_eq!(bspsurface.degrees(), (1, 2));
     /// ```
     #[inline(always)]
-    pub fn degrees(&self) -> (usize, usize) { (self.udegree(), self.vdegree()) }
+    pub fn degrees(&self) -> (usize, usize) {
+        (self.udegree(), self.vdegree())
+    }
     /// Returns whether the knot vectors are clamped or not.
     #[inline(always)]
-    pub fn is_clamped(&self) -> bool { self.0.is_clamped() }
+    pub fn is_clamped(&self) -> bool {
+        self.0.is_clamped()
+    }
     /// Swaps two parameters.
     pub fn swap_axes(&mut self) -> &mut Self
-    where V: Clone {
+    where
+        V: Clone,
+    {
         self.0.swap_axes();
         self
     }
     /// The range of the parameter of the surface.
     #[inline(always)]
-    pub fn parameter_range(&self) -> (ParameterRange, ParameterRange) { self.0.parameter_range() }
+    pub fn parameter_range(&self) -> (ParameterRange, ParameterRange) {
+        self.0.parameter_range()
+    }
     /// Creates the curve whose control points are the `idx`th column control points of `self`.
     #[inline(always)]
     pub fn column_curve(&self, row_idx: usize) -> NurbsCurve<V>
-    where V: Clone {
+    where
+        V: Clone,
+    {
         NurbsCurve(self.0.column_curve(row_idx))
     }
     /// Creates the column sectional curve.
     #[inline(always)]
     pub fn row_curve(&self, column_idx: usize) -> NurbsCurve<V>
-    where V: Clone {
+    where
+        V: Clone,
+    {
         NurbsCurve(self.0.row_curve(column_idx))
     }
 }
@@ -226,11 +262,14 @@ impl<V: Homogeneous<Scalar = f64>> NurbsSurface<V> {
 impl<V: Homogeneous<Scalar = f64> + ControlPoint<f64, Diff = V>> NurbsSurface<V> {
     /// Returns the closure of substitution.
     #[inline(always)]
-    pub fn get_closure(&self) -> impl Fn(f64, f64) -> V::Point + '_ { move |u, v| self.subs(u, v) }
+    pub fn get_closure(&self) -> impl Fn(f64, f64) -> V::Point + '_ {
+        move |u, v| self.subs(u, v)
+    }
 }
 
 impl<V: Homogeneous<Scalar = f64> + ControlPoint<f64, Diff = V>> NurbsSurface<V>
-where V::Point: Tolerance
+where
+    V::Point: Tolerance,
 {
     /// Returns whether constant curve or not, i.e. all control points are same or not.
     /// # Examples
@@ -389,11 +428,15 @@ impl<V: Homogeneous<Scalar = f64> + ControlPoint<f64, Diff = V> + Tolerance> Nur
 
     /// Cuts the surface into two surfaces at the parameter `u`
     #[inline(always)]
-    pub fn ucut(&mut self, u: f64) -> Self { Self::new(self.0.ucut(u)) }
+    pub fn ucut(&mut self, u: f64) -> Self {
+        Self::new(self.0.ucut(u))
+    }
 
     /// Cuts the surface into two surfaces at the parameter `v`
     #[inline(always)]
-    pub fn vcut(&mut self, v: f64) -> Self { Self::new(self.0.vcut(v)) }
+    pub fn vcut(&mut self, v: f64) -> Self {
+        Self::new(self.0.vcut(v))
+    }
 
     /// Normalizes the knot vectors
     #[inline(always)]
@@ -478,7 +521,9 @@ impl<V: Homogeneous<Scalar = f64> + ControlPoint<f64, Diff = V> + Tolerance> Nur
 
     /// Extracts the boundary of surface
     #[inline(always)]
-    pub fn boundary(&self) -> NurbsCurve<V> { NurbsCurve::new(self.0.boundary()) }
+    pub fn boundary(&self) -> NurbsCurve<V> {
+        NurbsCurve::new(self.0.boundary())
+    }
 }
 
 impl<V: Homogeneous<Scalar = f64>> SearchNearestParameter<D2> for NurbsSurface<V>
@@ -529,7 +574,8 @@ where
 }
 
 impl<V: Homogeneous<Scalar = f64>> NurbsSurface<V>
-where V::Point: Bounded<Scalar = f64>
+where
+    V::Point: Bounded<Scalar = f64>,
 {
     /// Returns the bounding box including all control points.
     #[inline(always)]
@@ -545,7 +591,9 @@ where V::Point: Bounded<Scalar = f64>
 
 impl<V: Clone> Invertible for NurbsSurface<V> {
     #[inline(always)]
-    fn invert(&mut self) { self.swap_axes(); }
+    fn invert(&mut self) {
+        self.swap_axes();
+    }
     #[inline(always)]
     fn inverse(&self) -> Self {
         let mut surface = self.clone();
@@ -574,7 +622,9 @@ impl<V: Homogeneous<Scalar = f64> + ControlPoint<f64, Diff = V>> ParametricSurfa
         }
     }
     #[inline(always)]
-    fn subs(&self, u: f64, v: f64) -> V::Point { self.0.subs(u, v).to_point() }
+    fn subs(&self, u: f64, v: f64) -> V::Point {
+        self.0.subs(u, v).to_point()
+    }
     #[inline(always)]
     fn uder(&self, u: f64, v: f64) -> Self::Vector {
         rat_der(&[self.0.subs(u, v), self.0.uder(u, v)])
@@ -599,7 +649,9 @@ impl<V: Homogeneous<Scalar = f64> + ControlPoint<f64, Diff = V>> ParametricSurfa
         rat_der(&[self.0.subs(u, v), self.0.vder(u, v), self.0.vvder(u, v)])
     }
     #[inline(always)]
-    fn parameter_range(&self) -> (ParameterRange, ParameterRange) { self.parameter_range() }
+    fn parameter_range(&self) -> (ParameterRange, ParameterRange) {
+        self.parameter_range()
+    }
 }
 
 impl ParametricSurface3D for NurbsSurface<Vector4> {
@@ -614,7 +666,8 @@ impl ParametricSurface3D for NurbsSurface<Vector4> {
 
 impl<V: Homogeneous<Scalar = f64> + ControlPoint<f64, Diff = V>> ParameterDivision2D
     for NurbsSurface<V>
-where V::Point: MetricSpace<Metric = f64> + HashGen<f64>
+where
+    V::Point: MetricSpace<Metric = f64> + HashGen<f64>,
 {
     #[inline(always)]
     fn parameter_division(
@@ -734,7 +787,8 @@ impl IncludeCurve<NurbsCurve<Vector4>> for NurbsSurface<Vector4> {
 }
 
 impl<M, V: Copy> Transformed<M> for NurbsSurface<V>
-where M: Copy + std::ops::Mul<V, Output = V>
+where
+    M: Copy + std::ops::Mul<V, Output = V>,
 {
     #[inline(always)]
     fn transform_by(&mut self, trans: M) {

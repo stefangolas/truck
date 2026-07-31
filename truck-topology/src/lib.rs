@@ -184,7 +184,9 @@ trait RemoveTry<T> {
 
 impl<T> RemoveTry<T> for Result<T> {
     #[inline(always)]
-    fn remove_try(self) -> T { self.unwrap_or_else(|e| panic!("{}", e)) }
+    fn remove_try(self) -> T {
+        self.unwrap_or_else(|e| panic!("{}", e))
+    }
 }
 
 /// The id of vertex. `Copy` trait is implemented.

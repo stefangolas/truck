@@ -47,7 +47,8 @@ fn tri_to_seg(tri: [Point3; 3], unit: Vector3, tol: f64) -> (f64, f64) {
 fn sorted_endpoints<'a, I, J>(iter0: I, iter1: J, unit: Vector3, tol: f64) -> Vec<EndPoint>
 where
     I: IntoIterator<Item = [Point3; 3]>,
-    J: IntoIterator<Item = &'a Point3>, {
+    J: IntoIterator<Item = &'a Point3>,
+{
     let mut res: Vec<EndPoint> = iter0
         .into_iter()
         .enumerate()

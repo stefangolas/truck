@@ -10,7 +10,9 @@ type Surface = BSplineSurface<Point3>;
 #[derive(Clone, Copy, Debug)]
 struct LinearMapping;
 impl GeometricMapping<Point3> for LinearMapping {
-    fn mapping(self) -> impl Fn(&Point3) -> Point3 { |p| p + Vector3::new(0.0, 1.0, 0.0) }
+    fn mapping(self) -> impl Fn(&Point3) -> Point3 {
+        |p| p + Vector3::new(0.0, 1.0, 0.0)
+    }
 }
 impl GeometricMapping<Line> for LinearMapping {
     fn mapping(self) -> impl Fn(&Line) -> Line {
@@ -27,7 +29,9 @@ impl GeometricMapping<Surface> for LinearMapping {
 #[derive(Clone, Copy, Debug)]
 struct Connection;
 impl Connector<Point3, Line> for Connection {
-    fn connector(self) -> impl Fn(&Point3, &Point3) -> Line { |p, q| Line(*p, *q) }
+    fn connector(self) -> impl Fn(&Point3, &Point3) -> Line {
+        |p, q| Line(*p, *q)
+    }
 }
 impl Connector<Line, Surface> for Connection {
     fn connector(self) -> impl Fn(&Line, &Line) -> Surface {

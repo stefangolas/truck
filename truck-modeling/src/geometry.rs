@@ -76,17 +76,23 @@ impl From<IntersectionCurve<BSplineCurve<Point3>, Surface, Surface>> for Curve {
 
 impl ToSameGeometry<Curve> for Line<Point3> {
     #[inline]
-    fn to_same_geometry(&self) -> Curve { Curve::from(*self) }
+    fn to_same_geometry(&self) -> Curve {
+        Curve::from(*self)
+    }
 }
 
 impl ToSameGeometry<Curve> for Processor<TrimmedCurve<UnitCircle<Point3>>, Matrix4> {
     #[inline]
-    fn to_same_geometry(&self) -> Curve { Curve::NurbsCurve(self.to_same_geometry()) }
+    fn to_same_geometry(&self) -> Curve {
+        Curve::NurbsCurve(self.to_same_geometry())
+    }
 }
 
 impl ToSameGeometry<Curve> for BSplineCurve<Point3> {
     #[inline]
-    fn to_same_geometry(&self) -> Curve { Curve::from(self.clone()) }
+    fn to_same_geometry(&self) -> Curve {
+        Curve::from(self.clone())
+    }
 }
 
 impl Curve {
@@ -240,11 +246,15 @@ impl IncludeCurve<Curve> for Plane {
 }
 
 impl ToSameGeometry<Surface> for Plane {
-    fn to_same_geometry(&self) -> Surface { (*self).into() }
+    fn to_same_geometry(&self) -> Surface {
+        (*self).into()
+    }
 }
 
 impl ToSameGeometry<Surface> for RevolutedCurve<Curve> {
-    fn to_same_geometry(&self) -> Surface { Surface::RevolutedCurve(Processor::new(self.clone())) }
+    fn to_same_geometry(&self) -> Surface {
+        Surface::RevolutedCurve(Processor::new(self.clone()))
+    }
 }
 
 impl SearchNearestParameter<D2> for Surface {

@@ -221,4 +221,6 @@ fn exec_polymesh_tex_bind_group_test(backends: Backends, out_dir: &str) {
 }
 
 #[test]
-fn polymesh_tex_bind_group_test() { common::os_alt_exec_test(exec_polymesh_tex_bind_group_test) }
+fn polymesh_tex_bind_group_test() {
+    common::os_alt_exec_test(exec_polymesh_tex_bind_group_test)
+}

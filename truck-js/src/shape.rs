@@ -93,13 +93,17 @@ pub struct StepHeaderDescriptor(truck_stepio::out::StepHeaderDescriptor);
 #[wasm_bindgen]
 impl StepHeaderDescriptor {
     #[wasm_bindgen(getter)]
-    pub fn filename(&self) -> JsString { self.file_name.as_str().into() }
+    pub fn filename(&self) -> JsString {
+        self.file_name.as_str().into()
+    }
     #[wasm_bindgen(setter)]
     pub fn set_filename(&mut self, filename: JsString) {
         self.file_name = filename.as_string().unwrap_or_default();
     }
     #[wasm_bindgen(getter)]
-    pub fn time_stamp(&self) -> JsString { self.time_stamp.as_str().into() }
+    pub fn time_stamp(&self) -> JsString {
+        self.time_stamp.as_str().into()
+    }
     #[wasm_bindgen(setter)]
     pub fn set_time_stamp(&mut self, time_stamp: JsString) {
         self.time_stamp = time_stamp.as_string().unwrap_or_default();
@@ -130,13 +134,17 @@ impl StepHeaderDescriptor {
             .collect();
     }
     #[wasm_bindgen(getter)]
-    pub fn organization_system(&self) -> JsString { self.organization_system.as_str().into() }
+    pub fn organization_system(&self) -> JsString {
+        self.organization_system.as_str().into()
+    }
     #[wasm_bindgen(setter)]
     pub fn set_organization_system(&mut self, organization_system: JsString) {
         self.organization_system = organization_system.as_string().unwrap_or_default();
     }
     #[wasm_bindgen(getter)]
-    pub fn authorization(&self) -> JsString { self.authorization.as_str().into() }
+    pub fn authorization(&self) -> JsString {
+        self.authorization.as_str().into()
+    }
     #[wasm_bindgen(setter)]
     pub fn set_authorization(&mut self, authorization: JsString) {
         self.authorization = authorization.as_string().unwrap_or_default();

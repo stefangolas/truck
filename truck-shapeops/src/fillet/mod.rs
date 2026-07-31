@@ -10,7 +10,8 @@ pub trait FilletedCurve<S>:
     + BoundedCurve
     + Cut
     + Invertible
-    + std::fmt::Debug {
+    + std::fmt::Debug
+{
 }
 impl<
         C: ParametricCurve3D
@@ -26,7 +27,8 @@ impl<
 
 /// condition of sufaces to attach fillet
 pub trait FilletedSurface<C>:
-    ParametricSurface3D + SearchParameter<D2, Point = Point3> + Invertible {
+    ParametricSurface3D + SearchParameter<D2, Point = Point3> + Invertible
+{
 }
 impl<C, S: ParametricSurface3D + SearchParameter<D2, Point = Point3> + Invertible>
     FilletedSurface<C> for S

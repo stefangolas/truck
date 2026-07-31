@@ -25,7 +25,9 @@ pub struct StlFace {
 
 impl StlFace {
     #[inline(always)]
-    fn is_empty(&self) -> bool { self == &StlFace::default() }
+    fn is_empty(&self) -> bool {
+        self == &StlFace::default()
+    }
 }
 
 /// STL reading iterator.
@@ -59,7 +61,9 @@ pub enum StlType {
 
 impl<R: Read> StlReader<R> {
     #[inline(always)]
-    fn text_reader(reader: R) -> StlReader<R> { StlReader::Ascii(BufReader::new(reader).lines()) }
+    fn text_reader(reader: R) -> StlReader<R> {
+        StlReader::Ascii(BufReader::new(reader).lines())
+    }
     fn binary_reader(mut reader: R, header_judge: bool) -> Result<StlReader<R>> {
         let mut header = [0; 5];
         reader.read_exact(&mut header)?;
@@ -238,7 +242,9 @@ impl Iterator for PolygonMeshStlFaceIterator<'_> {
         })
     }
     #[inline(always)]
-    fn size_hint(&self) -> (usize, Option<usize>) { (self.len, Some(self.len)) }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.len, Some(self.len))
+    }
 }
 
 impl ExactSizeIterator for PolygonMeshStlFaceIterator<'_> {}
@@ -261,7 +267,9 @@ where
     I::IntoIter: ExactSizeIterator,
 {
     type IntoIter = I::IntoIter;
-    fn into_iter(self) -> I::IntoIter { self.into_iter() }
+    fn into_iter(self) -> I::IntoIter {
+        self.into_iter()
+    }
 }
 
 fn signup_vector(vector: [f32; 3], map: &mut HashMap<[i64; 3], usize>) -> usize {

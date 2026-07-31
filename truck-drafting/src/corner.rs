@@ -64,7 +64,8 @@ pub struct CornerResult<C> {
 pub fn fillet<C>(edge0: &Edge<C>, edge1: &Edge<C>, radius: f64) -> Result<CornerResult<C>, Error>
 where
     C: TrimmableCurve2D,
-    Processor<TrimmedCurve<UnitCircle<Point2>>, Matrix3>: ToSameGeometry<C>, {
+    Processor<TrimmedCurve<UnitCircle<Point2>>, Matrix3>: ToSameGeometry<C>,
+{
     let mut curve0 = edge0.oriented_curve();
     let (_, t0) = curve0.range_tuple();
     let mut curve1 = edge1.oriented_curve();

@@ -39,7 +39,9 @@ impl Table {
         Some(Table(truck_stepio::r#in::Table::from_step(step_str)?))
     }
     /// get shell indices
-    pub fn shell_indices(&self) -> Vec<u64> { self.0.shell.keys().copied().collect() }
+    pub fn shell_indices(&self) -> Vec<u64> {
+        self.0.shell.keys().copied().collect()
+    }
     /// get shape from indices
     pub fn get_shape(&self, idx: u64) -> Option<ShapeFromStep> {
         let stepshell = self.shell.get(&idx)?;

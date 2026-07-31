@@ -99,7 +99,9 @@ impl CreatorCreator for DeviceHandler {
 
 impl CreatorCreator for Scene {
     #[inline(always)]
-    fn instance_creator(&self) -> InstanceCreator { self.device_handler().instance_creator() }
+    fn instance_creator(&self) -> InstanceCreator {
+        self.device_handler().instance_creator()
+    }
 }
 
 impl InstanceCreator {
@@ -108,7 +110,8 @@ impl InstanceCreator {
     pub fn create_instance<I, T>(&self, object: &T, state: &T::State) -> I
     where
         T: ToInstance<I>,
-        I: Instance, {
+        I: Instance,
+    {
         object.to_instance(&self.handler, &I::standard_shaders(self), state)
     }
     /// Creates `Texture` for attaching faces.

@@ -15,7 +15,9 @@ pub struct IntersectionCurveWithParameters<S0, S1> {
 impl<S0, S1> From<IntersectionCurveWithParameters<S0, S1>>
     for IntersectionCurve<PolylineCurve<Point3>, S0, S1>
 {
-    fn from(a: IntersectionCurveWithParameters<S0, S1>) -> Self { a.ic }
+    fn from(a: IntersectionCurveWithParameters<S0, S1>) -> Self {
+        a.ic
+    }
 }
 
 impl<S0, S1> IntersectionCurveWithParameters<S0, S1>
@@ -59,15 +61,25 @@ where
     type Point = Point3;
     type Vector = Vector3;
     #[inline(always)]
-    fn der_n(&self, n: usize, t: f64) -> Self::Vector { self.ic.der_n(n, t) }
+    fn der_n(&self, n: usize, t: f64) -> Self::Vector {
+        self.ic.der_n(n, t)
+    }
     #[inline(always)]
-    fn subs(&self, t: f64) -> Point3 { self.ic.subs(t) }
+    fn subs(&self, t: f64) -> Point3 {
+        self.ic.subs(t)
+    }
     #[inline(always)]
-    fn der(&self, t: f64) -> Vector3 { self.ic.der(t) }
+    fn der(&self, t: f64) -> Vector3 {
+        self.ic.der(t)
+    }
     #[inline(always)]
-    fn der2(&self, t: f64) -> Vector3 { self.ic.der2(t) }
+    fn der2(&self, t: f64) -> Vector3 {
+        self.ic.der2(t)
+    }
     #[inline(always)]
-    fn parameter_range(&self) -> ParameterRange { self.ic.parameter_range() }
+    fn parameter_range(&self) -> ParameterRange {
+        self.ic.parameter_range()
+    }
 }
 
 impl<S0, S1> BoundedCurve for IntersectionCurveWithParameters<S0, S1>

@@ -174,7 +174,9 @@ pub struct NurbsSurface<V>(BSplineSurface<V>);
 
 mod bspcurve;
 mod bspsurface;
-mod knot_vec;
+/// Knot vector representation and validation
+pub mod knot_vec;
+pub use knot_vec::*;
 mod nurbscurve;
 mod nurbssurface;
 

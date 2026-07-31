@@ -9,16 +9,22 @@ impl Revolution {
         }
     }
     #[inline(always)]
-    fn rotation_matrix(self, v: f64) -> Matrix3 { Matrix3::from_axis_angle(self.axis, Rad(v)) }
+    fn rotation_matrix(self, v: f64) -> Matrix3 {
+        Matrix3::from_axis_angle(self.axis, Rad(v))
+    }
     #[inline(always)]
-    fn invert(&mut self) { self.axis *= -1.0; }
+    fn invert(&mut self) {
+        self.axis *= -1.0;
+    }
     #[inline(always)]
     fn inverse(mut self) -> Self {
         self.axis *= -1.0;
         self
     }
     #[inline(always)]
-    fn contains(self, p: Point3) -> bool { (p - self.origin).cross(self.axis).so_small() }
+    fn contains(self, p: Point3) -> bool {
+        (p - self.origin).cross(self.axis).so_small()
+    }
     #[inline(always)]
     fn proj_point(&self, p: Point3) -> Point2 {
         let r = p - self.origin;
@@ -108,15 +114,35 @@ impl<C: ParametricCurve3D> ParametricSurface for RevolutedCurve<C> {
     }
     #[inline(always)]
     fn parameter_range(&self) -> (ParameterRange, ParameterRange) {
-        (
-            self.curve.parameter_range(),
-            (Bound::Included(0.0), Bound::Excluded(2.0 * PI)),
-        )
+        let u_range = if let Some((t0, t1)) = self.curve.try_range_tuple() {
+            let p0 = self.curve.subs(t0) - self.origin();
+            let p1 = self.curve.subs(t1) - self.origin();
+            let axis = self.axis();
+            let r0 = p0 - p0.dot(axis) * axis;
+            let r1 = p1 - p1.dot(axis) * axis;
+            let rd = r1 - r0;
+            let rd2 = rd.magnitude2();
+            if rd2 > 1.0e-12 {
+                let t_apex = t0 - r0.dot(rd) / rd2;
+                let u_min = f64::min(t0, t_apex);
+                let u_max = f64::max(t1, t0 + 10.0 * (t1 - t0).abs().max(1.0));
+                (Bound::Included(u_min), Bound::Included(u_max))
+            } else {
+                self.curve.parameter_range()
+            }
+        } else {
+            self.curve.parameter_range()
+        };
+        (u_range, (Bound::Included(0.0), Bound::Excluded(2.0 * PI)))
     }
     #[inline(always)]
-    fn u_period(&self) -> Option<f64> { self.curve.period() }
+    fn u_period(&self) -> Option<f64> {
+        self.curve.period()
+    }
     #[inline(always)]
-    fn v_period(&self) -> Option<f64> { Some(2.0 * PI) }
+    fn v_period(&self) -> Option<f64> {
+        Some(2.0 * PI)
+    }
 }
 
 impl<C: ParametricCurve3D + BoundedCurve> ParametricSurface3D for RevolutedCurve<C> {
@@ -152,7 +178,9 @@ impl<C: ParametricCurve3D + BoundedCurve> BoundedSurface for RevolutedCurve<C> {
 
 impl<C: Clone> Invertible for RevolutedCurve<C> {
     #[inline(always)]
-    fn invert(&mut self) { self.revolution.invert() }
+    fn invert(&mut self) {
+        self.revolution.invert()
+    }
     #[inline(always)]
     fn inverse(&self) -> Self {
         RevolutedCurve {
@@ -181,7 +209,9 @@ impl<C: ParametricCurve3D> ParametricCurve for ProjectedCurve<C> {
         }
     }
     #[inline(always)]
-    fn subs(&self, t: f64) -> Self::Point { self.revolution.proj_point(self.curve.subs(t)) }
+    fn subs(&self, t: f64) -> Self::Point {
+        self.revolution.proj_point(self.curve.subs(t))
+    }
     #[inline(always)]
     fn der(&self, t: f64) -> Self::Vector {
         self.revolution
@@ -193,9 +223,13 @@ impl<C: ParametricCurve3D> ParametricCurve for ProjectedCurve<C> {
             .proj_vector2(self.curve.subs(t), self.curve.der(t), self.curve.der2(t))
     }
     #[inline(always)]
-    fn parameter_range(&self) -> ParameterRange { self.curve.parameter_range() }
+    fn parameter_range(&self) -> ParameterRange {
+        self.curve.parameter_range()
+    }
     #[inline(always)]
-    fn period(&self) -> Option<f64> { self.curve.period() }
+    fn period(&self) -> Option<f64> {
+        self.curve.period()
+    }
 }
 
 impl<C: ParametricCurve3D + BoundedCurve> BoundedCurve for ProjectedCurve<C> {}
@@ -214,7 +248,14 @@ impl<C: ParametricCurve3D + BoundedCurve> SearchParameter<D1> for ProjectedCurve
                 algo::curve::presearch(self, point, (x, y), PRESEARCH_DIVISION)
             }
             SPHint1D::None => {
-                algo::curve::presearch(self, point, self.range_tuple(), PRESEARCH_DIVISION)
+                let (t0, t1) = self.range_tuple();
+                let span = (t1 - t0).abs().max(1.0);
+                algo::curve::presearch(
+                    self,
+                    point,
+                    (t0 - 10.0 * span, t1 + 10.0 * span),
+                    PRESEARCH_DIVISION,
+                )
             }
         };
         algo::curve::search_parameter(self, point, hint, trials)
@@ -235,7 +276,14 @@ impl<C: ParametricCurve3D + BoundedCurve> SearchNearestParameter<D1> for Project
                 algo::curve::presearch(self, point, (x, y), PRESEARCH_DIVISION)
             }
             SPHint1D::None => {
-                algo::curve::presearch(self, point, self.range_tuple(), PRESEARCH_DIVISION)
+                let (t0, t1) = self.range_tuple();
+                let span = (t1 - t0).abs().max(1.0);
+                algo::curve::presearch(
+                    self,
+                    point,
+                    (t0 - 10.0 * span, t1 + 10.0 * span),
+                    PRESEARCH_DIVISION,
+                )
             }
         };
         algo::curve::search_nearest_parameter(self, point, hint, trials)
@@ -253,16 +301,24 @@ impl<C> RevolutedCurve<C> {
     }
     /// Returns the curve before revoluted.
     #[inline(always)]
-    pub const fn entity_curve(&self) -> &C { &self.curve }
+    pub const fn entity_curve(&self) -> &C {
+        &self.curve
+    }
     /// Into the curve before revoluted.
     #[inline(always)]
-    pub fn into_entity_curve(self) -> C { self.curve }
+    pub fn into_entity_curve(self) -> C {
+        self.curve
+    }
     /// Returns origin of revolution
     #[inline(always)]
-    pub const fn origin(&self) -> Point3 { self.revolution.origin }
+    pub const fn origin(&self) -> Point3 {
+        self.revolution.origin
+    }
     /// Returns axis of revolution
     #[inline(always)]
-    pub const fn axis(&self) -> Vector3 { self.revolution.axis }
+    pub const fn axis(&self) -> Vector3 {
+        self.revolution.axis
+    }
 }
 
 impl<C: ParametricCurve3D + BoundedCurve> RevolutedCurve<C> {
@@ -280,7 +336,9 @@ impl<C: ParametricCurve3D + BoundedCurve> RevolutedCurve<C> {
     /// assert!(!surface1.is_front_fixed());
     /// ```
     #[inline(always)]
-    pub fn is_front_fixed(&self) -> bool { self.revolution.contains(self.curve.front()) }
+    pub fn is_front_fixed(&self) -> bool {
+        self.revolution.contains(self.curve.front())
+    }
     /// Returns true if the back point of the curve is on the axis of rotation.
     /// # Examples
     /// ```
@@ -295,7 +353,9 @@ impl<C: ParametricCurve3D + BoundedCurve> RevolutedCurve<C> {
     /// assert!(!surface1.is_back_fixed());
     /// ```
     #[inline(always)]
-    pub fn is_back_fixed(&self) -> bool { self.revolution.contains(self.curve.back()) }
+    pub fn is_back_fixed(&self) -> bool {
+        self.revolution.contains(self.curve.back())
+    }
 }
 
 impl<C: ParametricCurve3D + BoundedCurve> SearchParameter<D2> for RevolutedCurve<C> {
@@ -325,15 +385,31 @@ impl<C: ParametricCurve3D + BoundedCurve> SearchParameter<D2> for RevolutedCurve
                 revolution: self.revolution,
             };
             let p = self.revolution.proj_point(point);
-            let hint0 = match hint.into() {
+            let hint2d = hint.into();
+            let hint0 = match hint2d {
                 SPHint2D::Parameter(x, _) => SPHint1D::Parameter(x),
                 SPHint2D::Range((x0, _), (x1, _)) => SPHint1D::Range(x0, x1),
                 SPHint2D::None => SPHint1D::None,
             };
+            let hint_v = match hint2d {
+                SPHint2D::Parameter(_, y) => Some(y),
+                SPHint2D::Range((_, y0), _) => Some(y0),
+                SPHint2D::None => None,
+            };
             let t = proj_curve.search_parameter(p, hint0, trials)?;
-            let p = self.curve.subs(t);
-            let ang = self.revolution.proj_angle(p, point);
-            match self.subs(t, ang).near(&point) {
+            let p_eval = self.curve.subs(t);
+            let p_rad = p_eval - self.origin();
+            let r_vec = p_rad - p_rad.dot(self.axis()) * self.axis();
+            let q_rad = point - self.origin();
+            let q_vec = q_rad - q_rad.dot(self.axis()) * self.axis();
+
+            let ang = if r_vec.magnitude2() < 1.0e-12 || q_vec.magnitude2() < 1.0e-12 {
+                hint_v.unwrap_or(0.0)
+            } else {
+                self.revolution.proj_angle(p_eval, point)
+            };
+
+            match self.subs(t, ang).distance(point) <= 1.0e-5 {
                 true => Some((t, ang)),
                 false => None,
             }
@@ -488,7 +564,8 @@ impl IncludeCurve<NurbsCurve<Vector4>> for RevolutedCurve<NurbsCurve<Vector4>> {
 const MAX_CIRCLE_DIVISION: usize = 1 << 12;
 
 impl<C> ParameterDivision2D for RevolutedCurve<C>
-where C: ParametricCurve3D + ParameterDivision1D<Point = Point3>
+where
+    C: ParametricCurve3D + ParameterDivision1D<Point = Point3>,
 {
     fn parameter_division(
         &self,
@@ -545,10 +622,7 @@ mod parameter_division_bounds {
     /// A unit line revolved about the z axis, offset by `radius`.
     fn revolved(radius: f64) -> RevolutedCurve<Line<Point3>> {
         RevolutedCurve::by_revolution(
-            Line(
-                Point3::new(radius, 0.0, 0.0),
-                Point3::new(radius, 0.0, 1.0),
-            ),
+            Line(Point3::new(radius, 0.0, 0.0), Point3::new(radius, 0.0, 1.0)),
             Point3::origin(),
             Vector3::unit_z(),
         )
@@ -560,7 +634,8 @@ mod parameter_division_bounds {
     #[test]
     fn a_large_radius_cannot_demand_unbounded_samples() {
         // `tol / max` underflows toward zero, so `acos` does too.
-        let (_, circle) = revolved(1.0e12).parameter_division(((0.0, 1.0), (0.0, 2.0 * PI)), 1.0e-4);
+        let (_, circle) =
+            revolved(1.0e12).parameter_division(((0.0, 1.0), (0.0, 2.0 * PI)), 1.0e-4);
         assert!(circle.len() <= MAX_CIRCLE_DIVISION + 2, "{}", circle.len());
     }
 

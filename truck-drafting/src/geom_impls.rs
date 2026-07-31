@@ -405,7 +405,9 @@ where
 }
 
 #[inline]
-fn rot_4(vec: Vector2) -> Vector2 { Vector2::new(-vec.y, vec.x) }
+fn rot_4(vec: Vector2) -> Vector2 {
+    Vector2::new(-vec.y, vec.x)
+}
 
 #[cfg(test)]
 mod tests {

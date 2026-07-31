@@ -27,7 +27,9 @@ where
 
 /// Adds cut edges to the vector `edges`.
 fn add_edges<P, C>(vertices: &mut Vec<P>, edges: &mut Vec<Edge<C>>) -> HashMap<usize, usize>
-where C: BoundedCurve<Point = P> + Cut {
+where
+    C: BoundedCurve<Point = P> + Cut,
+{
     let len = edges.len();
     let sub_add_edges = move |i: usize| {
         let (v0, v1) = edges[i].vertices;
@@ -61,7 +63,9 @@ fn replace_edges(wire: &mut Wire, added: &HashMap<usize, usize>) {
 }
 
 pub(super) fn split_closed_edges<P, C, S>(shell: &mut Shell<P, C, S>)
-where C: BoundedCurve<Point = P> + Cut {
+where
+    C: BoundedCurve<Point = P> + Cut,
+{
     let added = add_edges(&mut shell.vertices, &mut shell.edges);
     let wire_iter = shell.faces.iter_mut().flat_map(|face| &mut face.boundaries);
     wire_iter.for_each(|wire| replace_edges(wire, &added));

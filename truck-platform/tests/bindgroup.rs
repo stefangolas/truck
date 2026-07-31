@@ -84,4 +84,6 @@ fn exec_bind_group_test(backend: Backends, out_dir: &str) {
 }
 
 #[test]
-fn bind_group_test() { common::os_alt_exec_test(exec_bind_group_test); }
+fn bind_group_test() {
+    common::os_alt_exec_test(exec_bind_group_test);
+}

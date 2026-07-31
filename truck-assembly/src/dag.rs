@@ -21,7 +21,9 @@ pub struct Edge<'a, EE> {
     entity: &'a EE,
 }
 impl<'a, EE> Clone for Edge<'a, EE> {
-    fn clone(&self) -> Self { *self }
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 impl<'a, EE> Copy for Edge<'a, EE> {}
@@ -102,7 +104,9 @@ pub struct Node<'a, NE, EE> {
 }
 
 impl<'a, NE, EE> Clone for Node<'a, NE, EE> {
-    fn clone(&self) -> Self { *self }
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 impl<'a, NE, EE> Copy for Node<'a, NE, EE> {}
@@ -193,13 +197,17 @@ pub struct Path<'a, NE, EE> {
 
 impl<NE, EE> Default for Dag<NE, EE> {
     #[inline]
-    fn default() -> Self { Self { nodes: Vec::new() } }
+    fn default() -> Self {
+        Self { nodes: Vec::new() }
+    }
 }
 
 impl<NE, EE> Dag<NE, EE> {
     /// Constructor
     #[inline]
-    pub const fn new() -> Self { Self { nodes: Vec::new() } }
+    pub const fn new() -> Self {
+        Self { nodes: Vec::new() }
+    }
 
     /// Constructs a new dag with capacity for `n` values pre-allocated.
     #[inline]
@@ -211,7 +219,9 @@ impl<NE, EE> Dag<NE, EE> {
 
     /// Returns `true` if the graph contains no nodes.
     #[inline]
-    pub const fn is_empty(&self) -> bool { self.nodes.is_empty() }
+    pub const fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
 
     /// Returns the number of the nodes.
     /// # Examples
@@ -222,7 +232,9 @@ impl<NE, EE> Dag<NE, EE> {
     /// assert_eq!(dag.len(), 5);
     /// ```
     #[inline]
-    pub const fn len(&self) -> usize { self.nodes.len() }
+    pub const fn len(&self) -> usize {
+        self.nodes.len()
+    }
 
     /// Returns an iterator over all node indices.
     /// # Examples
@@ -238,7 +250,9 @@ impl<NE, EE> Dag<NE, EE> {
     /// assert_eq!(nodes.len(), 5);
     /// ```
     #[inline]
-    pub fn node_indices(&self) -> NodeIndices { (0..self.nodes.len()).map(NodeIndex) }
+    pub fn node_indices(&self) -> NodeIndices {
+        (0..self.nodes.len()).map(NodeIndex)
+    }
 
     /// Returns a parallel iterator over all node indices.
     /// # Examples
@@ -273,7 +287,9 @@ impl<NE, EE> Dag<NE, EE> {
     /// assert_eq!(nodes.len(), 5);
     /// ```
     #[inline]
-    pub fn all_nodes(&self) -> AllNodes<'_, NE, EE> { self.nodes.iter().enumerate().map(node) }
+    pub fn all_nodes(&self) -> AllNodes<'_, NE, EE> {
+        self.nodes.iter().enumerate().map(node)
+    }
 
     /// Returns all nodes.
     /// # Examples
@@ -311,7 +327,8 @@ impl<NE, EE> Dag<NE, EE> {
     pub fn par_all_nodes(&self) -> ParAllNodes<'_, NE, EE>
     where
         NE: Sync,
-        EE: Sync, {
+        EE: Sync,
+    {
         self.nodes.par_iter().enumerate().map(node)
     }
 
@@ -333,7 +350,8 @@ impl<NE, EE> Dag<NE, EE> {
     pub fn par_all_nodes_mut(&mut self) -> ParAllNodesMut<'_, NE, EE>
     where
         NE: Send,
-        EE: Send, {
+        EE: Send,
+    {
         self.nodes.par_iter_mut().enumerate().map(node_mut)
     }
 
@@ -381,7 +399,8 @@ impl<NE, EE> Dag<NE, EE> {
     pub fn par_top_nodes(&self) -> ParTopNodes<'_, NE, EE>
     where
         NE: Sync,
-        EE: Sync, {
+        EE: Sync,
+    {
         self.nodes
             .par_iter()
             .enumerate()
@@ -435,7 +454,8 @@ impl<NE, EE> Dag<NE, EE> {
     pub fn par_top_nodes_mut(&mut self) -> ParTopNodesMut<'_, NE, EE>
     where
         NE: Send,
-        EE: Send, {
+        EE: Send,
+    {
         self.nodes
             .par_iter_mut()
             .enumerate()
@@ -468,7 +488,9 @@ impl<NE, EE> Dag<NE, EE> {
     /// assert_eq!(dag.node(a[3]).entity(), &3);
     /// ```
     pub fn create_nodes<I>(&mut self, iter: I) -> Vec<NodeIndex>
-    where I: IntoIterator<Item = NE> {
+    where
+        I: IntoIterator<Item = NE>,
+    {
         let index = self.nodes.len();
         self.nodes.extend(iter.into_iter().map(NodeData::new));
         (index..self.nodes.len()).map(NodeIndex).collect()
@@ -586,7 +608,8 @@ impl<NE, EE> Dag<NE, EE> {
     ) -> ParAllEdges<'a, NE, EE, impl Fn(&'a EdgeData<EE>) -> Edge<'a, EE>>
     where
         NE: Sync,
-        EE: Sync, {
+        EE: Sync,
+    {
         self.par_all_nodes().flat_map(move |node| node.par_edges())
     }
 
@@ -826,11 +849,7 @@ impl<NE, EE> Dag<NE, EE> {
     /// assert_eq!(edges1[0].nodes(), (b[1].index(), b[2].index()));
     /// assert_eq!(*edges1[0].entity(), 9.0);
     /// ```
-    pub fn map<'a, NE2, EE2, NF, EF>(
-        &'a self,
-        mut node_map: NF,
-        mut edge_map: EF,
-    ) -> Dag<NE2, EE2>
+    pub fn map<'a, NE2, EE2, NF, EF>(&'a self, mut node_map: NF, mut edge_map: EF) -> Dag<NE2, EE2>
     where
         NF: FnMut(&'a NE) -> NE2,
         EF: FnMut(&'a EE) -> EE2,
@@ -891,7 +910,8 @@ impl<NE, EE> Dag<NE, EE> {
         NE2: Send,
         EE2: Send,
         NF: Fn(&'a NE) -> NE2 + Send + Sync,
-        EF: Fn(&'a EE) -> EE2 + Send + Sync, {
+        EF: Fn(&'a EE) -> EE2 + Send + Sync,
+    {
         let edge_data_map = move |edge_data: &'a EdgeData<EE>| EdgeData {
             to: edge_data.to,
             entity: edge_map(&edge_data.entity),
@@ -944,7 +964,8 @@ impl<NE, EE> Dag<NE, EE> {
     pub fn map_owned<NE2, EE2, NF, EF>(self, mut node_map: NF, mut edge_map: EF) -> Dag<NE2, EE2>
     where
         NF: FnMut(NE) -> NE2,
-        EF: FnMut(EE) -> EE2, {
+        EF: FnMut(EE) -> EE2,
+    {
         let mut edge_data_map = move |edge_data: EdgeData<EE>| EdgeData {
             to: edge_data.to,
             entity: edge_map(edge_data.entity),
@@ -1005,7 +1026,8 @@ impl<NE, EE> Dag<NE, EE> {
         NE2: Send,
         EE2: Send,
         NF: Fn(NE) -> NE2 + Send + Sync,
-        EF: Fn(EE) -> EE2 + Send + Sync, {
+        EF: Fn(EE) -> EE2 + Send + Sync,
+    {
         let edge_data_map = move |edge_data: EdgeData<EE>| EdgeData {
             to: edge_data.to,
             entity: edge_map(edge_data.entity),
@@ -1055,10 +1077,14 @@ fn sub_has_cycle(
 impl<'a, NE, EE> Node<'a, NE, EE> {
     /// Returns node index
     #[inline]
-    pub fn index(self) -> NodeIndex { self.index }
+    pub fn index(self) -> NodeIndex {
+        self.index
+    }
     /// Returns entity of node.
     #[inline]
-    pub fn entity(self) -> &'a NE { &self.data.entity }
+    pub fn entity(self) -> &'a NE {
+        &self.data.entity
+    }
     /// Returns the `index`th edge.
     ///
     /// # Panics
@@ -1075,12 +1101,16 @@ impl<'a, NE, EE> Node<'a, NE, EE> {
     /// Returns a parallel iterator on edges from `self`.
     #[inline]
     pub fn par_edges(self) -> ParEdges<'a, EE, impl Fn(&'a EdgeData<EE>) -> Edge<'a, EE>>
-    where EE: Sync {
+    where
+        EE: Sync,
+    {
         self.data.edges.par_iter().map(edge_closure(self.index))
     }
     /// Returns parents from `self`.
     #[inline]
-    pub fn parents(self) -> &'a BTreeSet<NodeIndex> { &self.data.parents }
+    pub fn parents(self) -> &'a BTreeSet<NodeIndex> {
+        &self.data.parents
+    }
 
     /// Returns `true` if `self` has no parents.
     /// # Examples
@@ -1093,7 +1123,9 @@ impl<'a, NE, EE> Node<'a, NE, EE> {
     /// assert!(!dag.node(a[1]).is_top());
     /// ```
     #[inline]
-    pub fn is_top(self) -> bool { self.data.parents.is_empty() }
+    pub fn is_top(self) -> bool {
+        self.data.parents.is_empty()
+    }
 
     /// Returns `true` if `self` has no child.
     /// # Examples
@@ -1106,16 +1138,22 @@ impl<'a, NE, EE> Node<'a, NE, EE> {
     /// assert!(!dag.node(a[0]).is_terminal());
     /// ```
     #[inline]
-    pub fn is_terminal(self) -> bool { self.data.edges.is_empty() }
+    pub fn is_terminal(self) -> bool {
+        self.data.edges.is_empty()
+    }
 }
 
 impl<'a, NE, EE> NodeMut<'a, NE, EE> {
     /// Returns node index
     #[inline]
-    pub fn index(&self) -> NodeIndex { self.index }
+    pub fn index(&self) -> NodeIndex {
+        self.index
+    }
     /// Returns entity of node.
     #[inline]
-    pub fn entity(&'a mut self) -> &'a mut NE { &mut self.data.entity }
+    pub fn entity(&'a mut self) -> &'a mut NE {
+        &mut self.data.entity
+    }
     /// Returns the `index`th edge.
     pub fn edge(&'a mut self, index: usize) -> Option<EdgeMut<'a, EE>> {
         Some(edge_mut_closure(self.index)(
@@ -1137,7 +1175,9 @@ impl<'a, NE, EE> NodeMut<'a, NE, EE> {
     /// Returns a parallel iterator on edges from `self`.
     #[inline]
     pub fn par_edges(&'a self) -> ParEdges<'a, EE, impl Fn(&'a EdgeData<EE>) -> Edge<'a, EE>>
-    where EE: Sync {
+    where
+        EE: Sync,
+    {
         self.data.edges.par_iter().map(edge_closure(self.index))
     }
     /// Returns a parallel iterator on edges from `self`.
@@ -1145,7 +1185,9 @@ impl<'a, NE, EE> NodeMut<'a, NE, EE> {
     pub fn par_edges_mut(
         &'a mut self,
     ) -> ParEdgesMut<'a, EE, impl Fn(&'a mut EdgeData<EE>) -> EdgeMut<'a, EE>>
-    where EE: Send {
+    where
+        EE: Send,
+    {
         self.data
             .edges
             .par_iter_mut()
@@ -1153,15 +1195,21 @@ impl<'a, NE, EE> NodeMut<'a, NE, EE> {
     }
     /// Returns parents from `self`.
     #[inline]
-    pub fn parents(&'a self) -> &'a BTreeSet<NodeIndex> { &self.data.parents }
+    pub fn parents(&'a self) -> &'a BTreeSet<NodeIndex> {
+        &self.data.parents
+    }
 
     /// Returns `true` if `self` has no parents.
     #[inline]
-    pub fn is_top(&self) -> bool { self.data.parents.is_empty() }
+    pub fn is_top(&self) -> bool {
+        self.data.parents.is_empty()
+    }
 
     /// Returns `true` if `self` has no child.
     #[inline]
-    pub fn is_terminal(&self) -> bool { self.data.edges.is_empty() }
+    pub fn is_terminal(&self) -> bool {
+        self.data.edges.is_empty()
+    }
 }
 
 impl<'a, EE> Edge<'a, EE> {
@@ -1176,7 +1224,9 @@ impl<'a, EE> Edge<'a, EE> {
     /// assert_eq!(edge.nodes(), (a[0], a[1]));
     /// ```
     #[inline]
-    pub fn nodes(self) -> (NodeIndex, NodeIndex) { self.nodes }
+    pub fn nodes(self) -> (NodeIndex, NodeIndex) {
+        self.nodes
+    }
     /// Returns entity
     /// # Examples
     /// ```
@@ -1188,7 +1238,9 @@ impl<'a, EE> Edge<'a, EE> {
     /// assert_eq!(edge.entity(), &3);
     /// ```
     #[inline]
-    pub fn entity(self) -> &'a EE { self.entity }
+    pub fn entity(self) -> &'a EE {
+        self.entity
+    }
 }
 
 impl<'a, EE> EdgeMut<'a, EE> {
@@ -1204,7 +1256,9 @@ impl<'a, EE> EdgeMut<'a, EE> {
     /// assert_eq!(edge.nodes(), (a[0], a[1]));
     /// ```
     #[inline]
-    pub fn nodes(&self) -> (NodeIndex, NodeIndex) { self.nodes }
+    pub fn nodes(&self) -> (NodeIndex, NodeIndex) {
+        self.nodes
+    }
     /// Returns entity
     /// # Examples
     /// ```
@@ -1220,13 +1274,17 @@ impl<'a, EE> EdgeMut<'a, EE> {
     /// assert_eq!(dag.node(a[0]).edge(0).unwrap().entity(), &5);
     /// ```
     #[inline]
-    pub fn entity(&'a mut self) -> &'a mut EE { self.entity }
+    pub fn entity(&'a mut self) -> &'a mut EE {
+        self.entity
+    }
 }
 
 impl<'a, NE, EE> Path<'a, NE, EE> {
     /// Returns nodes of path.
     #[inline]
-    pub fn nodes(&self) -> &[Node<'a, NE, EE>] { &self.nodes }
+    pub fn nodes(&self) -> &[Node<'a, NE, EE>] {
+        &self.nodes
+    }
     /// Returns an iterator of node indices.
     #[inline]
     pub fn node_indices(&self) -> impl Iterator<Item = NodeIndex> {
@@ -1234,10 +1292,14 @@ impl<'a, NE, EE> Path<'a, NE, EE> {
     }
     /// Returns nodes of path.
     #[inline]
-    pub fn edges(&self) -> &[Edge<'a, EE>] { &self.edges }
+    pub fn edges(&self) -> &[Edge<'a, EE>] {
+        &self.edges
+    }
     /// Returns the terminal node
     #[inline]
-    pub fn terminal_node(&'a self) -> Node<'a, NE, EE> { *self.nodes.last().unwrap() }
+    pub fn terminal_node(&'a self) -> Node<'a, NE, EE> {
+        *self.nodes.last().unwrap()
+    }
 }
 
 #[derive(Debug)]

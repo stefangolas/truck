@@ -12,7 +12,8 @@ fn derive_build_test_is_running() {}
 enum DerivedCurve<P>
 where
     P: EuclideanSpace<Scalar = f64> + MetricSpace<Metric = f64> + HashGen<f64>,
-    P::Diff: std::fmt::Debug, {
+    P::Diff: std::fmt::Debug,
+{
     CurveA(PolynomialCurve<P>),
     CurveB { polycurve: PolynomialCurve<P> },
 }
@@ -21,7 +22,8 @@ where
 enum DeriveSurface<P>
 where
     P: EuclideanSpace<Scalar = f64> + MetricSpace<Metric = f64> + HashGen<f64>,
-    P::Diff: std::fmt::Debug, {
+    P::Diff: std::fmt::Debug,
+{
     SurfaceA(PolynomialSurface<P>),
     SurfaceB { polysurface: PolynomialSurface<P> },
 }

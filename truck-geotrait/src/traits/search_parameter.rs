@@ -42,12 +42,16 @@ pub enum SPHint1D {
 
 impl From<f64> for SPHint1D {
     #[inline(always)]
-    fn from(x: f64) -> SPHint1D { SPHint1D::Parameter(x) }
+    fn from(x: f64) -> SPHint1D {
+        SPHint1D::Parameter(x)
+    }
 }
 
 impl From<(f64, f64)> for SPHint1D {
     #[inline(always)]
-    fn from(range: (f64, f64)) -> SPHint1D { SPHint1D::Range(range.0, range.1) }
+    fn from(range: (f64, f64)) -> SPHint1D {
+        SPHint1D::Range(range.0, range.1)
+    }
 }
 
 impl From<Option<f64>> for SPHint1D {
@@ -73,12 +77,16 @@ pub enum SPHint2D {
 
 impl From<(f64, f64)> for SPHint2D {
     #[inline(always)]
-    fn from(x: (f64, f64)) -> Self { Self::Parameter(x.0, x.1) }
+    fn from(x: (f64, f64)) -> Self {
+        Self::Parameter(x.0, x.1)
+    }
 }
 
 impl From<((f64, f64), (f64, f64))> for SPHint2D {
     #[inline(always)]
-    fn from(ranges: ((f64, f64), (f64, f64))) -> Self { Self::Range(ranges.0, ranges.1) }
+    fn from(ranges: ((f64, f64), (f64, f64))) -> Self {
+        Self::Range(ranges.0, ranges.1)
+    }
 }
 
 impl From<Option<(f64, f64)>> for SPHint2D {

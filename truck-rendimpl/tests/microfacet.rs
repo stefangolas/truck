@@ -56,4 +56,6 @@ fn exec_microfacet_module_test(backends: Backends, out_dir: &str) {
 }
 
 #[test]
-fn microfacet_module_test() { common::os_alt_exec_test(exec_microfacet_module_test) }
+fn microfacet_module_test() {
+    common::os_alt_exec_test(exec_microfacet_module_test)
+}
