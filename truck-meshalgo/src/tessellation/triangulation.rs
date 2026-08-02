@@ -6,6 +6,11 @@
 
 use super::*;
 use super::domain::lattice::CertifiedLattice;
+use super::source_evidence::{
+    BoundId, EdgeUseId, ErasedOrientationMechanism, OrientationEvidence, OrientationOrigin,
+    SourceBoundInput, SourceEdgeOrientationEvidence, SourceEdgeUseInput, SourceEvidenceError,
+    SourceFaceInput, SourceFaceOrientationEvidence, SourceVertexKey,
+};
 use crate::filters::NormalFilters;
 use crate::Point2;
 use array_macro::array;
@@ -215,6 +220,7 @@ where
 {
     let vertices = shell.vertices.clone();
     let edge_probe = std::env::var_os("TRUCK_PROBE_EDGE").is_some();
+    let evidence_probe = std::env::var_os("TRUCK_PROBE_EVIDENCE").is_some();
     let tessellate_edge = |edge: &CompressedEdge<C>| {
         let curve = &edge.curve;
         let range = curve.range_tuple();
@@ -371,6 +377,15 @@ where
         let boundaries = face.boundaries.clone();
         let surface = &face.surface;
         let lattice = lattice_of(surface);
+        // Step 0: build the rewrite's input seam beside the legacy path and
+        // report it. Nothing below reads it, so geometry is unchanged by
+        // construction — the point is to count what the seam carries before
+        // the pipeline that depends on it exists.
+        if evidence_probe {
+            let input =
+                source_face_input_from_compressed(declared_face_index, source_face_id, face, &edges);
+            emit_evidence_probe(&input, source_face_id, declared_face_index, &lattice);
+        }
         let create_edge = |edge_idx: &CompressedEdgeIndex| match edge_idx.orientation {
             true => Some(edges.get(edge_idx.index)?.curve.clone()),
             false => Some(edges.get(edge_idx.index)?.curve.inverse()),
@@ -434,6 +449,190 @@ where
         },
         face_failures,
     }
+}
+
+/// Builds the source-evidence view of one compressed face.
+///
+/// Step 0 of the formal rewrite: this runs beside the legacy boundary
+/// construction and feeds nothing but the probe below. Its purpose is to
+/// establish, by measurement on the corpus rather than by reading the
+/// converter, what the rewrite's input seam actually carries.
+///
+/// Three facts survive here that the legacy path discards, and they are the
+/// three the deck solve will need:
+///
+/// - **edge-use structure.** `create_boundary` flattens a bound's edge uses
+///   into one point vector, after which no arc has endpoints.
+/// - **source vertex identity.** `CompressedEdge::vertices` is read for the
+///   first time on this path; `create_edge` takes only `.curve`.
+/// - **composed `s_b · s_o`.** `create_edge` applies it as `curve.inverse()`
+///   and keeps nothing.
+///
+/// **Contracts:** retains what `TOP-005` requires; `TOP-001` identity is
+/// carried but not re-checked here, since the converter's arena already
+/// discharges it.
+fn source_face_input_from_compressed<S, C>(
+    declared_face_index: usize,
+    source_face_id: Option<u64>,
+    face: &CompressedFace<S>,
+    edges: &[CompressedEdge<C>],
+) -> std::result::Result<SourceFaceInput, SourceEvidenceError> {
+    let mut bounds = Vec::with_capacity(face.boundaries.len());
+    for (bound_index, wire) in face.boundaries.iter().enumerate() {
+        let bound = BoundId(bound_index);
+        if wire.is_empty() {
+            // Not a malformed bound, and not grounds for discarding the face: a
+            // collapsed `VERTEX_LOOP` contributes no trim segment by design,
+            // the compressed form cannot tell that from a bound that lost its
+            // edges, and the face's *other* bounds are unaffected either way.
+            bounds.push(SourceBoundInput::DegenerateEvidenceUnavailable { id: bound });
+            continue;
+        }
+        let mut edge_uses = Vec::with_capacity(wire.len());
+        for (use_index, edge_idx) in wire.iter().enumerate() {
+            let id = EdgeUseId::new(bound, use_index);
+            let edge = edges.get(edge_idx.index).ok_or(
+                SourceEvidenceError::EdgeIndexOutOfRange {
+                    edge_use: id,
+                    index: edge_idx.index,
+                },
+            )?;
+            // The edge's vertices are stated in the edge's own direction, so
+            // the composed sense selects which is the *use's* start. This is
+            // the one place the retained orientation is read as a fact rather
+            // than performed as an inversion — and both orders are kept, so a
+            // consumer cannot apply the same fact twice undetected.
+            let source_vertices = (
+                SourceVertexKey::ShellVertex(edge.vertices.0),
+                SourceVertexKey::ShellVertex(edge.vertices.1),
+            );
+            let use_vertices = match edge_idx.orientation {
+                true => source_vertices,
+                false => (source_vertices.1, source_vertices.0),
+            };
+            edge_uses.push(SourceEdgeUseInput {
+                id,
+                source_edge_index: edge_idx.index,
+                source_vertices,
+                use_vertices,
+                orientation: SourceEdgeOrientationEvidence {
+                    bound_times_oriented_edge: OrientationEvidence::Retained {
+                        forward: edge_idx.orientation,
+                        origin: OrientationOrigin::BoundTimesOrientedEdge,
+                    },
+                    // Folded into the converted curve at import. Sound
+                    // mechanism, no surviving Boolean.
+                    edge_curve_same_sense: OrientationEvidence::HistoryErased {
+                        mechanism:
+                            ErasedOrientationMechanism::EdgeCurveSenseFoldedIntoConvertedCurve,
+                    },
+                    selected_curve_direction: OrientationEvidence::HistoryErased {
+                        mechanism:
+                            ErasedOrientationMechanism::SelectedCurveDirectionFoldedIntoConvertedCurve,
+                    },
+                },
+            });
+        }
+        bounds.push(SourceBoundInput::EdgeUses {
+            id: bound,
+            edge_uses,
+        });
+    }
+    Ok(SourceFaceInput {
+        source_face_id,
+        declared_face_index,
+        bounds,
+        orientation: SourceFaceOrientationEvidence {
+            face_use_orientation: OrientationEvidence::Retained {
+                forward: face.orientation,
+                origin: OrientationOrigin::CompressedFaceOrientation,
+            },
+            // Folded in by `surface.invert()`, which is recorded as breaking
+            // curve-on-surface incidence rather than only reversing the
+            // parameterization. This asserts the erasure, not that any
+            // particular face had `same_sense == false`.
+            face_surface_same_sense: OrientationEvidence::HistoryErased {
+                mechanism: ErasedOrientationMechanism::FaceSurfaceSenseFoldedViaSurfaceInvert,
+            },
+        },
+    })
+}
+
+// Step-0 evidence-audit probe. Remove after `SourceFaceInput` becomes the
+// production input, or promote these fields into the permanent census.
+//
+// One `eprintln!` per face, because face tessellation is parallel and a record
+// split across calls interleaves. Consumers must parse order-independently and
+// key on `source_face_id` / `declared_face_index`; two runs' probe output are
+// not comparable byte-for-byte.
+fn emit_evidence_probe(
+    input: &std::result::Result<SourceFaceInput, SourceEvidenceError>,
+    source_face_id: Option<u64>,
+    declared_face_index: usize,
+    lattice: &CertifiedLattice,
+) {
+    let declared_rank = usize::from(lattice.declared_u_period().is_some())
+        + usize::from(lattice.declared_v_period().is_some());
+    let certified_rank = lattice.certified_rank();
+    let id = match source_face_id {
+        Some(id) => id.to_string(),
+        None => "none".to_string(),
+    };
+    let record = match input {
+        Ok(input) => {
+            // The two ratios are the quantitative result. Every other field is
+            // a categorical fact about the seam, and there is deliberately no
+            // aggregate orientation status: the factors are reported one apiece
+            // because collapsing them is what this seam exists to avoid.
+            // Per-factor *counts*, never a representative value from the first
+            // edge use: that is correct only while every use is constructed
+            // identically, and it would silently pick a winner the moment one
+            // adapter retains a factor another erases.
+            let edge_curve = input.edge_curve_sense_counts();
+            let selected_curve = input.selected_curve_direction_counts();
+            format!(
+                "bounds_total={}\tbounds_regular={}\tbounds_degenerate={}\tedge_uses={}\t\
+                 endpoint_ids_complete={}\tendpoints_consistent={}\t\
+                 continuous_regular_bounds={}/{}\tcomputable_normalized_signs={}/{}\t\
+                 face_use_orientation={}\tface_surface_history={}\t\
+                 edge_curve_retained={}\tedge_curve_history_erased={}\tedge_curve_missing={}\t\
+                 selected_curve_retained={}\tselected_curve_history_erased={}\t\
+                 selected_curve_missing={}\tadapter_error=none",
+                input.bounds.len(),
+                input.regular_bound_count(),
+                input.degenerate_bound_count(),
+                input.edge_use_count(),
+                u8::from(input.endpoint_ids_complete()),
+                u8::from(input.endpoints_consistent()),
+                input.continuous_regular_bound_count(),
+                input.regular_bound_count(),
+                input.computable_normalized_sign_count(),
+                input.edge_use_count(),
+                input.orientation.face_use_orientation.tag(),
+                input.orientation.face_surface_same_sense.tag(),
+                edge_curve.retained,
+                edge_curve.history_erased,
+                edge_curve.missing,
+                selected_curve.retained,
+                selected_curve.history_erased,
+                selected_curve.missing,
+            )
+        }
+        Err(error) => format!(
+            "bounds_total=0\tbounds_regular=0\tbounds_degenerate=0\tedge_uses=0\t\
+             endpoint_ids_complete=0\tendpoints_consistent=0\tcontinuous_regular_bounds=0/0\t\
+             computable_normalized_signs=0/0\tface_use_orientation=missing\t\
+             face_surface_history=missing\tedge_curve_retained=0\t\
+             edge_curve_history_erased=0\tedge_curve_missing=0\t\
+             selected_curve_retained=0\tselected_curve_history_erased=0\t\
+             selected_curve_missing=0\tadapter_error={}",
+            error.tag(),
+        ),
+    };
+    eprintln!(
+        "EVIDENCE\tsource_face_id={id}\tdeclared_face_index={declared_face_index}\t{record}\t\
+         declared_rank={declared_rank}\tcertified_rank={certified_rank}"
+    );
 }
 
 fn shell_create_polygon<S: PreMeshableSurface>(

@@ -446,6 +446,7 @@ impl<C: PolylineableCurve, S: RobustMeshableSurface> RobustMeshableShape
 }
 
 pub mod domain;
+pub mod source_evidence;
 mod triangulation;
 
 use domain::lattice::CertifiedLattice;
