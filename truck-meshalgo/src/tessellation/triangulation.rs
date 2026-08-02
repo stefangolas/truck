@@ -1047,8 +1047,88 @@ fn periodic_displacement(start: f64, end: f64, period: f64, tolerance: f64) -> O
     }
 }
 
+/// Where one boundary segment came from.
+///
+/// **G6, phase 2A.** `PolyBoundary::new` stitches synthesised closure and seam
+/// segments into the *same* point vectors as source-derived trim, after which
+/// nothing distinguishes them — so `insert_to` tagged every segment
+/// `PhysicalBoundary`, fabricated geometry included. The fix is not to
+/// reclassify afterwards but to record the origin where the segment is created,
+/// which is the only place it is known.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SegmentOrigin {
+    /// Carries source boundary evidence: a lifted source edge use.
+    Source,
+    /// Synthesised to close an open piece against the working extent. No source
+    /// entity describes it (`DOM-ARTIFICIAL-CLOSURE-001`).
+    SyntheticClosure,
+    /// Synthesised to bridge a collapsed periodic pair — a seam across a
+    /// degenerate direction rather than a trim boundary.
+    Seam,
+}
+
+impl SegmentOrigin {
+    /// The constraint role this origin justifies.
+    ///
+    /// Deliberately **behaviour-preserving**: the synthetic roles still toggle
+    /// material parity, exactly as they did while masquerading as
+    /// `PhysicalBoundary`. This makes the populations nameable and countable;
+    /// deciding what a synthesised segment *should* do to material state is a
+    /// separate change that must be measured on its own.
+    fn role(self) -> ConstraintRole {
+        match self {
+            Self::Source => ConstraintRole::PhysicalBoundary,
+            Self::SyntheticClosure | Self::Seam => {
+                ConstraintRole::UnresolvedSyntheticClosure
+            }
+        }
+    }
+}
+
+/// A closed boundary loop in parameter space, carrying each segment's origin.
+///
+/// `origins[i]` describes the segment from `points[i]` to `points[i + 1]`,
+/// cyclically, so the two vectors have equal length by construction.
 #[derive(Debug, Default, Clone)]
-struct PolyBoundary(Vec<Vec<SurfacePoint>>);
+struct BoundaryLoop {
+    points: Vec<SurfacePoint>,
+    origins: Vec<SegmentOrigin>,
+}
+
+impl BoundaryLoop {
+    /// A loop every segment of which is source-derived.
+    fn source(points: Vec<SurfacePoint>) -> Self {
+        Self {
+            origins: vec![SegmentOrigin::Source; points.len()],
+            points,
+        }
+    }
+
+    /// Concatenate chained parts, each labelled with its own origin.
+    ///
+    /// As the previous `connect_edges`, the last point of every part is dropped
+    /// because it repeats the first point of the next. That also makes the
+    /// origin assignment come out right: the retained tail point of a part
+    /// keeps that part's label, so the segment bridging two parts is attributed
+    /// to the part it geometrically belongs to, and the closing wrap-around
+    /// segment to the final part.
+    fn from_parts(parts: impl IntoIterator<Item = (Vec<SurfacePoint>, SegmentOrigin)>) -> Self {
+        let (mut points, mut origins) = (Vec::new(), Vec::new());
+        for (part, origin) in parts {
+            let keep = part.len().saturating_sub(1);
+            points.extend(part.into_iter().take(keep));
+            origins.resize(points.len(), origin);
+        }
+        Self { points, origins }
+    }
+
+    fn len(&self) -> usize {
+        self.points.len()
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+struct PolyBoundary(Vec<BoundaryLoop>);
 
 fn normalize_range(curve: &mut Vec<SurfacePoint>, compidx: usize, (u0, u1): (f64, f64)) {
     let p = curve[0];
@@ -1203,7 +1283,7 @@ impl PolyBoundary {
             match closure {
                 BoundaryClosure::EuclideanClosed => {
                     vec.pop();
-                    closed.push(vec);
+                    closed.push(BoundaryLoop::source(vec));
                 }
                 BoundaryClosure::PeriodicClosed {
                     displacement: [ku, kv],
@@ -1224,7 +1304,7 @@ impl PolyBoundary {
                             vec.last_mut().unwrap().uv.y = vec[0].uv.y + (kv as f64) * vp;
                         }
                     }
-                    closed.push(vec);
+                    closed.push(BoundaryLoop::source(vec));
                 }
                 BoundaryClosure::Open => open.push(vec),
             }
@@ -1232,11 +1312,11 @@ impl PolyBoundary {
         if closed.len() == 2
             && (lattice.declared_u_period().is_some() || lattice.declared_v_period().is_some())
         {
-            let area0 = signed_area(&closed[0]);
-            let area1 = signed_area(&closed[1]);
+            let area0 = signed_area(&closed[0].points);
+            let area1 = signed_area(&closed[1].points);
             if area0.abs() < 1e-4 && area1.abs() < 1e-4 {
-                let loop0 = closed.remove(0);
-                let mut loop1 = closed.remove(0);
+                let loop0 = closed.remove(0).points;
+                let mut loop1 = closed.remove(0).points;
                 let u0_mean: f64 = loop0.iter().map(|p| p.uv.x).sum::<f64>() / loop0.len() as f64;
                 let u1_mean: f64 = loop1.iter().map(|p| p.uv.x).sum::<f64>() / loop1.len() as f64;
                 if let Some(up) = lattice.declared_u_period() {
@@ -1260,12 +1340,18 @@ impl PolyBoundary {
                 let mut merged = Vec::new();
                 merged.extend(loop0.into_iter());
                 merged.extend(loop1.into_iter().rev());
-                closed.push(merged);
+                closed.push(BoundaryLoop::source(merged));
             }
         } else if let Some(pair) =
-            CollapsedPeriodicBoundaryPair::try_classify(surface, &closed, &open, range, lattice)
+            CollapsedPeriodicBoundaryPair::try_classify(
+                surface,
+                &closed.iter().map(|l| l.points.clone()).collect::<Vec<_>>(),
+                &open,
+                range,
+                lattice,
+            )
         {
-            let mut loop0 = closed.remove(0);
+            let mut loop0 = closed.remove(0).points;
             if loop0.len() > 1 && loop0[0].uv.distance(loop0.last().unwrap().uv) < 1e-3 {
                 loop0.pop();
             }
@@ -1306,8 +1392,14 @@ impl PolyBoundary {
             let seam_down = polyline_on_surface(surface, end_loop0, start_loop1, tol);
             let seam_up = polyline_on_surface(surface, end_loop1, start_loop0, tol);
 
-            let merged = connect_edges([loop0_full, seam_down, loop1_rev, seam_up]);
-            closed.push(merged);
+            // The two chart branches are source-derived; the segments joining
+            // them across the collapsed direction are not.
+            closed.push(BoundaryLoop::from_parts([
+                (loop0_full, SegmentOrigin::Source),
+                (seam_down, SegmentOrigin::Seam),
+                (loop1_rev, SegmentOrigin::Source),
+                (seam_up, SegmentOrigin::Seam),
+            ]));
         }
         let (n_closed_in, n_open_in) = (closed.len(), open.len());
         fn connect_edges<P>(vecs: impl IntoIterator<Item = Vec<P>>) -> Vec<P> {
@@ -1332,7 +1424,12 @@ impl PolyBoundary {
                         let vec0 = polyline_on_surface(surface, q, y, tol);
                         let vec1 = polyline_on_surface(surface, y, x, tol);
                         let vec2 = polyline_on_surface(surface, x, p, tol);
-                        closed.push(connect_edges([vec0, vec1, vec2, curve]));
+                        closed.push(BoundaryLoop::from_parts([
+                            (vec0, SegmentOrigin::SyntheticClosure),
+                            (vec1, SegmentOrigin::SyntheticClosure),
+                            (vec2, SegmentOrigin::SyntheticClosure),
+                            (curve, SegmentOrigin::Source),
+                        ]));
                     } else if q.x < p.x - TOLERANCE {
                         normalize_range(&mut curve, 0, (u0, u1));
                         let p = curve[0];
@@ -1342,7 +1439,12 @@ impl PolyBoundary {
                         let vec0 = polyline_on_surface(surface, q, y, tol);
                         let vec1 = polyline_on_surface(surface, y, x, tol);
                         let vec2 = polyline_on_surface(surface, x, p, tol);
-                        closed.push(connect_edges([vec0, vec1, vec2, curve]));
+                        closed.push(BoundaryLoop::from_parts([
+                            (vec0, SegmentOrigin::SyntheticClosure),
+                            (vec1, SegmentOrigin::SyntheticClosure),
+                            (vec2, SegmentOrigin::SyntheticClosure),
+                            (curve, SegmentOrigin::Source),
+                        ]));
                     } else if p.y < q.y - TOLERANCE {
                         normalize_range(&mut curve, 1, (v0, v1));
                         let p = curve[0];
@@ -1352,7 +1454,12 @@ impl PolyBoundary {
                         let vec0 = polyline_on_surface(surface, q, y, tol);
                         let vec1 = polyline_on_surface(surface, y, x, tol);
                         let vec2 = polyline_on_surface(surface, x, p, tol);
-                        closed.push(connect_edges([vec0, vec1, vec2, curve]));
+                        closed.push(BoundaryLoop::from_parts([
+                            (vec0, SegmentOrigin::SyntheticClosure),
+                            (vec1, SegmentOrigin::SyntheticClosure),
+                            (vec2, SegmentOrigin::SyntheticClosure),
+                            (curve, SegmentOrigin::Source),
+                        ]));
                     } else if q.y < p.y - TOLERANCE {
                         normalize_range(&mut curve, 1, (v0, v1));
                         let p = curve[0];
@@ -1362,7 +1469,12 @@ impl PolyBoundary {
                         let vec0 = polyline_on_surface(surface, q, y, tol);
                         let vec1 = polyline_on_surface(surface, y, x, tol);
                         let vec2 = polyline_on_surface(surface, x, p, tol);
-                        closed.push(connect_edges([vec0, vec1, vec2, curve]));
+                        closed.push(BoundaryLoop::from_parts([
+                            (vec0, SegmentOrigin::SyntheticClosure),
+                            (vec1, SegmentOrigin::SyntheticClosure),
+                            (vec2, SegmentOrigin::SyntheticClosure),
+                            (curve, SegmentOrigin::Source),
+                        ]));
                     }
                 }
             }
@@ -1387,14 +1499,19 @@ impl PolyBoundary {
                 let ((p0, p1), (q0, q1)) = (end_pts(&curve0), end_pts(&curve1));
                 let vec0 = polyline_on_surface(surface, p1, q0, tol);
                 let vec1 = polyline_on_surface(surface, q1, p0, tol);
-                closed.push(connect_edges([curve0, vec0, curve1, vec1]));
+                closed.push(BoundaryLoop::from_parts([
+                    (curve0, SegmentOrigin::Source),
+                    (vec0, SegmentOrigin::SyntheticClosure),
+                    (curve1, SegmentOrigin::Source),
+                    (vec1, SegmentOrigin::SyntheticClosure),
+                ]));
             }
             _ => {}
         }
         if probe {
             let areas: Vec<String> = closed
                 .iter()
-                .map(|c| format!("{:+.4e}", signed_area(c)))
+                .map(|c| format!("{:+.4e}", signed_area(&c.points)))
                 .collect();
             let range = surface.try_range_tuple();
             let has_rect = matches!(range, (Some(_), Some(_)));
@@ -1422,7 +1539,12 @@ impl PolyBoundary {
                 let vec1 = polyline_on_surface(surface, p[1], p[2], tol);
                 let vec2 = polyline_on_surface(surface, p[2], p[3], tol);
                 let vec3 = polyline_on_surface(surface, p[3], p[0], tol);
-                closed.push(connect_edges([vec0, vec1, vec2, vec3]));
+                closed.push(BoundaryLoop::from_parts([
+                    (vec0, SegmentOrigin::SyntheticClosure),
+                    (vec1, SegmentOrigin::SyntheticClosure),
+                    (vec2, SegmentOrigin::SyntheticClosure),
+                    (vec3, SegmentOrigin::SyntheticClosure),
+                ]));
             }
         }
         Self(closed)
@@ -1472,7 +1594,7 @@ impl PolyBoundary {
     fn on_boundary(&self, c: Point2) -> bool {
         self.0
             .iter()
-            .flat_map(|vec| vec.iter().circular_tuple_windows())
+            .flat_map(|loop_| loop_.points.iter().circular_tuple_windows())
             .any(|(p0, p1)| {
                 let (a, b) = (**p0, **p1);
                 let ab = b - a;
@@ -1495,7 +1617,7 @@ impl PolyBoundary {
         let r = Vector2::new(f64::cos(t), f64::sin(t));
         self.0
             .iter()
-            .flat_map(|vec| vec.iter().circular_tuple_windows())
+            .flat_map(|loop_| loop_.points.iter().circular_tuple_windows())
             .try_fold(0_i32, move |crossings, (p0, p1)| {
                 let a = **p0 - c;
                 let b = **p1 - c;
@@ -1540,7 +1662,7 @@ impl PolyBoundary {
                 PROBE_FACE_CONTEXT.with(std::cell::Cell::get);
             if source_face_id == Some(target) {
                 for (piece_index, piece) in self.0.iter().enumerate() {
-                    for (point_index, point) in piece.iter().enumerate() {
+                    for (point_index, point) in piece.points.iter().enumerate() {
                         eprintln!(
                             "WL\tsource_face_id={target}\tdeclared_face_index={declared_face_index}\t\
                              periodic_rank={periodic_rank}\tpost_stitch_piece={piece_index}\t\
@@ -1566,6 +1688,7 @@ impl PolyBoundary {
         let mut first_conflict = None;
         for (piece_index, piece) in self.0.iter().enumerate() {
             let poly2tri: Vec<Option<FixedVertexHandle>> = piece
+                .points
                 .iter()
                 .map(|pt| {
                     let sp = SPoint2::new(spade_round(pt.uv.x), spade_round(pt.uv.y));
@@ -1621,6 +1744,17 @@ impl PolyBoundary {
                 // the refusal and drops the false positive, and gives the
                 // overlap its own typed reason instead of reporting it as an
                 // insertion failure.
+                // G6: the role this segment is entitled to, decided by where
+                // the segment came from rather than by which vector it ended up
+                // in. `PolyBoundary::new` stitches synthesised closure and seam
+                // segments into the same pieces as source trim, so before the
+                // origin was recorded at creation every one of them arrived
+                // here indistinguishable from a real boundary.
+                let segment_role = piece
+                    .origins
+                    .get(i)
+                    .unwrap_or(SegmentOrigin::Source)
+                    .role();
                 let overlapping = triangulation
                     .get_edge_from_neighbors(vi, vj)
                     .filter(|e| e.is_constraint_edge())
@@ -1671,7 +1805,7 @@ impl PolyBoundary {
                         // provenance, which would be a second semantic change
                         // in the same experiment. Tagged as it behaves today;
                         // A6 splits the population.
-                        roles.record(handle, ConstraintRole::PhysicalBoundary);
+                        roles.record(handle, segment_role);
                         if let Some(installed_origins) = installed_origins.as_mut() {
                             installed_origins
                                 .entry(handle)
@@ -1724,8 +1858,8 @@ impl PolyBoundary {
                                 first_conflict = Some((
                                     piece_index,
                                     k,
-                                    piece[i].uv,
-                                    piece[j].uv,
+                                    piece.points[i].uv,
+                                    piece.points[j].uv,
                                     selected_conflict_index,
                                     conflicts.len(),
                                     mapped_conflicts,
@@ -2254,7 +2388,7 @@ fn insert_surface(
     let bdb: BoundingBox<Point2> = polyline
         .0
         .iter()
-        .flatten()
+        .flat_map(|loop_| loop_.points.iter())
         .map(std::ops::Deref::deref)
         .collect();
     let range = ((bdb.min()[0], bdb.max()[0]), (bdb.min()[1], bdb.max()[1]));
