@@ -370,6 +370,23 @@ pub trait LatticeMeshableShape<S> {
         tol: f64,
         lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
     ) -> Self::MeshedShape;
+
+    /// As [`Self::robust_triangulation_with_lattice`], but each face that
+    /// failed says why.
+    ///
+    /// **G8.** The mesh-only form above cannot express a failure: every typed
+    /// [`TessellationFailure`] — including a *proved* inconsistency such as
+    /// `ContradictoryDualParity` — reaches the caller as an empty mesh,
+    /// indistinguishable from a face that legitimately meshed to nothing. This
+    /// form returns the reasons structurally alongside the shell, so a caller
+    /// that wants the mesh cannot silently drop them. Production should use
+    /// this; the mesh-only form is the compatibility path and discards the
+    /// outcome explicitly.
+    fn robust_triangulation_with_lattice_outcome(
+        &self,
+        tol: f64,
+        lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
+    ) -> MeshedShellOutcome;
 }
 
 impl<C: PolylineableCurve, S: RobustMeshableSurface> LatticeMeshableShape<S>
@@ -381,8 +398,19 @@ impl<C: PolylineableCurve, S: RobustMeshableSurface> LatticeMeshableShape<S>
         tol: f64,
         lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
     ) -> Self::MeshedShape {
+        // Compatibility path: the outcome is discarded here, deliberately and
+        // visibly, rather than being lost inside the tessellator.
+        self.robust_triangulation_with_lattice_outcome(tol, lattice_of)
+            .shell
+    }
+
+    fn robust_triangulation_with_lattice_outcome(
+        &self,
+        tol: f64,
+        lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
+    ) -> MeshedShellOutcome {
         nonpositive_tolerance!(tol);
-        triangulation::cshell_tessellation(
+        triangulation::cshell_tessellation_with_outcomes(
             self,
             tol,
             triangulation::by_search_nearest_parameter,
@@ -421,6 +449,9 @@ pub mod domain;
 mod triangulation;
 
 use domain::lattice::CertifiedLattice;
+pub use triangulation::{
+    MeshedShellOutcome, TessellationFailure, TessellationFailureReason,
+};
 
 /// The lattice a surface reports through its bare accessors, with no evidence.
 ///

@@ -168,13 +168,47 @@ where
     shell.face_iter().map(create_face).collect()
 }
 
-/// Tessellates faces
+/// A meshed shell together with why each face that failed did so.
+///
+/// **G8.** The failure vector is positionally aligned with `shell.faces`:
+/// `face_failures[i]` explains `shell.faces[i]`, and is `None` exactly when
+/// that face tessellated. It is returned *with* the shell rather than emitted
+/// or logged, so a caller cannot consume the mesh while ignoring the reason —
+/// which is what made the previous empty-mesh convention lossy.
+///
+/// Each face's own identity remains on `CompressedFace::provenance`, so a
+/// failure can be reported against a source entity rather than an index.
+#[derive(Clone, Debug)]
+pub struct MeshedShellOutcome {
+    /// The meshed shell, shaped exactly as the legacy path produced it.
+    pub shell: MeshedCShell,
+    /// Why each face failed, positionally aligned with `shell.faces`.
+    pub face_failures: Vec<Option<TessellationFailure>>,
+}
+
+/// Tessellates faces, discarding why any of them failed.
+///
+/// Legacy shape. Prefer [`cshell_tessellation_with_outcomes`].
 pub(super) fn cshell_tessellation<'a, C, S>(
     shell: &CompressedShell<Point3, C, S>,
     tol: f64,
     sp: impl SP<S>,
     lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
 ) -> MeshedCShell
+where
+    C: PolylineableCurve + 'a,
+    S: PreMeshableSurface + 'a,
+{
+    cshell_tessellation_with_outcomes(shell, tol, sp, lattice_of).shell
+}
+
+/// Tessellates faces, preserving why each face that failed did so.
+pub(super) fn cshell_tessellation_with_outcomes<'a, C, S>(
+    shell: &CompressedShell<Point3, C, S>,
+    tol: f64,
+    sp: impl SP<S>,
+    lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
+) -> MeshedShellOutcome
 where
     C: PolylineableCurve + 'a,
     S: PreMeshableSurface + 'a,
@@ -345,11 +379,26 @@ where
             let wire_iter = wire.iter().filter_map(create_edge);
             PolyBoundaryPiece::try_new(surface, wire_iter, &sp, tol, &lattice)
         };
-        let preboundary: Option<Vec<_>> = boundaries.iter().map(create_boundary).collect();
-        let polygon: Option<PolygonMesh> = preboundary.map(|preboundary| {
-            let boundary = PolyBoundary::new(preboundary, &surface, tol, &lattice);
-            trimming_tessellation(&surface, &boundary, tol, &lattice)
-        });
+        let preboundary: std::result::Result<Vec<_>, _> =
+            boundaries.iter().map(create_boundary).collect();
+        // G8: the same computation as before, with the failure kept rather than
+        // flattened into an empty mesh.
+        //
+        // `surface` is left exactly as the legacy path produced it — `None`
+        // when no boundary could be built, `Some(empty)` when tessellation
+        // itself failed — so the meshed shell is unchanged and this commit adds
+        // information without moving any face between populations. The reason
+        // travels beside it instead of being destroyed.
+        let (polygon, failure) = match preboundary {
+            Err(reason) => (None, Some(TessellationFailure::from(reason))),
+            Ok(preboundary) => {
+                let boundary = PolyBoundary::new(preboundary, &surface, tol, &lattice);
+                match trimming_tessellation_result(&surface, &boundary, tol, &lattice) {
+                    Ok(mesh) => (Some(mesh), None),
+                    Err(failure) => (Some(PolygonMesh::default()), Some(failure)),
+                }
+            }
+        };
         let result = CompressedFace {
             boundaries,
             orientation: face.orientation,
@@ -361,21 +410,29 @@ where
             provenance: face.provenance,
         };
         PROBE_FACE_CONTEXT.with(|context| context.set((None, usize::MAX, 0)));
-        result
+        (result, failure)
     };
     #[cfg(not(target_arch = "wasm32"))]
-    let faces = shell
+    let (faces, face_failures): (Vec<_>, Vec<_>) = shell
         .faces
         .par_iter()
         .enumerate()
         .map(tessellate_face)
-        .collect();
+        .unzip();
     #[cfg(target_arch = "wasm32")]
-    let faces = shell.faces.iter().enumerate().map(tessellate_face).collect();
-    MeshedCShell {
-        vertices,
-        edges,
-        faces,
+    let (faces, face_failures): (Vec<_>, Vec<_>) = shell
+        .faces
+        .iter()
+        .enumerate()
+        .map(tessellate_face)
+        .unzip();
+    MeshedShellOutcome {
+        shell: MeshedCShell {
+            vertices,
+            edges,
+            faces,
+        },
+        face_failures,
     }
 }
 
@@ -393,7 +450,8 @@ fn shell_create_polygon<S: PreMeshableSurface>(
             let wire_iter = wire.iter().map(Edge::oriented_curve);
             PolyBoundaryPiece::try_new(surface, wire_iter, &sp, tol, lattice)
         })
-        .collect::<Option<Vec<_>>>();
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .ok();
     let polygon: Option<PolygonMesh> = preboundary.map(|preboundary| {
         let boundary = PolyBoundary::new(preboundary, &surface, tol, lattice);
         trimming_tessellation(surface, &boundary, tol, lattice)
@@ -474,7 +532,7 @@ impl PolyBoundaryPiece {
         sp: impl SP<S>,
         tol: f64,
         lattice: &CertifiedLattice,
-    ) -> Option<Self> {
+    ) -> std::result::Result<Self, TessellationFailureReason> {
         // Audit A-ambient: periodicity now arrives as a descriptor whose type
         // distinguishes exact from accessor-only evidence. `declared_period`
         // is what this path read before, so the boundary is introduced with no
@@ -510,7 +568,7 @@ impl PolyBoundaryPiece {
         // boundary by indexing a vector that is empty. Real exports do produce
         // such wires, and panicking here aborts the whole model.
         if bdry3d.is_empty() {
-            return None;
+            return Err(TessellationFailureReason::BoundaryWireEmpty);
         }
         bdry3d.push(bdry3d[0]);
         let lift_probe = std::env::var_os("TRUCK_PROBE_LIFT").is_some();
@@ -538,7 +596,9 @@ impl PolyBoundaryPiece {
                 let (mut u, mut v) = match (projected, synthetic) {
                     (Some(uv), _) => uv,
                     (None, true) => continue,
-                    (None, false) => return None,
+                    (None, false) => {
+                        return Err(TessellationFailureReason::BoundaryProjectionFailed)
+                    }
                 };
                 // A nearest point is not an incidence.
                 //
@@ -572,7 +632,7 @@ impl PolyBoundaryPiece {
                                 residual / tol,
                             );
                         }
-                        return None;
+                        return Err(TessellationFailureReason::BoundaryPointOffSurface);
                     }
                 }
                 let raw = (u, v);
@@ -611,13 +671,22 @@ impl PolyBoundaryPiece {
                             f64::abs(now - before) >= AMBIGUOUS_STEP_FRACTION * period
                         })
                     };
-                    if refinements < MAX_LIFT_REFINEMENTS
-                        && (ambiguous(u, u0, up) || ambiguous(v, v0, vp))
-                    {
-                        refinements += 1;
-                        pending.push((pt, synthetic));
-                        pending.push((previous_point.midpoint(pt), true));
-                        continue;
+                    if ambiguous(u, u0, up) || ambiguous(v, v0, vp) {
+                        if refinements < MAX_LIFT_REFINEMENTS {
+                            refinements += 1;
+                            pending.push((pt, synthetic));
+                            pending.push((previous_point.midpoint(pt), true));
+                            continue;
+                        }
+                        // G2. Bisection is exhausted and the step is still
+                        // ambiguous, so no evidence distinguishes the two
+                        // candidate period copies. Previously control fell
+                        // through here and the ambiguous value was pushed with
+                        // nothing recording that it was a guess — the face then
+                        // proceeded as though the lift were certified. FS
+                        // Def. 14 requires a continuous lift; an unresolved
+                        // branch is not one.
+                        return Err(TessellationFailureReason::AmbiguousLift);
                     }
                 }
                 vec.push((Point2::new(u, v), pt).into());
@@ -859,7 +928,7 @@ impl PolyBoundaryPiece {
                 vec.push(vec[0]);
             }
         }
-        Some(Self(vec))
+        Ok(Self(vec))
     }
 }
 
@@ -920,6 +989,35 @@ const AMBIGUOUS_STEP_FRACTION: f64 = 0.45;
 
 /// How many times a single step may be halved before refinement gives up.
 const MAX_LIFT_REFINEMENTS: usize = 8;
+
+/// How many independent ray directions [`PolyBoundary::include`] may try before
+/// reporting that containment is undecidable at a point.
+///
+/// Cost is confined to the abort path — `find_map` stops at the first ray that
+/// decides. Measured on ABC `00009190`: 18% of the aborts left by a single cast
+/// are resolved by alternate directions, and every one of those resolved to
+/// *outside*, changing no output. Whatever still aborts after eight directions
+/// is classified by [`PolyBoundary::on_boundary`], a direct predicate, rather
+/// than by inferring a location from the rays having failed.
+const INCLUSION_RAY_ATTEMPTS: u32 = 8;
+
+/// Where a point lies relative to a trimmed domain.
+///
+/// `Boundary` and `Indeterminate` are deliberately distinct. The first is a
+/// positive result from a direct point-on-segment test; the second means no
+/// method established a location. Collapsing them would reintroduce, one level
+/// up, the conflation this type exists to remove.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PointLocation {
+    /// Strictly inside the material domain.
+    Inside,
+    /// Strictly outside it.
+    Outside,
+    /// On a boundary segment within `TOLERANCE`, by direct test.
+    Boundary,
+    /// Not established by any available method.
+    Indeterminate,
+}
 
 /// Result of boundary loop closure evaluation.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1330,9 +1428,70 @@ impl PolyBoundary {
         Self(closed)
     }
 
-    /// whether `c` is included in the domain with boundary = `self`.
-    fn include(&self, c: Point2) -> bool {
-        let t = 2.0 * std::f64::consts::PI * HashGen::hash1(c);
+    /// Where `c` lies relative to the domain bounded by `self`.
+    ///
+    /// **G7a.** Previously this returned a `bool`, and a ray cast that aborted
+    /// was reported as `false` — *outside* — which is an answer the computation
+    /// did not have.
+    ///
+    /// The two failure modes are separated here rather than inferred from each
+    /// other. `Boundary` is decided by a direct point-on-segment predicate, so
+    /// it is a positive result about `c`. `Inside` and `Outside` come from ray
+    /// casting. `Indeterminate` means every tried ray aborted *and* the direct
+    /// predicate did not fire — the location is simply not established, and the
+    /// type says so instead of naming a side.
+    ///
+    /// An earlier revision claimed the residue after eight rays *was* boundary
+    /// membership. That was an inference from a negative result: an aborted
+    /// cast in floating point can equally be near-boundary numerical
+    /// degeneracy or an unlucky family of seeds, and "no ray decided" licenses
+    /// neither conclusion. Measuring it directly happens to confirm the guess —
+    /// on ABC `00009190`, 117,145 samples test as `Boundary` and **zero** come
+    /// back `Indeterminate`, with triangle and failure counts unchanged — but
+    /// it is now a positive result that would report `Indeterminate` the moment
+    /// that stopped being true, rather than a conclusion drawn from silence.
+    fn locate(&self, c: Point2) -> PointLocation {
+        // A positive test first, so boundary membership is established rather
+        // than inferred from rays failing to decide.
+        if self.on_boundary(c) {
+            return PointLocation::Boundary;
+        }
+        // Deterministic, so a face tessellates identically across runs.
+        match (0..INCLUSION_RAY_ATTEMPTS).find_map(|attempt| self.include_along_ray(c, attempt)) {
+            Some(true) => PointLocation::Inside,
+            Some(false) => PointLocation::Outside,
+            None => PointLocation::Indeterminate,
+        }
+    }
+
+    /// Whether `c` lies on a boundary segment, within `TOLERANCE`.
+    ///
+    /// Direct and ray-independent: the nearest point of each segment is
+    /// computed and compared to `c`. This is what entitles [`Self::locate`] to
+    /// report `Boundary` as a fact rather than as "the rays gave up".
+    fn on_boundary(&self, c: Point2) -> bool {
+        self.0
+            .iter()
+            .flat_map(|vec| vec.iter().circular_tuple_windows())
+            .any(|(p0, p1)| {
+                let (a, b) = (**p0, **p1);
+                let ab = b - a;
+                let len2 = ab.magnitude2();
+                let t = match len2 <= f64::EPSILON {
+                    true => 0.0,
+                    false => ((c - a).dot(ab) / len2).clamp(0.0, 1.0),
+                };
+                (a + ab * t).distance2(c) <= TOLERANCE * TOLERANCE
+            })
+    }
+
+    /// One ray cast. `None` when this ray is degenerate against the boundary.
+    fn include_along_ray(&self, c: Point2, attempt: u32) -> Option<bool> {
+        // Offsetting the seed per attempt keeps successive rays unrelated
+        // rather than merely rotated by a fixed step, which a boundary with
+        // regularly spaced vertices could otherwise defeat repeatedly.
+        let seed = HashGen::hash1(c) + f64::from(attempt) * std::f64::consts::FRAC_1_PI;
+        let t = 2.0 * std::f64::consts::PI * seed.fract();
         let r = Vector2::new(f64::cos(t), f64::sin(t));
         self.0
             .iter()
@@ -1352,8 +1511,10 @@ impl PolyBoundary {
                     Some(crossings)
                 }
             })
+            // `None` propagates: a degenerate ray decides nothing, and the
+            // caller retries with another direction rather than reading the
+            // abort as "outside".
             .map(|crossings| crossings % 2 == 1)
-            .unwrap_or(false)
     }
 
     /// Inserts points and adds constraint
@@ -1362,8 +1523,10 @@ impl PolyBoundary {
         triangulation: &mut Cdt,
         boundary_map: &mut HashMap<FixedVertexHandle, Point3>,
         roles: &mut ConstraintRoles,
-    ) -> bool {
-        let mut success = true;
+    ) -> std::result::Result<(), TessellationFailureReason> {
+        // The first refusal, kept typed. The loop continues after recording it
+        // so the probe counters below still see the whole face.
+        let mut failure: Option<TessellationFailureReason> = None;
         let probe = std::env::var_os("TRUCK_PROBE_FAIL").is_some();
         let probe_face_id = if probe {
             std::env::var("TRUCK_PROBE_FACE_ID")
@@ -1427,7 +1590,7 @@ impl PolyBoundary {
 
             if poly2tri.iter().any(|v| v.is_none()) {
                 probe_point_fail += 1;
-                success = false;
+                failure.get_or_insert(TessellationFailureReason::ConstraintInsertionIncomplete);
                 continue;
             }
             let len = poly2tri.len();
@@ -1443,40 +1606,81 @@ impl PolyBoundary {
                     probe_degenerate += 1;
                     continue;
                 }
-                let is_already_constraint = triangulation
+                // ARR-003: has *this face* already constrained this exact edge?
+                //
+                // A well-formed loop traverses each edge once. If the direct
+                // edge is already a constraint that this face's own role table
+                // claims, the boundary is traversing it a second time — a
+                // duplicate or collinear-overlapping segment, which the
+                // envelope does not admit.
+                //
+                // The previous code rejected this case, but only as a side
+                // effect of treating "already a constraint" as a failure, which
+                // also refused segments that were legitimately already fully
+                // represented — 5 faces on `00009190`. Separating the two keeps
+                // the refusal and drops the false positive, and gives the
+                // overlap its own typed reason instead of reporting it as an
+                // insertion failure.
+                let overlapping = triangulation
                     .get_edge_from_neighbors(vi, vj)
-                    .map(|e| e.is_constraint_edge())
-                    .unwrap_or(false);
-                let can_add = !is_already_constraint && triangulation.can_add_constraint(vi, vj);
-                if can_add {
-                    if triangulation.add_constraint(vi, vj) {
-                        if let Some(edge) = triangulation.get_edge_from_neighbors(vi, vj) {
-                            let handle = edge.as_undirected().fix();
-                            // Audit A1: every segment reaching here comes from a
-                            // `PolyBoundary` piece, so it is treated as physical
-                            // boundary. That is deliberately *not* the whole
-                            // truth — `PolyBoundary::new` also stitches synthetic
-                            // closure segments into these same pieces, and those
-                            // are `UnresolvedSyntheticClosure` in reality (audit
-                            // A6). Distinguishing them needs per-piece
-                            // provenance, which would be a second semantic change
-                            // in the same experiment. Tagged as it behaves today;
-                            // A6 splits the population.
-                            roles.record(handle, ConstraintRole::PhysicalBoundary);
-                            if let Some(installed_origins) = installed_origins.as_mut() {
-                                installed_origins
-                                    .entry(handle)
-                                    .or_default()
-                                    .push((piece_index, k));
-                            }
+                    .filter(|e| e.is_constraint_edge())
+                    .map(|e| e.as_undirected().fix())
+                    .is_some_and(|handle| roles.role_of(handle).is_some());
+                if overlapping {
+                    failure.get_or_insert(
+                        TessellationFailureReason::ConstraintOverlapUnsupported,
+                    );
+                    continue;
+                }
+                // G5a: ask once, and label what was actually realized.
+                //
+                // The previous sequence was `get_edge_from_neighbors` +
+                // `can_add_constraint` + `add_constraint` +
+                // `get_edge_from_neighbors`: three traversals to decide, then a
+                // fourth to rediscover the outcome. That last lookup is where
+                // the role table lost its entries, because Spade may realize
+                // one requested segment as a *chain* when an existing vertex
+                // lies on it — its own documentation says
+                // `exists_constraint(from, to)` is then not true — and the
+                // direct edge `(vi, vj)` simply does not exist to be found.
+                //
+                // `try_add_constraint` returns the realized chain instead, so
+                // every edge of it can be labelled. Its contract is exactly the
+                // one this site needs:
+                //
+                //   - empty      => refused; the segment properly crosses an
+                //                   existing constraint, and the triangulation
+                //                   is left unchanged (it is atomic on
+                //                   conflict, so refusal cannot half-apply);
+                //   - non-empty  => realized, including any edge that was
+                //                   already present.
+                //
+                // "Already fully represented" therefore stops being a separate
+                // case that had to be inferred from a Boolean.
+                let chain = triangulation.try_add_constraint(vi, vj);
+                if !chain.is_empty() {
+                    for directed in &chain {
+                        let handle = triangulation.directed_edge(*directed).as_undirected().fix();
+                        // Audit A1: every segment reaching here comes from a
+                        // `PolyBoundary` piece, so it is treated as physical
+                        // boundary. That is deliberately *not* the whole
+                        // truth — `PolyBoundary::new` also stitches synthetic
+                        // closure segments into these same pieces, and those
+                        // are `UnresolvedSyntheticClosure` in reality (audit
+                        // A6). Distinguishing them needs per-piece
+                        // provenance, which would be a second semantic change
+                        // in the same experiment. Tagged as it behaves today;
+                        // A6 splits the population.
+                        roles.record(handle, ConstraintRole::PhysicalBoundary);
+                        if let Some(installed_origins) = installed_origins.as_mut() {
+                            installed_origins
+                                .entry(handle)
+                                .or_default()
+                                .push((piece_index, k));
                         }
-                    } else {
-                        probe_add_returned_false += 1;
                     }
                 } else {
-                    if is_already_constraint {
-                        probe_already_direct += 1;
-                    } else if probe {
+                    if probe {
                         let conflicts: Vec<_> = triangulation
                             .get_conflicting_edges_between_vertices(vi, vj)
                             .map(|edge| {
@@ -1532,7 +1736,8 @@ impl PolyBoundary {
                             }
                         }
                     }
-                    success = false;
+                    failure
+                        .get_or_insert(TessellationFailureReason::ConstraintInsertionIncomplete);
                 }
             }
         }
@@ -1583,7 +1788,7 @@ impl PolyBoundary {
             }
         }
         if probe
-            && (!success
+            && (failure.is_some()
                 || probe_degenerate != 0
                 || probe_add_returned_false != 0)
         {
@@ -1592,10 +1797,13 @@ impl PolyBoundary {
                  {probe_already_direct},{probe_refused_with_conflicts},\
                  {probe_refused_without_conflicts},{probe_conflicting_edges},\
                  {probe_add_returned_false}",
-                u8::from(success),
+                u8::from(failure.is_none()),
             );
         }
-        success
+        match failure {
+            Some(reason) => Err(reason),
+            None => Ok(()),
+        }
     }
 }
 
@@ -1678,49 +1886,123 @@ impl ConstraintRoles {
 
     /// Whether a constraint edge is entitled to flip material parity.
     ///
-    /// **Legacy-preserving by construction.** Everything except
-    /// `SurfaceSampling` and `ArtificialCut` toggles, including the unresolved
-    /// case. The single semantic change in the A1 experiment is that interior
-    /// sampling constraints stop toggling; every other population keeps the
-    /// behaviour it had, tagged but unaltered, so a difference in the census is
-    /// attributable to that one change and not to a reclassification.
-    fn toggles_material(&self, edge: FixedUndirectedEdgeHandle) -> bool {
+    /// `None` means the edge carries **no resolvable role**, which is not a
+    /// material category and must not be answered with one.
+    ///
+    /// **G5b: fail closed.** This previously returned `true` for an unresolved
+    /// edge — an unjustified material assertion. Answering `false` instead
+    /// would have been the same mistake facing the other way: both invent a
+    /// semantics for an edge the code cannot name. Since G5a labels the whole
+    /// realized chain, every constraint edge this face requested has a role, and
+    /// an unresolved one is an invariant violation rather than a legitimate
+    /// category — so it is reported, not guessed.
+    ///
+    /// Measured after G5a: zero occurrences on ABC `00009190`, so this guard
+    /// lands provably non-firing.
+    fn toggles_material(&self, edge: FixedUndirectedEdgeHandle) -> Option<bool> {
         match self.role_of(edge) {
-            Some(ConstraintRole::SurfaceSampling) => false,
-            Some(ConstraintRole::ArtificialCut) => false,
-            Some(ConstraintRole::PhysicalBoundary) => true,
-            Some(ConstraintRole::NativeBoundary) => true,
-            Some(ConstraintRole::UnresolvedSyntheticClosure) => true,
+            Some(ConstraintRole::SurfaceSampling) => Some(false),
+            Some(ConstraintRole::ArtificialCut) => Some(false),
+            Some(ConstraintRole::PhysicalBoundary) => Some(true),
+            // FORMAL_SYSTEM Definition 20 says a native ambient boundary does
+            // not itself toggle; its interpretation comes from incident
+            // physical constraints. Neither this nor the synthetic-closure case
+            // is ever constructed today, so both keep their legacy answer and
+            // are decided when G6 first builds them.
+            Some(ConstraintRole::NativeBoundary) => Some(true),
+            Some(ConstraintRole::UnresolvedSyntheticClosure) => Some(true),
             None => {
                 self.unresolved_at_flood
                     .set(self.unresolved_at_flood.get() + 1);
-                true
+                None
             }
         }
     }
 }
 
+/// Why one face could not be tessellated.
+///
+/// Seven of these variants are declared but never constructed, and are marked
+/// as such below. They are retained rather than deleted because each names a
+/// stage the formal system requires and this implementation does not yet have —
+/// deleting them would erase the fact that the case is unhandled, which is the
+/// opposite of what a typed outcome is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TessellationFailureReason {
+    /// No lifted boundary could be built, for a reason the lift does not name.
+    ///
+    /// Retained as the residual bucket now that the lift reports its own
+    /// causes. A face arriving here means a refusal path was added without a
+    /// reason to go with it.
+    BoundaryConstructionFailed,
+    /// A bound contributed no points at all, so it cannot bound anything.
+    BoundaryWireEmpty,
+    /// A boundary sample had no parameter on the face's own surface.
+    BoundaryProjectionFailed,
+    /// A boundary sample lay further from its own surface than the
+    /// compatibility policy permits (GEO-005). Only reachable when
+    /// `TRUCK_COMPAT_FACTOR` is set; the gate is off by default.
+    BoundaryPointOffSurface,
+    /// The periodic branch of a lift step could not be resolved.
+    ///
+    /// `get_mindiff` picks the period copy nearest the previous sample, which
+    /// is correct only while the true step is under half a period. Beyond
+    /// `AMBIGUOUS_STEP_FRACTION` the two candidates are not distinguishable
+    /// that way, and the step is bisected to shorten it. When bisection is
+    /// exhausted the branch is genuinely unresolved: the code previously
+    /// accepted the ambiguous value silently, which is how a period-wrapping
+    /// boundary could fold onto itself and read as closed (FS Def. 14).
+    AmbiguousLift,
+    /// The parity flood assigned a cell two different labels around a cycle.
+    ///
+    /// This is a *proved* inconsistency, not a heuristic giving up: the
+    /// boundary as realized cannot carry a coherent material assignment.
     ContradictoryDualParity,
+    /// The flood completed but selected no material cell, so there is nothing
+    /// to mesh.
     NoOddParityRegion,
+    /// A constraint chain did not close. **Never constructed.**
     ConstraintChainNotClosed,
+    /// At least one boundary segment could not be represented as a constraint.
+    ///
+    /// Almost always a proper crossing of an earlier segment of this same
+    /// face's boundary — which is what a folded lift produces.
     ConstraintInsertionIncomplete,
+    /// A certified intersection was found that the envelope does not admit.
+    /// **Never constructed** — no intersection classification stage exists yet.
     ConstraintIntersectionUnsupported,
+    /// A collinear overlap was found that the envelope does not admit.
+    /// **Never constructed** — no overlap normalization stage exists yet.
     ConstraintOverlapUnsupported,
+    /// The triangulation could not be built at all. **Never constructed.**
     CdtConstructionFailed,
+    /// A vertex evaluated to a non-finite 3D position.
     NonFinitePosition,
+    /// A constraint edge carried no resolvable role. **Never constructed** —
+    /// today an unresolved role silently keeps its legacy toggling behaviour.
     ConstraintRoleMissing,
+    /// A constraint chain degenerated to a point. **Never constructed.**
     DegenerateConstraintChain,
+    /// Parity selected cells but none yielded a finite triangle.
+    /// **Never constructed** — the empty case reports [`Self::NoOddParityRegion`].
     NoFiniteTrianglesAfterParity,
 }
 
+/// Why one face failed to tessellate, and where.
+///
+/// The locating fields are best-effort and mostly unpopulated today; the
+/// `reason` is the load-bearing part.
 #[derive(Clone, Debug)]
 pub struct TessellationFailure {
+    /// What went wrong.
     pub reason: TessellationFailureReason,
+    /// Which of the face's bounds, when known.
     pub source_bound: Option<usize>,
+    /// Which edge use within that bound, when known.
     pub source_edge_use: Option<usize>,
+    /// Constraint identifiers implicated, when known.
     pub constraint_ids: Vec<usize>,
+    /// Where in parameter space, when known.
     pub uv_location: Option<Point2>,
 }
 
@@ -1835,10 +2117,11 @@ where
     let mut triangulation = Cdt::new();
     let mut boundary_map = HashMap::<FixedVertexHandle, Point3>::default();
     let mut roles = ConstraintRoles::default();
-    if !polyboundary.insert_to(&mut triangulation, &mut boundary_map, &mut roles) {
-        return TessellationOutcome::Failed(TessellationFailureReason::ConstraintInsertionIncomplete.into());
+    if let Err(reason) = polyboundary.insert_to(&mut triangulation, &mut boundary_map, &mut roles) {
+        return TessellationOutcome::Failed(reason.into());
     }
-    insert_surface(&mut triangulation, surface, polyboundary, tol, &mut roles);
+    let (samples_on_boundary, sampling_location_unresolved) =
+        insert_surface(&mut triangulation, surface, polyboundary, tol, &mut roles);
     let outcome = triangulation_into_polymesh_outcome(
         &triangulation,
         surface,
@@ -1855,13 +2138,16 @@ where
         let count = |role| roles.recorded.get(&role).copied().unwrap_or(0);
         eprintln!(
             "ROLES\tphysical={}\tsampling={}\tartificial={}\tnative={}\t\
-             unresolved_synth={}\tunresolved_at_flood={}",
+             unresolved_synth={}\tunresolved_at_flood={}\t\
+             samples_on_boundary={}\tsampling_location_unresolved={}",
             count(ConstraintRole::PhysicalBoundary),
             count(ConstraintRole::SurfaceSampling),
             count(ConstraintRole::ArtificialCut),
             count(ConstraintRole::NativeBoundary),
             count(ConstraintRole::UnresolvedSyntheticClosure),
             roles.unresolved_at_flood.get(),
+            samples_on_boundary,
+            sampling_location_unresolved,
         );
     }
     outcome
@@ -1881,7 +2167,44 @@ where
     trimming_tessellation_with_diagnostics(surface, polyboundary, tol, lattice)
 }
 
-/// Tessellates one surface trimmed by polyline.
+/// Tessellates one surface trimmed by polyline, preserving why it failed.
+///
+/// **G8.** The mesh-only form below discards a fully-formed
+/// [`TessellationFailure`] — including `ContradictoryDualParity`, which is a
+/// *proved* inconsistency — and returns an empty mesh that the caller cannot
+/// distinguish from a face that legitimately meshed to nothing. Detection was
+/// never the missing part; the value was constructed and then destroyed one
+/// line later. This form is the same computation with the result kept.
+fn trimming_tessellation_result<S>(
+    surface: &S,
+    polyboundary: &PolyBoundary,
+    tol: f64,
+    lattice: &CertifiedLattice,
+// `Result` here is `truck_topology::Result<T>`, which fixes the error type, so
+// the standard two-parameter form must be named explicitly.
+) -> std::result::Result<PolygonMesh, TessellationFailure>
+where
+    S: PreMeshableSurface,
+{
+    match trimming_tessellation_with_diagnostics(surface, polyboundary, tol, lattice) {
+        TessellationOutcome::Mesh(ft) => {
+            let mut mesh = ft.mesh;
+            mesh.make_face_compatible_to_normal();
+            Ok(mesh)
+        }
+        TessellationOutcome::Failed(f) => {
+            if std::env::var_os("TRUCK_PROBE_FAIL").is_some() {
+                eprintln!("PROBE_FAIL reason={:?}", f.reason);
+            }
+            Err(f)
+        }
+    }
+}
+
+/// Tessellates one surface trimmed by polyline, discarding why it failed.
+///
+/// Legacy shape, retained for the entry points that cannot carry an outcome.
+/// Prefer [`trimming_tessellation_result`].
 fn trimming_tessellation<S>(
     surface: &S,
     polyboundary: &PolyBoundary,
@@ -1891,38 +2214,41 @@ fn trimming_tessellation<S>(
 where
     S: PreMeshableSurface,
 {
-    match trimming_tessellation_with_diagnostics(surface, polyboundary, tol, lattice) {
-        TessellationOutcome::Mesh(ft) => {
-            let mut mesh = ft.mesh;
-            mesh.make_face_compatible_to_normal();
-            mesh
-        }
-        TessellationOutcome::Failed(f) => {
-            if std::env::var_os("TRUCK_PROBE_FAIL").is_some() {
-                eprintln!("PROBE_FAIL reason={:?}", f.reason);
-            }
-            PolygonMesh::default()
-        }
-    }
+    trimming_tessellation_result(surface, polyboundary, tol, lattice).unwrap_or_default()
 }
 
 /// Inserts parameter divisions into triangulation.
+///
+/// Returns how many grid samples lay on the boundary, and how many had no
+/// established location at all (G7a).
 fn insert_surface(
     triangulation: &mut Cdt,
     surface: impl PreMeshableSurface,
     polyline: &PolyBoundary,
     tol: f64,
     roles: &mut ConstraintRoles,
-) {
+) -> (usize, usize) {
+    // Grid samples on a boundary segment, by direct test.
+    let mut on_boundary = 0usize;
+    // Grid samples no method located. Not "outside", and not known to be on the
+    // boundary either — simply unestablished.
+    let mut location_unresolved = 0usize;
     // Audit A1: every constraint added below is an interior sampling edge. It
     // exists to control triangle shape and lies wholly inside the material
     // region — `polyline.include` gated the insertion of both its endpoints.
     // It carries no material meaning and must not toggle parity.
+    // G5a, and the more consequential half of it.
+    //
+    // A trim segment that loses its role is still treated as a trim segment,
+    // because the unresolved default toggles. A *sampling grid* segment that
+    // loses its role is treated as a trim segment too — and that is exactly the
+    // defect audit A1 removed, reappearing through the chain-splitting hole
+    // rather than through the one-bit test A1 fixed. Labelling the whole
+    // realized chain closes it.
     let mut constrain = |triangulation: &mut Cdt, a: FixedVertexHandle, b: FixedVertexHandle| {
-        if triangulation.can_add_constraint(a, b) && triangulation.add_constraint(a, b) {
-            if let Some(edge) = triangulation.get_edge_from_neighbors(a, b) {
-                roles.record(edge.as_undirected().fix(), ConstraintRole::SurfaceSampling);
-            }
+        for directed in triangulation.try_add_constraint(a, b) {
+            let handle = triangulation.directed_edge(directed).as_undirected().fix();
+            roles.record(handle, ConstraintRole::SurfaceSampling);
         }
     };
     let bdb: BoundingBox<Point2> = polyline
@@ -1937,9 +2263,34 @@ fn insert_surface(
         .into_iter()
         .map(|u| {
             vdiv.iter()
-                .map(|v| match polyline.include(Point2::new(u, *v)) {
-                    true => triangulation.insert(SPoint2::new(u, *v)).ok(),
-                    false => None,
+                // G7a. This call site asks "may I place an interior sampling
+                // vertex here", not "is this point material". Only `Inside`
+                // earns a vertex; the other three decline.
+                //
+                // Declining asserts nothing about material state — that is
+                // decided later by constraint roles and the dual labelling,
+                // never by this predicate — so skipping is the correct
+                // conservative answer to the question actually being asked, and
+                // refusing the whole face over a shape-control sample would
+                // discard geometry for no semantic gain.
+                //
+                // What was wrong before was not the skip but the silence: an
+                // aborted ray was folded into `false`, so a point the algorithm
+                // could not classify was indistinguishable from one it had
+                // classified as outside. Both residual populations are now
+                // counted, and separately, because "on the boundary" and "not
+                // established" are different facts.
+                .map(|v| match polyline.locate(Point2::new(u, *v)) {
+                    PointLocation::Inside => triangulation.insert(SPoint2::new(u, *v)).ok(),
+                    PointLocation::Outside => None,
+                    PointLocation::Boundary => {
+                        on_boundary += 1;
+                        None
+                    }
+                    PointLocation::Indeterminate => {
+                        location_unresolved += 1;
+                        None
+                    }
                 })
                 .collect()
         })
@@ -1960,6 +2311,7 @@ fn insert_surface(
             constrain(triangulation, x, y);
         }
     });
+    (on_boundary, location_unresolved)
 }
 
 /// Converts triangulation into `TessellationOutcome`.
@@ -1997,8 +2349,18 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
             // interior sampling constraint flipped material parity exactly as a
             // trim segment did. A constraint edge is now only a material
             // transition if its role says so.
-            let is_domain_boundary =
-                e.is_constraint_edge() && roles.toggles_material(e.as_undirected().fix());
+            let is_domain_boundary = if e.is_constraint_edge() {
+                // G5b: an edge with no resolvable role stops the face rather
+                // than being assigned a material meaning it does not have.
+                match roles.toggles_material(e.as_undirected().fix()) {
+                    Some(toggles) => toggles,
+                    None => return TessellationOutcome::Failed(
+                        TessellationFailureReason::ConstraintRoleMissing.into(),
+                    ),
+                }
+            } else {
+                false
+            };
             let next_parity = if is_domain_boundary {
                 current_parity ^ 1
             } else {
