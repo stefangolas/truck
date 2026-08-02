@@ -497,6 +497,29 @@ where
     }
 }
 
+/// Restate a 2D search hint in the *entity's* axis convention.
+///
+/// An inverted `Processor` evaluates `entity.subs(v, u)`, so every axis-indexed
+/// quantity crossing this boundary is transposed — `subs`, the partial
+/// derivatives, `parameter_range`, `u_period`/`v_period` and `normal` all do so.
+/// A hint travels in the opposite direction to a result: the caller supplies it
+/// in the caller's axes and the entity consumes it in the entity's, so it must
+/// be transposed on the way *in*, not on the way out.
+///
+/// Forwarding it untransposed steered the search along the wrong axis. The
+/// result was still transposed on return, so the defect stayed invisible
+/// wherever the hint was ignored or the surface was injective enough that any
+/// starting point converged — while degrading exactly the branch continuity
+/// that lifting a boundary across a periodic axis depends on.
+#[inline(always)]
+fn transpose_hint(hint: SPHint2D, upright: bool) -> SPHint2D {
+    match (upright, hint) {
+        (true, hint) | (false, hint @ SPHint2D::None) => hint,
+        (false, SPHint2D::Parameter(u, v)) => SPHint2D::Parameter(v, u),
+        (false, SPHint2D::Range(u, v)) => SPHint2D::Range(v, u),
+    }
+}
+
 impl<E, T> SearchParameter<D2> for Processor<E, T>
 where
     E: SearchParameter<D2>,
@@ -511,6 +534,7 @@ where
         trials: usize,
     ) -> Option<(f64, f64)> {
         let inv = self.transform.inverse_transform().unwrap();
+        let hint = transpose_hint(hint.into(), self.orientation);
         let (u, v) = self
             .entity
             .search_parameter(inv.transform_point(point), hint, trials)?;
@@ -559,6 +583,11 @@ where
         trials: usize,
     ) -> Option<(f64, f64)> {
         let inv = self.transform.inverse_transform().unwrap();
+        // As in `SearchParameter<D2>`: the incoming hint is in the caller's
+        // axes and the entity reads it in its own, so transpose on the way in.
+        // The result comes back in the entity's axes and is transposed below
+        // before it is used as a hint against `self`.
+        let hint = transpose_hint(hint.into(), self.orientation);
         let hint =
             self.entity
                 .search_nearest_parameter(inv.transform_point(point), hint, trials)?;
@@ -588,5 +617,94 @@ where
             u.invert();
         }
         u
+    }
+}
+
+#[cfg(test)]
+mod hint_axis_tests {
+    use super::*;
+    use std::f64::consts::PI;
+
+    /// A cylinder: `u` runs along the generatrix, `v` is the exact `2π`
+    /// revolution angle. Periodic in `v`, so a hint genuinely selects a branch.
+    fn cylinder() -> RevolutedCurve<Line<Point3>> {
+        RevolutedCurve::by_revolution(
+            Line(Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 0.0, 1.0)),
+            Point3::origin(),
+            Vector3::unit_z(),
+        )
+    }
+
+    fn swap((u, v): (f64, f64)) -> (f64, f64) { (v, u) }
+
+    /// The property that must hold, stated as a commuting square rather than as
+    /// hint-invariance.
+    ///
+    /// Invariance would be the *wrong* acceptance condition: on a periodic
+    /// surface a hint legitimately changes which local inverse is found, so a
+    /// test asserting that the answer is unaffected by the hint would pass only
+    /// where the hint is ignored — precisely the cases that cannot detect this
+    /// defect. What must hold instead is that going through the processor
+    /// agrees with transposing into the entity's axes, asking the entity, and
+    /// transposing back.
+    #[test]
+    fn inverted_processor_commutes_with_axis_transposition() {
+        let entity = cylinder();
+        let mut processor = Processor::<_, Matrix4>::new(cylinder());
+        processor.invert();
+        assert!(!processor.orientation(), "the processor must be inverted");
+
+        // A point on the cylinder, named in the entity's own axes, and a hint
+        // deliberately near a *different* period copy so the branch matters.
+        let point = entity.subs(0.4, 2.0);
+        for hint in [
+            (0.35, 2.1),
+            (0.35, 2.1 + 2.0 * PI),
+            (0.35, 2.1 - 2.0 * PI),
+        ] {
+            // The caller states the hint in the caller's axes.
+            let caller_hint = swap(hint);
+            let through_processor = processor.search_parameter(point, caller_hint, 100);
+            let through_entity = entity.search_parameter(point, hint, 100).map(swap);
+            assert_eq!(
+                through_processor, through_entity,
+                "processor and transposed-entity disagree for hint {caller_hint:?}",
+            );
+        }
+    }
+
+    /// The other half: an upright processor must forward the hint untouched.
+    #[test]
+    fn upright_processor_forwards_the_hint_unchanged() {
+        let entity = cylinder();
+        let processor = Processor::<_, Matrix4>::new(cylinder());
+        assert!(processor.orientation());
+
+        let point = entity.subs(0.4, 2.0);
+        for hint in [(0.35, 2.1), (0.35, 2.1 + 2.0 * PI)] {
+            assert_eq!(
+                processor.search_parameter(point, hint, 100),
+                entity.search_parameter(point, hint, 100),
+                "an upright processor must not transpose",
+            );
+        }
+    }
+
+    /// `None` transposes to `None`, and a range transposes as a pair.
+    #[test]
+    fn hint_transposition_covers_every_variant() {
+        assert_eq!(
+            transpose_hint(SPHint2D::Parameter(1.0, 2.0), false),
+            SPHint2D::Parameter(2.0, 1.0),
+        );
+        assert_eq!(
+            transpose_hint(SPHint2D::Range((0.0, 1.0), (2.0, 3.0)), false),
+            SPHint2D::Range((2.0, 3.0), (0.0, 1.0)),
+        );
+        assert_eq!(transpose_hint(SPHint2D::None, false), SPHint2D::None);
+        assert_eq!(
+            transpose_hint(SPHint2D::Parameter(1.0, 2.0), true),
+            SPHint2D::Parameter(1.0, 2.0),
+        );
     }
 }
