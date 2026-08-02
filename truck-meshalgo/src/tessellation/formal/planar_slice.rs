@@ -245,6 +245,31 @@ pub enum SliceExit {
     MeshTopologyInvalid,
     /// A geometric mesh predicate failed.
     MeshGeometryInvalid,
+
+    // -- multi-bound (planar holes) -------------------------------------
+    /// An edge use's identity repeats across the face's bounds.
+    DuplicateEdgeUseId,
+    /// A bound other than the authoritative outer one carries no edge-use
+    /// evidence, so it can be neither traversed nor proved absent.
+    DegenerateInnerBound,
+    /// Two distinct boundary components cross.
+    BoundaryComponentsCross,
+    /// Two distinct boundary components touch without crossing.
+    BoundaryComponentsTouch,
+    /// Two distinct boundary components share a positive-length overlap.
+    BoundaryComponentsOverlap,
+    /// A bound the source declared to be an inner one lies outside the
+    /// authoritative outer loop.
+    InnerBoundOutsideOuter,
+    /// One inner loop lies inside another. Nested holes are P2 work.
+    NestedHole,
+    /// The containment predicate could not decide where a loop lies.
+    ContainmentUndecided,
+    /// A retained triangle's edge crosses a boundary constraint.
+    TriangleCrossesBoundaryConstraint,
+    /// The retained complex does not have `h + 1` boundary cycles, or a cycle
+    /// does not correspond to a declared bound.
+    BoundaryCycleCountMismatch,
 }
 
 impl SliceExit {
@@ -265,7 +290,8 @@ impl SliceExit {
             | Self::IllConditionedPlaneBasis
             | Self::CurveBoundUnavailable
             | Self::IndividualCurveNotSimple
-            | Self::PolygonalizationCertificateUnavailable => SliceCategory::Unresolved,
+            | Self::PolygonalizationCertificateUnavailable
+            | Self::ContainmentUndecided => SliceCategory::Unresolved,
 
             // Proved facts about the face, outside the admitted subset.
             Self::NotRank0
@@ -279,7 +305,12 @@ impl SliceExit {
             | Self::NonadjacentTangency
             | Self::PositiveLengthOverlap
             | Self::NonadjacentRepeatedVertex
-            | Self::PolygonalApproximationSelfIntersects => SliceCategory::Unsupported,
+            | Self::PolygonalApproximationSelfIntersects
+            | Self::DegenerateInnerBound
+            | Self::BoundaryComponentsCross
+            | Self::BoundaryComponentsTouch
+            | Self::BoundaryComponentsOverlap
+            | Self::NestedHole => SliceCategory::Unsupported,
 
             // Proved contradictions in the source evidence.
             Self::MultipleOuterBoundsDeclared
@@ -288,7 +319,9 @@ impl SliceExit {
             | Self::CurveSurfaceInconsistency
             | Self::AdjacentEndpointMismatch
             | Self::NonzeroDeckDisplacementInRank0
-            | Self::NonzeroBoundaryHolonomy => SliceCategory::Inconsistent,
+            | Self::NonzeroBoundaryHolonomy
+            | Self::DuplicateEdgeUseId
+            | Self::InnerBoundOutsideOuter => SliceCategory::Inconsistent,
 
             // Statements about the machine or about this module.
             Self::ExecutionBudgetExhausted
@@ -296,7 +329,9 @@ impl SliceExit {
             | Self::TriangulationDidNotComplete
             | Self::MeshBoundaryMismatch
             | Self::MeshTopologyInvalid
-            | Self::MeshGeometryInvalid => SliceCategory::OperationalFailure,
+            | Self::MeshGeometryInvalid
+            | Self::TriangleCrossesBoundaryConstraint
+            | Self::BoundaryCycleCountMismatch => SliceCategory::OperationalFailure,
         }
     }
 
@@ -338,6 +373,16 @@ impl SliceExit {
             Self::MeshBoundaryMismatch => "mesh_boundary_mismatch",
             Self::MeshTopologyInvalid => "mesh_topology_invalid",
             Self::MeshGeometryInvalid => "mesh_geometry_invalid",
+            Self::DuplicateEdgeUseId => "duplicate_edge_use_id",
+            Self::DegenerateInnerBound => "degenerate_inner_bound",
+            Self::BoundaryComponentsCross => "boundary_components_cross",
+            Self::BoundaryComponentsTouch => "boundary_components_touch",
+            Self::BoundaryComponentsOverlap => "boundary_components_overlap",
+            Self::InnerBoundOutsideOuter => "inner_bound_outside_outer",
+            Self::NestedHole => "nested_hole",
+            Self::ContainmentUndecided => "containment_undecided",
+            Self::TriangleCrossesBoundaryConstraint => "triangle_crosses_boundary_constraint",
+            Self::BoundaryCycleCountMismatch => "boundary_cycle_count_mismatch",
         }
     }
 }
@@ -409,13 +454,28 @@ pub fn regular_traversal(
         OuterBoundStanding::Declared { .. } => return Err(SliceExit::MultipleOuterBoundsDeclared),
     };
 
-    // 2. Holes are P2 work, so the outer bound must be the only one. A
-    //    degenerate evidence term still counts: it may be a real collapsed
-    //    `VERTEX_LOOP`, which this slice does not model.
+    // 2. This slice is the hole-free one, so the outer bound must be the only
+    //    one. A degenerate evidence term still counts: it may be a real
+    //    collapsed `VERTEX_LOOP`, which this slice does not model. Faces with
+    //    inner bounds are the [`super::planar_holes`] population.
     if input.bounds.len() != 1 || outer_index != 0 {
         return Err(SliceExit::MultipleBoundsOrHoles);
     }
-    let bound = &input.bounds[0];
+    traverse_bound(&input.bounds[0], curves)
+}
+
+/// Steps 2's per-bound core: one closed regular traversal of *one* bound,
+/// whichever standing that bound has.
+///
+/// Split out of [`regular_traversal`] so the multi-bound path of
+/// [`super::planar_holes`] runs the identical logic on each of its loops rather
+/// than a re-derived copy of it. The authority question — which bound is the
+/// outer one, and whether inner ones are admitted — belongs to the caller and
+/// is deliberately absent here.
+pub(super) fn traverse_bound(
+    bound: &SourceBoundInput,
+    curves: &mut impl FnMut(usize) -> CurveSchema,
+) -> SliceResult<RegularClosedTraversal> {
     let SourceBoundInput::EdgeUses { id, edge_uses } = bound else {
         return Err(SliceExit::DegenerateTraversal);
     };
@@ -935,7 +995,7 @@ pub fn classify_segments(a0: Point2, a1: Point2, b0: Point2, b1: Point2) -> Segm
 /// Only ever called after an exact orientation test has established
 /// collinearity, so the box test is a containment decision and not a proximity
 /// one.
-fn on_segment(p: Point2, q: Point2, r: Point2) -> bool {
+pub(super) fn on_segment(p: Point2, q: Point2, r: Point2) -> bool {
     r.x >= p.x.min(q.x) && r.x <= p.x.max(q.x) && r.y >= p.y.min(q.y) && r.y <= p.y.max(q.y)
 }
 
@@ -974,13 +1034,25 @@ pub struct SimpleJordanArrangement {
 pub fn simple_jordan_arrangement(
     developed: &Rank0DevelopedBoundary,
 ) -> SliceResult<SimpleJordanArrangement> {
+    jordan_arrangement_of(&developed.occurrences)
+}
+
+/// Step 7's per-loop core, over one loop's ordered occurrences.
+///
+/// Split out of [`simple_jordan_arrangement`] so [`super::planar_holes`]
+/// certifies each of its loops with the identical predicates. It establishes
+/// only that *this* loop is a simple closed Jordan curve; nothing about how it
+/// relates to any other loop, which is the multi-bound caller's obligation.
+pub(super) fn jordan_arrangement_of(
+    occurrences: &[CertifiedPlanarCurveOccurrence],
+) -> SliceResult<SimpleJordanArrangement> {
     // Flatten to the segment cycle. Each occurrence contributes its own
     // vertices; the shared endpoints are already bit-identical, so the last
     // point of one occurrence is dropped in favour of the next occurrence's
     // first, which is the same value.
     let mut cycle: Vec<Point2> = Vec::new();
     let mut segment_origin: Vec<EdgeUseId> = Vec::new();
-    for occurrence in &developed.occurrences {
+    for occurrence in occurrences {
         for (index, point) in occurrence.points.iter().enumerate() {
             if index + 1 == occurrence.points.len() {
                 break;
@@ -1053,7 +1125,7 @@ pub fn simple_jordan_arrangement(
 }
 
 /// Whether two segments meet transversally, by exact orientation.
-fn transversal(a0: Point2, a1: Point2, b0: Point2, b1: Point2) -> bool {
+pub(super) fn transversal(a0: Point2, a1: Point2, b0: Point2, b1: Point2) -> bool {
     let d = |p: Point2, q: Point2, r: Point2| {
         robust::orient2d(
             robust::Coord { x: p.x, y: p.y },

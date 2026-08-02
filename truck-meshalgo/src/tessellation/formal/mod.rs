@@ -58,6 +58,7 @@ pub mod envelope;
 pub mod evidence;
 pub mod numeric;
 pub mod outcome;
+pub mod planar_holes;
 pub mod planar_slice;
 pub mod support;
 
@@ -93,6 +94,11 @@ pub use outcome::{
     Inconsistency, InconsistencyReport, OperationalFailure, RealizationOutcome, SemanticOutcome,
     ShellKey, StageEvaluation, StageOutcome, UnresolvedReason, UnresolvedReport, UnsupportedCause,
     UnsupportedReport, ValidSemantic,
+};
+pub use planar_holes::{
+    run_planar_holes_slice, BoundRole, BoundaryComponentMap, BoundaryLoop, ComponentRelation,
+    HoleFinalValidityReport, HoleSliceRecord, MultiBoundEntry, PlanarMultiBoundInput,
+    PlanarRegionWithHolesCertificate,
 };
 pub use planar_slice::{
     run_planar_slice, CertificateRoute, FinalValidityReport, PlanarMesh, SliceCategory, SliceExit,

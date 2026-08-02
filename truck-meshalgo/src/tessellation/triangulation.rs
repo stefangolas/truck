@@ -265,6 +265,12 @@ where
     // off by default, so production output is unchanged by construction.
     let slice_probe = std::env::var_os("TRUCK_PROBE_SLICE").is_some();
     let recovery_gate = std::env::var_os("TRUCK_FORMAL_RECOVERY").is_some();
+    // The planar-holes expansion carries its own gate on top of the first, so
+    // "rank-0 one-bound recovery" and "rank-0 one-bound + holes recovery" are
+    // separately measurable runs rather than one conflated population. Opening
+    // the holes gate without the base gate does nothing.
+    let holes_recovery_gate = recovery_gate
+        && std::env::var_os("TRUCK_FORMAL_RECOVERY_HOLES").is_some();
     let run_slice = slice_probe || recovery_gate;
     // A per-run shell ordinal, so a `FaceKey` is unique across shells:
     // `declared_face_index` is an index *within* a shell and collides between
@@ -493,7 +499,7 @@ where
         let (polygon, failure) = if !run_slice {
             (polygon, failure)
         } else {
-            let record = run_slice_for_face(
+            let outcome = run_slice_for_face(
                 declared_face_index,
                 source_face_id,
                 shell_ordinal,
@@ -505,48 +511,90 @@ where
                 &curve_schema_of,
                 tol,
             );
+            let slice_record = outcome.as_ref().map(|outcome| outcome.planar.clone());
+            let holes_record = outcome.as_ref().map(|outcome| outcome.holes.clone());
             if slice_probe {
-                emit_slice_probe(source_face_id, declared_face_index, shell_ordinal, &record);
+                emit_slice_probe(
+                    source_face_id,
+                    declared_face_index,
+                    shell_ordinal,
+                    &slice_record,
+                );
+                emit_holes_probe(
+                    source_face_id,
+                    declared_face_index,
+                    shell_ordinal,
+                    &holes_record,
+                );
             }
-            // The recovery gate. Every conjunct is explicit and the whole
-            // thing is one `if`: a validated formal mesh replaces a face the
-            // legacy path *lost*, and never a face it meshed.
+            // The recovery gate. Every conjunct is explicit: a validated formal
+            // mesh replaces a face the legacy path *lost*, and never a face it
+            // meshed.
+            //
+            // The hole-free slice is consulted first, so opening the holes gate
+            // cannot move a face that the original rank-0 path already
+            // recovered — those recoveries stay bit-identical. The two
+            // populations are disjoint anyway (one slice delegates wherever the
+            // other applies), and the ordering makes that independent of the
+            // delegation logic rather than reliant on it.
             let legacy_failed = failure.is_some();
-            match (recovery_gate, legacy_failed, record.as_ref()) {
-                (true, true, Some(record))
-                    if record.stage == formal::SliceStage::FinalValidity
-                        && record.category == formal::SliceCategory::Resolved =>
-                {
-                    match record.mesh.as_ref() {
-                        Some(formal_mesh) => {
-                            eprintln!(
-                                "RECOVERED\tsource_face_id={}\t\
-                                 declared_face_index={declared_face_index}\ttriangles={}",
-                                source_face_id
-                                    .map(|id| id.to_string())
-                                    .unwrap_or_else(|| "none".into()),
-                                formal_mesh.triangles.len(),
-                            );
-                            // The recovered geometry, so a corpus face can
-                            // become a regression fixture without shipping the
-                            // 400 MB model it came from.
-                            for position in &formal_mesh.positions {
-                                eprintln!(
-                                    "RECOVERED_VERTEX	source_face_id={}	x={:?}	y={:?}	z={:?}",
-                                    source_face_id
-                                        .map(|id| id.to_string())
-                                        .unwrap_or_else(|| "none".into()),
-                                    position.x,
-                                    position.y,
-                                    position.z,
-                                );
-                            }
-                            (Some(planar_mesh_to_polygon(formal_mesh)), None)
-                        }
-                        None => (polygon, failure),
-                    }
+            let resolved_mesh = match legacy_failed {
+                false => None,
+                true => {
+                    let planar = slice_record.as_ref().filter(|_| recovery_gate).and_then(
+                        |record| match record.stage == formal::SliceStage::FinalValidity
+                            && record.category == formal::SliceCategory::Resolved
+                        {
+                            true => record.mesh.as_ref().map(|mesh| ("rank0_one_bound", mesh)),
+                            false => None,
+                        },
+                    );
+                    let holes = || {
+                        holes_record
+                            .as_ref()
+                            .filter(|_| holes_recovery_gate)
+                            .and_then(|record| {
+                                match !record.delegated
+                                    && record.stage == formal::SliceStage::FinalValidity
+                                    && record.category == formal::SliceCategory::Resolved
+                                {
+                                    true => {
+                                        record.mesh.as_ref().map(|mesh| ("rank0_holes", mesh))
+                                    }
+                                    false => None,
+                                }
+                            })
+                    };
+                    planar.or_else(holes)
                 }
-                _ => (polygon, failure),
+            };
+            match resolved_mesh {
+                Some((path, formal_mesh)) => {
+                    eprintln!(
+                        "RECOVERED\tsource_face_id={}\t\
+                         declared_face_index={declared_face_index}\ttriangles={}\tpath={path}",
+                        source_face_id
+                            .map(|id| id.to_string())
+                            .unwrap_or_else(|| "none".into()),
+                        formal_mesh.triangles.len(),
+                    );
+                    // The recovered geometry, so a corpus face can become a
+                    // regression fixture without shipping the 400 MB model it
+                    // came from.
+                    for position in &formal_mesh.positions {
+                        eprintln!(
+                            "RECOVERED_VERTEX	source_face_id={}	x={:?}	y={:?}	z={:?}",
+                            source_face_id
+                                .map(|id| id.to_string())
+                                .unwrap_or_else(|| "none".into()),
+                            position.x,
+                            position.y,
+                            position.z,
+                        );
+                    }
+                    (Some(planar_mesh_to_polygon(formal_mesh)), None)
+                }
+                None => (polygon, failure),
             }
         };
         let result = CompressedFace {
@@ -854,7 +902,7 @@ fn run_slice_for_face<S, C>(
     schema: &formal::SupportSurfaceSchema,
     curve_schema_of: &impl Fn(&C) -> formal::CurveSchema,
     tol: f64,
-) -> Option<formal::SliceRecord> {
+) -> Option<FormalSliceOutcome> {
     // Step 1. The same call the ambient probe makes, on the same evidence.
     let plane = schema.plane()?;
     let evidence = formal::ambient_evidence_from_schema(
@@ -879,25 +927,56 @@ fn run_slice_for_face<S, C>(
     let input =
         source_face_input_from_compressed(declared_face_index, source_face_id, face, edges).ok()?;
 
-    Some(formal::run_planar_slice(
+    let mut curve_of = |edge_index: usize| match edges.get(edge_index) {
+        Some(edge) => curve_schema_of(&edge.curve),
+        None => formal::CurveSchema::not_structurally_identified(
+            formal::CurveSchemaFailure::NoStructuralReader {
+                representation: "edge_index_out_of_range",
+            },
+        ),
+    };
+    let vertex_position = |vertex| match vertex {
+        SourceVertexKey::ShellVertex(index) => vertices.get(index).copied(),
+        _ => None,
+    };
+
+    // Both paths run on the same evidence. The hole-free slice is unchanged and
+    // still reports `multiple_bounds_or_holes` for a multi-bound face, so its
+    // funnel stays comparable with the frozen baseline; the holes slice
+    // delegates on a single-bound face rather than answering for a population
+    // the other module owns.
+    let planar = formal::run_planar_slice(
         &input,
         plane,
         &certified,
         face.provenance.outer_bound,
-        &mut |edge_index| match edges.get(edge_index) {
-            Some(edge) => curve_schema_of(&edge.curve),
-            None => formal::CurveSchema::not_structurally_identified(
-                formal::CurveSchemaFailure::NoStructuralReader {
-                    representation: "edge_index_out_of_range",
-                },
-            ),
-        },
-        &|vertex| match vertex {
-            SourceVertexKey::ShellVertex(index) => vertices.get(index).copied(),
-            _ => None,
-        },
+        &mut curve_of,
+        &vertex_position,
         tol,
-    ))
+    );
+    let holes = formal::run_planar_holes_slice(
+        &input,
+        plane,
+        &certified,
+        face.provenance.outer_bound,
+        &mut curve_of,
+        &vertex_position,
+        tol,
+    );
+    Some(FormalSliceOutcome { planar, holes })
+}
+
+/// Both rank-0 formal paths' verdicts on one face.
+///
+/// They are kept apart rather than merged into one record: each names the
+/// population it is answerable for, and a face that delegates carries no
+/// verdict from the module that declined it.
+struct FormalSliceOutcome {
+    /// The hole-free slice's record. Always present.
+    planar: formal::SliceRecord,
+    /// The planar-holes slice's record. `delegated` when the face has no inner
+    /// bounds.
+    holes: formal::HoleSliceRecord,
 }
 
 /// Turn a validated planar mesh into the polygon mesh the shell holds.
@@ -935,6 +1014,63 @@ fn planar_mesh_to_polygon(mesh: &formal::PlanarMesh) -> PolygonMesh {
 ///
 /// Emitted from inside a parallel tessellation, so consumers must parse
 /// order-independently and key on `source_face_id` / `declared_face_index`.
+/// One tab-separated record per multi-bound candidate face, for the
+/// planar-holes funnel.
+///
+/// A face that delegated — no inner bounds — is not reported: it belongs to the
+/// `SLICE` funnel, and emitting it here would double-count it.
+fn emit_holes_probe(
+    source_face_id: Option<u64>,
+    declared_face_index: usize,
+    shell_ordinal: u64,
+    record: &Option<formal::HoleSliceRecord>,
+) {
+    let Some(record) = record else { return };
+    if record.delegated {
+        return;
+    }
+    let id = source_face_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let join = |counts: &[usize]| match counts.is_empty() {
+        true => "none".to_string(),
+        false => counts
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(","),
+    };
+    let curves = match record.curve_representations.is_empty() {
+        true => "none".to_string(),
+        false => record.curve_representations.join(","),
+    };
+    let exit = record.exit.map_or("none", formal::SliceExit::tag);
+    let (triangles, cycles, euler) = match record.validity {
+        Some(validity) => (
+            validity.triangles.to_string(),
+            validity.boundary_cycles.to_string(),
+            validity.euler_characteristic.to_string(),
+        ),
+        None => ("none".into(), "none".into(), "none".into()),
+    };
+    eprintln!(
+        "HOLES\tsource_face_id={id}\tdeclared_face_index={declared_face_index}\t\
+         shell_ordinal={shell_ordinal}\tstage={}\tcategory={}\texit={exit}\t\
+         bounds={}\tinner_bounds={}\tedge_uses_per_bound={}\t\
+         polygon_vertices_per_bound={}\tcurves={curves}\ttriangles={triangles}\t\
+         boundary_cycles={cycles}\teuler={euler}\tobstruction_bound={}",
+        record.stage.tag(),
+        record.category.tag(),
+        record.bound_count,
+        record.inner_bound_count,
+        join(&record.edge_uses_per_bound),
+        join(&record.polygon_vertices_per_bound),
+        record
+            .obstruction_bound
+            .map_or("none", formal::BoundRole::tag),
+    );
+}
+
 fn emit_slice_probe(
     source_face_id: Option<u64>,
     declared_face_index: usize,
