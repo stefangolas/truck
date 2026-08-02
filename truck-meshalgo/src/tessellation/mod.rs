@@ -1,5 +1,5 @@
 use crate::*;
-use spade::{iterators::*, *};
+use spade::*;
 use truck_topology::{compress::*, *};
 
 #[cfg(not(target_arch = "wasm32"))]

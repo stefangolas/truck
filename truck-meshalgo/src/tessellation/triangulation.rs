@@ -1,10 +1,14 @@
 #![allow(clippy::many_single_char_names)]
+// PR 4A.1 adds sidecar diagnostic types and outcome entry points that are not
+// yet consumed by callers. Silence their dead-code until the census examples
+// wire them up; remove this `allow` when the diagnostic API is finalized.
+#![allow(dead_code, unused)]
 
 use super::*;
 use crate::filters::NormalFilters;
 use crate::Point2;
 use array_macro::array;
-use handles::FixedVertexHandle;
+use handles::{FixedUndirectedEdgeHandle, FixedVertexHandle};
 use itertools::Itertools;
 use rustc_hash::FxHashMap as HashMap;
 
@@ -13,6 +17,13 @@ use rayon::prelude::*;
 
 type SPoint2 = spade::Point2<f64>;
 type Cdt = ConstrainedDelaunayTriangulation<SPoint2>;
+std::thread_local! {
+    /// Optional document-local source face id, declared face index, and
+    /// parameter-space periodic rank for probes.
+    static PROBE_FACE_CONTEXT: std::cell::Cell<(Option<u64>, usize, u8)> =
+        const { std::cell::Cell::new((None, usize::MAX, 0)) };
+}
+
 type MeshedShell = Shell<Point3, PolylineCurve, Option<PolygonMesh>>;
 type MeshedCShell = CompressedShell<Point3, PolylineCurve, Option<PolygonMesh>>;
 
@@ -309,7 +320,14 @@ where
             );
         }
     }
-    let tessellate_face = |face: &CompressedFace<S>| {
+    let tessellate_face = |(declared_face_index, face): (usize, &CompressedFace<S>)| {
+        let source_face_id = face.provenance.best_id().map(SourceEntityId::get);
+        let periodic_rank = u8::from(face.surface.u_period().is_some())
+            + u8::from(face.surface.v_period().is_some());
+        PROBE_FACE_CONTEXT.with(|context| {
+            context.set((source_face_id, declared_face_index, periodic_rank));
+        });
+
         let boundaries = face.boundaries.clone();
         let surface = &face.surface;
         let create_edge = |edge_idx: &CompressedEdgeIndex| match edge_idx.orientation {
@@ -325,7 +343,7 @@ where
             let boundary = PolyBoundary::new(preboundary, &surface, tol);
             trimming_tessellation(&surface, &boundary, tol)
         });
-        CompressedFace {
+        let result = CompressedFace {
             boundaries,
             orientation: face.orientation,
             surface: polygon,
@@ -334,12 +352,19 @@ where
             // `polygon` is `None` on failure, and the identity is then the only
             // thing left that can name what was lost.
             provenance: face.provenance,
-        }
+        };
+        PROBE_FACE_CONTEXT.with(|context| context.set((None, usize::MAX, 0)));
+        result
     };
     #[cfg(not(target_arch = "wasm32"))]
-    let faces = shell.faces.par_iter().map(tessellate_face).collect();
+    let faces = shell
+        .faces
+        .par_iter()
+        .enumerate()
+        .map(tessellate_face)
+        .collect();
     #[cfg(target_arch = "wasm32")]
-    let faces = shell.faces.iter().map(tessellate_face).collect();
+    let faces = shell.faces.iter().enumerate().map(tessellate_face).collect();
     MeshedCShell {
         vertices,
         edges,
@@ -383,6 +408,51 @@ pub(in crate::tessellation) struct SurfacePoint {
 impl From<(Point2, Point3)> for SurfacePoint {
     fn from((uv, point): (Point2, Point3)) -> Self {
         Self { point, uv }
+    }
+}
+
+
+/// Reconciles a UV step entering or leaving a detected collapsed direction.
+///
+/// A small derivative only proposes a chart substitution. The candidate UV
+/// must also evaluate back to the associated 3D point within model tolerance.
+/// An outgoing bridge retains the previous singular 3D point; only its UV
+/// representative changes to connect the two chart branches.
+fn reconcile_singular_transition<S: ParametricSurface3D>(
+    surface: &S,
+    previous_uv: Point2,
+    previous_point: Point3,
+    current_uv: &mut Point2,
+    current_point: Point3,
+    tolerance: f64,
+    output: &mut Vec<SurfacePoint>,
+) {
+    let represents = |uv: Point2, point: Point3| {
+        surface.subs(uv.x, uv.y).distance(point) <= tolerance
+    };
+    if !previous_uv.x.near(&current_uv.x) && surface.uder(current_uv.x, current_uv.y).so_small() {
+        let candidate = Point2::new(previous_uv.x, current_uv.y);
+        if represents(candidate, current_point) {
+            current_uv.x = previous_uv.x;
+        }
+    }
+    if !previous_uv.y.near(&current_uv.y) && surface.vder(current_uv.x, current_uv.y).so_small() {
+        let candidate = Point2::new(current_uv.x, previous_uv.y);
+        if represents(candidate, current_point) {
+            current_uv.y = previous_uv.y;
+        }
+    }
+    if !previous_uv.x.near(&current_uv.x) && surface.uder(previous_uv.x, previous_uv.y).so_small() {
+        let candidate = Point2::new(current_uv.x, previous_uv.y);
+        if represents(candidate, previous_point) {
+            output.push((candidate, previous_point).into());
+        }
+    }
+    if !previous_uv.y.near(&current_uv.y) && surface.vder(previous_uv.x, previous_uv.y).so_small() {
+        let candidate = Point2::new(previous_uv.x, current_uv.y);
+        if represents(candidate, previous_point) {
+            output.push((candidate, previous_point).into());
+        }
     }
 }
 
@@ -534,13 +604,6 @@ impl PolyBoundaryPiece {
                         pending.push((pt, synthetic));
                         pending.push((previous_point.midpoint(pt), true));
                         continue;
-                    }
-                }
-                if let Some((u0, v0)) = previous {
-                    if !u0.near(&u) && surface.uder(u0, v0).so_small() {
-                        vec.push((Point2::new(u, v0), pt).into());
-                    } else if !v0.near(&v) && surface.vder(u0, v0).so_small() {
-                        vec.push((Point2::new(u0, v), pt).into());
                     }
                 }
                 vec.push((Point2::new(u, v), pt).into());
@@ -844,6 +907,34 @@ const AMBIGUOUS_STEP_FRACTION: f64 = 0.45;
 /// How many times a single step may be halved before refinement gives up.
 const MAX_LIFT_REFINEMENTS: usize = 8;
 
+/// Result of boundary loop closure evaluation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BoundaryClosure {
+    /// Endpoints are within Euclidean UV tolerance.
+    EuclideanClosed,
+    /// Endpoints close modulo parameter period.
+    PeriodicClosed {
+        /// Integer winding displacement along [u, v].
+        displacement: [i64; 2],
+    },
+    /// Boundary loop is un-closed (open).
+    Open,
+}
+
+/// Evaluates periodic displacement winding modulo period if residual <= tolerance.
+fn periodic_displacement(start: f64, end: f64, period: f64, tolerance: f64) -> Option<i64> {
+    if period <= 1e-6 {
+        return None;
+    }
+    let winding = ((end - start) / period).round() as i64;
+    let residual = (end - start) - winding as f64 * period;
+    if residual.abs() <= tolerance {
+        Some(winding)
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 struct PolyBoundary(Vec<Vec<SurfacePoint>>);
 
@@ -945,6 +1036,7 @@ fn working_range(
 impl PolyBoundary {
     fn new(pieces: Vec<PolyBoundaryPiece>, surface: &impl PreMeshableSurface, tol: f64) -> Self {
         let probe = std::env::var_os("TRUCK_PROBE_BOUNDARY").is_some();
+        let had_source_pieces = !pieces.is_empty();
         // EXPERIMENT (TRUCK_FACE_DOMAIN): take the working rectangle from the
         // face's own bounds rather than from the supporting primitive's
         // declared range. Default off until swept.
@@ -957,43 +1049,67 @@ impl PolyBoundary {
         let v_period = surface.v_period();
         pieces.into_iter().for_each(|PolyBoundaryPiece(mut vec)| {
             let p0 = vec[0].uv;
-            let mut p1 = vec[vec.len() - 1].uv;
-            if let Some(up) = u_period {
-                if up > 1e-6 {
-                    let ku = ((p1.x - p0.x) / up).round();
-                    p1.x -= ku * up;
+            let p1 = vec[vec.len() - 1].uv;
+
+            let closure = if p0.distance(p1) < 1.0e-3 {
+                BoundaryClosure::EuclideanClosed
+            } else {
+                let ku = u_period
+                    .and_then(|up| periodic_displacement(p0.x, p1.x, up, 1e-3))
+                    .unwrap_or(0);
+                let kv = v_period
+                    .and_then(|vp| periodic_displacement(p0.y, p1.y, vp, 1e-3))
+                    .unwrap_or(0);
+                if (ku != 0 || kv != 0) && vec[0].point.distance(vec[vec.len() - 1].point) < 1e-3 {
+                    BoundaryClosure::PeriodicClosed {
+                        displacement: [ku, kv],
+                    }
+                } else {
+                    BoundaryClosure::Open
                 }
-            }
-            if let Some(vp) = v_period {
-                if vp > 1e-6 {
-                    let kv = ((p1.y - p0.y) / vp).round();
-                    p1.y -= kv * vp;
-                }
-            }
-            let gap = p0.distance(p1);
+            };
+
             if probe {
-                // What the closure test is actually deciding, and against what.
-                // `gap` is compared to a fixed constant while `perimeter` is the
-                // only intrinsic length available, so their ratio is the
-                // scale-invariant form of the same question.
                 let perimeter: f64 = vec
                     .windows(2)
                     .map(|w| w[0].uv.distance(w[1].uv))
                     .sum::<f64>();
                 eprintln!(
-                    "PROBE piece pts={} gap={gap:.6e} perimeter={perimeter:.6e} \
-                     gap/perimeter={:.6e} closed={}",
+                    "PROBE piece pts={} gap={:.6e} perimeter={perimeter:.6e} \
+                     closure={:?}",
                     vec.len(),
-                    gap / perimeter,
-                    gap < 1.0e-3,
+                    p0.distance(p1),
+                    closure,
                 );
             }
-            match gap < 1.0e-3 {
-                true => {
+
+            match closure {
+                BoundaryClosure::EuclideanClosed => {
                     vec.pop();
-                    closed.push(vec)
+                    closed.push(vec);
                 }
-                false => open.push(vec),
+                BoundaryClosure::PeriodicClosed {
+                    displacement: [ku, kv],
+                } => {
+                    if let Some(up) = u_period {
+                        if ku != 0 {
+                            for p in &mut vec {
+                                p.uv.x -= (ku as f64) * up;
+                            }
+                            vec.last_mut().unwrap().uv.x = vec[0].uv.x + (ku as f64) * up;
+                        }
+                    }
+                    if let Some(vp) = v_period {
+                        if kv != 0 {
+                            for p in &mut vec {
+                                p.uv.y -= (kv as f64) * vp;
+                            }
+                            vec.last_mut().unwrap().uv.y = vec[0].uv.y + (kv as f64) * vp;
+                        }
+                    }
+                    closed.push(vec);
+                }
+                BoundaryClosure::Open => open.push(vec),
             }
         });
         if closed.len() == 2 && (surface.u_period().is_some() || surface.v_period().is_some()) {
@@ -1030,17 +1146,48 @@ impl PolyBoundary {
         } else if let Some(pair) =
             CollapsedPeriodicBoundaryPair::try_classify(surface, &closed, &open, range)
         {
-            let loop0 = closed.remove(0);
-            let loop1: Vec<SurfacePoint> = loop0
+            let mut loop0 = closed.remove(0);
+            if loop0.len() > 1 && loop0[0].uv.distance(loop0.last().unwrap().uv) < 1e-3 {
+                loop0.pop();
+            }
+            let is_v = surface.v_period().is_some_and(|p| p > 1e-6);
+            let period = if is_v {
+                surface.v_period().unwrap()
+            } else {
+                surface.u_period().unwrap()
+            };
+
+            let mut loop0_full = loop0.clone();
+            let mut last_p = *loop0.last().unwrap();
+            if is_v {
+                last_p.uv.y = loop0[0].uv.y + period;
+            } else {
+                last_p.uv.x = loop0[0].uv.x + period;
+            }
+            loop0_full.push(last_p);
+
+            let loop1_full: Vec<SurfacePoint> = loop0_full
                 .iter()
                 .map(|p| {
-                    let uv = Point2::new(pair.apex_u, p.uv.y);
+                    let uv = if is_v {
+                        Point2::new(pair.apex_u, p.uv.y)
+                    } else {
+                        Point2::new(p.uv.x, pair.apex_u)
+                    };
                     (uv, surface.subs(uv.x, uv.y)).into()
                 })
                 .collect();
-            let mut merged = Vec::new();
-            merged.extend(loop0.into_iter());
-            merged.extend(loop1.into_iter().rev());
+
+            let end_loop0 = *loop0_full.last().unwrap();
+            let loop1_rev: Vec<SurfacePoint> = loop1_full.into_iter().rev().collect();
+            let start_loop1 = loop1_rev[0];
+            let end_loop1 = *loop1_rev.last().unwrap();
+            let start_loop0 = loop0_full[0];
+
+            let seam_down = polyline_on_surface(surface, end_loop0, start_loop1, tol);
+            let seam_up = polyline_on_surface(surface, end_loop1, start_loop0, tol);
+
+            let merged = connect_edges([loop0_full, seam_down, loop1_rev, seam_up]);
             closed.push(merged);
         }
         let (n_closed_in, n_open_in) = (closed.len(), open.len());
@@ -1144,23 +1291,7 @@ impl PolyBoundary {
             );
         }
         // Only a face with no enclosing loop takes its domain from the surface.
-        //
-        // This used to fire whenever no closed loop had positive signed area,
-        // which is not a property of the face. Under an orientation-reversing
-        // reparameterization `phi(u, v) = (u, -v)` the signed area negates,
-        // `A(phi . gamma) = -A(gamma)`, while the region the face occupies in
-        // space is unchanged. Appending the rectangle to a face that was
-        // already enclosed left two nested loops in one pool, and the face
-        // meshed its own complement, `R \ interior(gamma)`.
-        //
-        // Emptiness is the right test because it is invariant, and because the
-        // split above has already done the work: a loop wrapping a periodic
-        // direction does not return to its starting `uv`, so it fails the
-        // closure test and is stitched as an open piece instead. Anything
-        // reaching `closed` is contractible and does enclose a region. If
-        // nothing does, the domain really is the surface's own range — a full
-        // cylinder or torus whose only boundary is its seam.
-        if closed.is_empty() {
+        if closed.is_empty() && !had_source_pieces {
             if let (Some((u0, u1)), Some((v0, v1))) = range {
                 let p = [
                     (Point2::new(u0, v0), surface.subs(u0, v0)).into(),
@@ -1179,20 +1310,6 @@ impl PolyBoundary {
     }
 
     /// whether `c` is included in the domain with boundary = `self`.
-    ///
-    /// Crossing parity, not signed winding. The boundary loops arrive with
-    /// whatever traversal sense the file and the chart gave them, and that
-    /// sense is not recoverable from the geometry: reversing the chart negates
-    /// every signed area while the region occupied in space is unchanged.
-    /// Counting crossings without regard to direction is invariant under that
-    /// reversal, and for the non-crossing loops a well-formed face provides it
-    /// agrees with containment depth — a point is inside iff an odd number of
-    /// loops enclose it, which is what "outer, minus holes, plus islands"
-    /// means.
-    ///
-    /// Direction was previously used to accumulate a winding number kept when
-    /// strictly positive, which required every loop to be coherently oriented
-    /// and silently produced the complement of the face when they were not.
     fn include(&self, c: Point2) -> bool {
         let t = 2.0 * std::f64::consts::PI * HashGen::hash1(c);
         let r = Vector2::new(f64::cos(t), f64::sin(t));
@@ -1218,54 +1335,234 @@ impl PolyBoundary {
             .unwrap_or(false)
     }
 
-    /// Inserts points and adds constraint into triangulation.
+    /// Inserts points and adds constraint
     fn insert_to(
         &self,
         triangulation: &mut Cdt,
         boundary_map: &mut HashMap<FixedVertexHandle, Point3>,
-    ) {
-        let poly2tri: Vec<_> = self
-            .0
-            .iter()
-            .flatten()
-            .map(|pt| {
-                let p = [spade_round(pt.x), spade_round(pt.y)];
-                match triangulation.insert(SPoint2::from(p)) {
-                    Err(_) => None,
-                    Ok(idx) => {
+    ) -> bool {
+        let mut success = true;
+        let probe = std::env::var_os("TRUCK_PROBE_FAIL").is_some();
+        let probe_face_id = if probe {
+            std::env::var("TRUCK_PROBE_FACE_ID")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+        } else {
+            None
+        };
+        if let Some(target) = probe_face_id {
+            let (source_face_id, declared_face_index, periodic_rank) =
+                PROBE_FACE_CONTEXT.with(std::cell::Cell::get);
+            if source_face_id == Some(target) {
+                for (piece_index, piece) in self.0.iter().enumerate() {
+                    for (point_index, point) in piece.iter().enumerate() {
+                        eprintln!(
+                            "WL\tsource_face_id={target}\tdeclared_face_index={declared_face_index}\t\
+                             periodic_rank={periodic_rank}\tpost_stitch_piece={piece_index}\t\
+                             point_index={point_index}\tuv={:.17e},{:.17e}",
+                            point.uv.x, point.uv.y,
+                        );
+                    }
+                }
+            }
+        }
+        let mut probe_point_fail = 0usize;
+        let mut probe_degenerate = 0usize;
+        let mut probe_already_direct = 0usize;
+        let mut probe_refused_with_conflicts = 0usize;
+        let mut probe_refused_without_conflicts = 0usize;
+        let mut probe_conflicting_edges = 0usize;
+        let mut probe_add_returned_false = 0usize;
+        // These are post-stitch loop/segment proxies, not source-edge
+        // provenance. Keep all direct contributors because duplicates exist.
+        let mut installed_origins = probe.then(
+            HashMap::<FixedUndirectedEdgeHandle, Vec<(usize, usize)>>::default,
+        );
+        let mut first_conflict = None;
+        for (piece_index, piece) in self.0.iter().enumerate() {
+            let poly2tri: Vec<Option<FixedVertexHandle>> = piece
+                .iter()
+                .map(|pt| {
+                    let sp = SPoint2::new(spade_round(pt.uv.x), spade_round(pt.uv.y));
+                    if let Some(idx) = triangulation
+                        .vertices()
+                        .find(|v| sp.distance_2(*v.as_ref()) < 1e-12)
+                        .map(|v| v.fix())
+                    {
                         boundary_map.insert(idx, pt.point);
                         Some(idx)
+                    } else {
+                        match triangulation.insert(sp) {
+                            Ok(idx) => {
+                                boundary_map.insert(idx, pt.point);
+                                Some(idx)
+                            }
+                            Err(_) => None,
+                        }
                     }
+                })
+                .collect();
+
+            if poly2tri.iter().any(|v| v.is_none()) {
+                probe_point_fail += 1;
+                success = false;
+                continue;
+            }
+            let len = poly2tri.len();
+            if len < 3 {
+                continue;
+            }
+            for k in 0..len {
+                let i = k;
+                let j = (k + 1) % len;
+                let vi = poly2tri[i].unwrap();
+                let vj = poly2tri[j].unwrap();
+                if vi == vj {
+                    probe_degenerate += 1;
+                    continue;
                 }
-            })
-            .collect();
-        let mut prev: Option<usize> = None;
-        let mut counter = 0;
-        self.0
-            .iter()
-            .map(Vec::len)
-            .flat_map(|len| {
-                let range = counter..counter + len;
-                counter += len;
-                range.circular_tuple_windows()
-            })
-            .for_each(|(i, j)| {
-                let Some(vj) = poly2tri[j] else { return };
-                if let Some(p) = prev {
-                    let Some(v) = poly2tri[p] else { return };
-                    if triangulation.can_add_constraint(v, vj) {
-                        triangulation.add_constraint(v, vj);
-                        prev = None;
+                let is_already_constraint = triangulation
+                    .get_edge_from_neighbors(vi, vj)
+                    .map(|e| e.is_constraint_edge())
+                    .unwrap_or(false);
+                let can_add = !is_already_constraint && triangulation.can_add_constraint(vi, vj);
+                if can_add {
+                    if triangulation.add_constraint(vi, vj) {
+                        if let (Some(installed_origins), Some(edge)) = (
+                            installed_origins.as_mut(),
+                            triangulation.get_edge_from_neighbors(vi, vj),
+                        ) {
+                            installed_origins
+                                .entry(edge.as_undirected().fix())
+                                .or_default()
+                                .push((piece_index, k));
+                        }
+                    } else {
+                        probe_add_returned_false += 1;
                     }
                 } else {
-                    let Some(vi) = poly2tri[i] else { return };
-                    if triangulation.can_add_constraint(vi, vj) {
-                        triangulation.add_constraint(vi, vj);
-                    } else {
-                        prev = Some(i);
+                    if is_already_constraint {
+                        probe_already_direct += 1;
+                    } else if probe {
+                        let conflicts: Vec<_> = triangulation
+                            .get_conflicting_edges_between_vertices(vi, vj)
+                            .map(|edge| {
+                                (
+                                    edge.as_undirected().fix(),
+                                    edge.from().position(),
+                                    edge.to().position(),
+                                )
+                            })
+                            .collect();
+                        probe_conflicting_edges += conflicts.len();
+                        if conflicts.is_empty() {
+                            probe_refused_without_conflicts += 1;
+                        } else {
+                            probe_refused_with_conflicts += 1;
+                            if first_conflict.is_none() {
+                                let mapped_conflicts = conflicts
+                                    .iter()
+                                    .filter(|(handle, _, _)| {
+                                        installed_origins
+                                            .as_ref()
+                                            .is_some_and(|origins| origins.contains_key(handle))
+                                    })
+                                    .count();
+                                // Prefer a resolvable direct origin, but make
+                                // the selection bias explicit in the record.
+                                let selected_conflict_index = conflicts
+                                    .iter()
+                                    .position(|(handle, _, _)| {
+                                        installed_origins
+                                            .as_ref()
+                                            .is_some_and(|origins| origins.contains_key(handle))
+                                    })
+                                    .unwrap_or(0);
+                                let selected = &conflicts[selected_conflict_index];
+                                let existing_origins = installed_origins
+                                    .as_ref()
+                                    .and_then(|origins| origins.get(&selected.0))
+                                    .cloned()
+                                    .unwrap_or_default();
+                                first_conflict = Some((
+                                    piece_index,
+                                    k,
+                                    piece[i].uv,
+                                    piece[j].uv,
+                                    selected_conflict_index,
+                                    conflicts.len(),
+                                    mapped_conflicts,
+                                    existing_origins,
+                                    selected.1,
+                                    selected.2,
+                                ));
+                            }
+                        }
                     }
+                    success = false;
                 }
-            });
+            }
+        }
+        if probe {
+            if let Some((
+                proposed_piece,
+                proposed_segment,
+                proposed_a,
+                proposed_b,
+                selected_conflict_index,
+                selected_refusal_conflicts,
+                mapped_conflicts,
+                existing_origins,
+                existing_a,
+                existing_b,
+            )) = first_conflict
+            {
+                let (source_face_id, declared_face_index, periodic_rank) =
+                    PROBE_FACE_CONTEXT.with(std::cell::Cell::get);
+                let existing_first_origin = existing_origins.first().copied();
+                let selection = if mapped_conflicts == 0 {
+                    "first_reported"
+                } else {
+                    "first_mappable"
+                };
+                let origin_resolution = if existing_first_origin.is_some() {
+                    "direct"
+                } else {
+                    "missing"
+                };
+                eprintln!(
+                    "CW\tsource_face_id={source_face_id:?}\tdeclared_face_index={declared_face_index}\t\
+                     periodic_rank={periodic_rank}\tselection={selection}\t\
+                     selected_conflict_index={selected_conflict_index}\t\
+                     selected_refusal_conflicts={selected_refusal_conflicts}\t\
+                     mapped_conflicts={mapped_conflicts}\t\
+                     proposed_post_stitch_piece={proposed_piece}\t\
+                     proposed_post_stitch_segment={proposed_segment}\t\
+                     existing_origin_resolution={origin_resolution}\t\
+                     existing_direct_contributors={}\t\
+                     existing_first_post_stitch_origin={existing_first_origin:?}\t\
+                     proposed_uv={:.17e},{:.17e};{:.17e},{:.17e}\t\
+                     existing_uv={:.17e},{:.17e};{:.17e},{:.17e}\t\
+                     face_conflicting_edges={probe_conflicting_edges}",
+                    existing_origins.len(), proposed_a.x, proposed_a.y, proposed_b.x,
+                    proposed_b.y, existing_a.x, existing_a.y, existing_b.x, existing_b.y,
+                );
+            }
+        }
+        if probe
+            && (!success
+                || probe_degenerate != 0
+                || probe_add_returned_false != 0)
+        {
+            eprintln!(
+                "PF,{},{probe_point_fail},{probe_degenerate},\
+                 {probe_already_direct},{probe_refused_with_conflicts},\
+                 {probe_refused_without_conflicts},{probe_conflicting_edges},\
+                 {probe_add_returned_false}",
+                u8::from(success),
+            );
+        }
+        success
     }
 }
 
@@ -1276,24 +1573,182 @@ fn spade_round(x: f64) -> f64 {
     }
 }
 
-/// Tessellates one surface trimmed by polyline.
-fn trimming_tessellation<S>(surface: &S, polyboundary: &PolyBoundary, tol: f64) -> PolygonMesh
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TessellationFailureReason {
+    ContradictoryDualParity,
+    NoOddParityRegion,
+    ConstraintChainNotClosed,
+    ConstraintInsertionIncomplete,
+    ConstraintIntersectionUnsupported,
+    ConstraintOverlapUnsupported,
+    CdtConstructionFailed,
+    NonFinitePosition,
+    ConstraintRoleMissing,
+    DegenerateConstraintChain,
+    NoFiniteTrianglesAfterParity,
+}
+
+#[derive(Clone, Debug)]
+pub struct TessellationFailure {
+    pub reason: TessellationFailureReason,
+    pub source_bound: Option<usize>,
+    pub source_edge_use: Option<usize>,
+    pub constraint_ids: Vec<usize>,
+    pub uv_location: Option<Point2>,
+}
+
+impl From<TessellationFailureReason> for TessellationFailure {
+    fn from(reason: TessellationFailureReason) -> Self {
+        Self {
+            reason,
+            source_bound: None,
+            source_edge_use: None,
+            constraint_ids: Vec::new(),
+            uv_location: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum VertexGeneration {
+    SurfaceEvaluation,
+    SourceEdgeSample,
+    ConstraintIntersection,
+    SingularRealization,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct VertexRoles(pub u16);
+
+impl VertexRoles {
+    pub const PHYSICAL_BOUNDARY: u16 = 1 << 0;
+    pub const ARTIFICIAL_SEAM: u16 = 1 << 1;
+    pub const SINGULAR_COLLAPSE: u16 = 1 << 2;
+    pub const CONSTRAINT_INTERSECT: u16 = 1 << 3;
+
+    pub fn contains(&self, role: u16) -> bool {
+        (self.0 & role) == role
+    }
+    pub fn insert(&mut self, role: u16) {
+        self.0 |= role;
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SeamPair {
+    pub first_chain: Vec<usize>,
+    pub second_chain: Vec<usize>,
+    pub correspondence: Vec<(usize, usize)>,
+    pub orientation_reversed: bool,
+    pub deck_displacement: [i64; 2],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SingularKind {
+    Apex,
+    Pole,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SingularLinkKind {
+    InteriorCycle,
+    BoundaryInterval,
+}
+
+#[derive(Clone, Debug)]
+pub struct SingularGroup {
+    pub vertices: Vec<usize>,
+    pub canonical_point: Point3,
+    pub kind: SingularKind,
+    pub link_kind: SingularLinkKind,
+}
+
+#[derive(Clone, Debug)]
+pub struct VertexMetadata {
+    pub uv: Point2,
+    pub generation: VertexGeneration,
+    pub roles: VertexRoles,
+    pub source_edge_use: Option<usize>,
+    pub seam_pair: Option<usize>,
+    pub singular_group: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TessellationDiagnostics {
+    pub vertex_metadata: Vec<VertexMetadata>,
+    pub seam_pairs: Vec<SeamPair>,
+    pub singular_groups: Vec<SingularGroup>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FaceTessellation {
+    pub mesh: PolygonMesh,
+    pub diagnostics: TessellationDiagnostics,
+}
+
+#[derive(Clone, Debug)]
+pub enum TessellationOutcome {
+    Mesh(FaceTessellation),
+    Failed(TessellationFailure),
+}
+
+/// Tessellates one surface trimmed by polyline, returning `TessellationOutcome`.
+fn trimming_tessellation_with_diagnostics<S>(
+    surface: &S,
+    polyboundary: &PolyBoundary,
+    tol: f64,
+) -> TessellationOutcome
 where
     S: PreMeshableSurface,
 {
     let mut triangulation = Cdt::new();
     let mut boundary_map = HashMap::<FixedVertexHandle, Point3>::default();
-    polyboundary.insert_to(&mut triangulation, &mut boundary_map);
+    if !polyboundary.insert_to(&mut triangulation, &mut boundary_map) {
+        return TessellationOutcome::Failed(TessellationFailureReason::ConstraintInsertionIncomplete.into());
+    }
     insert_surface(&mut triangulation, surface, polyboundary, tol);
-    let mut mesh = triangulation_into_polymesh(
-        triangulation.vertices(),
-        triangulation.inner_faces(),
+    triangulation_into_polymesh_outcome(
+        &triangulation,
         surface,
         polyboundary,
         &boundary_map,
-    );
-    mesh.make_face_compatible_to_normal();
-    mesh
+    )
+}
+
+/// Tessellates one surface trimmed by polyline, returning `TessellationOutcome`.
+#[allow(dead_code)]
+fn trimming_tessellation_with_outcome<S>(
+    surface: &S,
+    polyboundary: &PolyBoundary,
+    tol: f64,
+) -> TessellationOutcome
+where
+    S: PreMeshableSurface,
+{
+    trimming_tessellation_with_diagnostics(surface, polyboundary, tol)
+}
+
+/// Tessellates one surface trimmed by polyline.
+fn trimming_tessellation<S>(surface: &S, polyboundary: &PolyBoundary, tol: f64) -> PolygonMesh
+where
+    S: PreMeshableSurface,
+{
+    match trimming_tessellation_with_diagnostics(surface, polyboundary, tol) {
+        TessellationOutcome::Mesh(ft) => {
+            let mut mesh = ft.mesh;
+            mesh.make_face_compatible_to_normal();
+            mesh
+        }
+        TessellationOutcome::Failed(f) => {
+            if std::env::var_os("TRUCK_PROBE_FAIL").is_some() {
+                eprintln!("PROBE_FAIL reason={:?}", f.reason);
+            }
+            PolygonMesh::default()
+        }
+    }
 }
 
 /// Inserts parameter divisions into triangulation.
@@ -1346,18 +1801,69 @@ fn insert_surface(
     });
 }
 
-/// Converts triangulation into `PolygonMesh`.
-fn triangulation_into_polymesh<'a>(
-    vertices: VertexIterator<'a, SPoint2, (), CdtEdge<()>, ()>,
-    triangles: InnerFaceIterator<'a, SPoint2, (), CdtEdge<()>, ()>,
-    surface: &impl ParametricSurface3D,
-    polyline: &PolyBoundary,
+/// Converts triangulation into `TessellationOutcome`.
+fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
+    triangulation: &Cdt,
+    surface: &S,
+    _polyline: &PolyBoundary,
     boundary_map: &HashMap<FixedVertexHandle, Point3>,
-) -> PolygonMesh {
+) -> TessellationOutcome {
+    use std::collections::{HashMap as StdHashMap, VecDeque};
+
+    // 1. Parity-labeled CDT dual traversal across domain-boundary constraint edges
+    let mut face_parity = StdHashMap::<usize, u32>::new();
+    let mut queue = VecDeque::new();
+
+    let outer = triangulation.outer_face();
+    face_parity.insert(outer.index(), 0);
+    queue.push_back((outer.fix(), 0));
+
+    let mut contradictory_parity = false;
+    while let Some((ffh, current_parity)) = queue.pop_front() {
+        let face = triangulation.face(ffh);
+        let edges = if let Some(inner) = face.as_inner() {
+            inner.adjacent_edges()
+        } else {
+            let e0 = face.adjacent_edge().unwrap();
+            let e1 = e0.next();
+            let e2 = e1.next();
+            [e0, e1, e2]
+        };
+        for e in edges {
+            let is_domain_boundary = e.is_constraint_edge();
+            let next_parity = if is_domain_boundary {
+                current_parity ^ 1
+            } else {
+                current_parity
+            };
+            let adj_face = e.rev().face();
+            let adj_idx = adj_face.index();
+            if let Some(&existing_parity) = face_parity.get(&adj_idx) {
+                if existing_parity != next_parity {
+                    contradictory_parity = true;
+                }
+            } else {
+                face_parity.insert(adj_idx, next_parity);
+                queue.push_back((adj_face.fix(), next_parity));
+            }
+        }
+    }
+
+    if contradictory_parity {
+        return TessellationOutcome::Failed(TessellationFailureReason::ContradictoryDualParity.into());
+    }
+
+    // 2. Vertex positions, parameter coordinates, and roles
     let mut positions = Vec::<Point3>::new();
     let mut uv_coords = Vec::<Vector2>::new();
     let mut normals = Vec::<Vector3>::new();
-    let vmap: HashMap<_, _> = vertices
+    let mut vertex_metadata = Vec::<VertexMetadata>::new();
+
+    let u_period = surface.u_period();
+    let v_period = surface.v_period();
+
+    let vmap: HashMap<_, _> = triangulation
+        .vertices()
         .enumerate()
         .map(|(i, v)| {
             let p = *v.as_ref();
@@ -1366,37 +1872,157 @@ fn triangulation_into_polymesh<'a>(
                 Some(point) => *point,
                 None => surface.subs(p.x, p.y),
             };
+            if !point.x.is_finite() || !point.y.is_finite() || !point.z.is_finite() {
+                return (idx, usize::MAX);
+            }
             positions.push(point);
-            uv_coords.push(Vector2::new(p.x, p.y));
-            normals.push(surface.normal(p.x, p.y));
+            let uv = Vector2::new(p.x, p.y);
+            uv_coords.push(uv);
+
+            // Determine vertex roles (bitflags)
+            let mut roles = VertexRoles::default();
+            if boundary_map.contains_key(&idx) {
+                let is_seam = (u_period.is_some() && (p.x <= 1e-4 || (p.x - u_period.unwrap()).abs() <= 1e-4))
+                    || (v_period.is_some() && (p.y <= 1e-4 || (p.y - v_period.unwrap()).abs() <= 1e-4));
+                if is_seam {
+                    roles.insert(VertexRoles::ARTIFICIAL_SEAM);
+                } else {
+                    roles.insert(VertexRoles::PHYSICAL_BOUNDARY);
+                }
+            } else {
+                // INTERIOR is derived downstream as the absence of any
+                // boundary/seam/singular role; it is not stored as an
+                // overlapping flag (PR 4A.1 design, sidecar diagnostics).
+            }
+
+            let n = surface.normal(p.x, p.y);
+            let n_valid =
+                if n.x.is_finite() && n.y.is_finite() && n.z.is_finite() && n.magnitude2() > 1e-12 {
+                    n.normalize()
+                } else {
+                    roles.insert(VertexRoles::SINGULAR_COLLAPSE);
+                    Vector3::zero()
+                };
+            normals.push(n_valid);
+
+            vertex_metadata.push(VertexMetadata {
+                uv: Point2::new(p.x, p.y),
+                generation: if boundary_map.contains_key(&idx) {
+                    VertexGeneration::SourceEdgeSample
+                } else {
+                    VertexGeneration::SurfaceEvaluation
+                },
+                roles,
+                source_edge_use: None,
+                seam_pair: None,
+                singular_group: None,
+            });
+
             (idx, i)
         })
         .collect();
-    let tri_faces: Vec<[StandardVertex; 3]> = triangles
+
+    if vmap.values().any(|&i| i == usize::MAX) {
+        return TessellationOutcome::Failed(TessellationFailureReason::NonFinitePosition.into());
+    }
+
+    // 3. Material triangles selection (odd parity = 1)
+    let tri_faces_raw: Vec<[usize; 3]> = triangulation
+        .inner_faces()
+        .filter(|face| face_parity.get(&face.index()) == Some(&1))
         .map(|tri| tri.vertices())
-        .filter(|tri| {
-            fn sp2cg(p: SPoint2) -> Point2 {
-                Point2::new(p.x, p.y)
+        .filter_map(|tri| {
+            let idcs = [
+                vmap[&tri[0].fix()],
+                vmap[&tri[1].fix()],
+                vmap[&tri[2].fix()],
+            ];
+            if idcs[0] == idcs[1] || idcs[1] == idcs[2] || idcs[0] == idcs[2] {
+                return None;
             }
-            let tri = array![i => sp2cg(*tri[i].as_ref()); 3];
-            let (a, b) = (tri[1] - tri[0], tri[2] - tri[0]);
-            let c = tri[0] + (a + b) / 3.0;
-            let area = a.x * b.y - a.y * b.x;
-            polyline.include(c) && !area.so_small2()
-        })
-        .map(|tri| {
-            let idcs = array![i => vmap[&tri[i].fix()]; 3];
-            array![i => [idcs[i], idcs[i], idcs[i]].into(); 3]
+            let p0 = positions[idcs[0]];
+            let p1 = positions[idcs[1]];
+            let p2 = positions[idcs[2]];
+            let cross = (p1 - p0).cross(p2 - p0);
+            let area = 0.5 * cross.magnitude();
+            if area <= 1e-12 || !area.is_finite() {
+                return None;
+            }
+            Some(idcs)
         })
         .collect();
-    PolygonMesh::debug_new(
+
+    if tri_faces_raw.is_empty() {
+        return TessellationOutcome::Failed(TessellationFailureReason::NoOddParityRegion.into());
+    }
+
+    // 4. Singular Vertex Normal Repair
+    let mut vertex_incident_normals = vec![Vector3::zero(); positions.len()];
+    for &[i0, i1, i2] in &tri_faces_raw {
+        let p0 = positions[i0];
+        let p1 = positions[i1];
+        let p2 = positions[i2];
+        let cross = (p1 - p0).cross(p2 - p0);
+        let mag = cross.magnitude();
+        if mag > 1e-12 {
+            let fnorm = cross / mag;
+            vertex_incident_normals[i0] += fnorm * mag;
+            vertex_incident_normals[i1] += fnorm * mag;
+            vertex_incident_normals[i2] += fnorm * mag;
+        }
+    }
+
+    for (i, norm) in normals.iter_mut().enumerate() {
+        if norm.so_small() || !norm.x.is_finite() {
+            let inc = vertex_incident_normals[i];
+            if inc.magnitude2() > 1e-12 {
+                *norm = inc.normalize();
+            } else {
+                *norm = Vector3::unit_z();
+            }
+        }
+    }
+
+    let tri_faces: Vec<[StandardVertex; 3]> = tri_faces_raw
+        .into_iter()
+        .map(|idcs| array![i => [idcs[i], idcs[i], idcs[i]].into(); 3])
+        .collect();
+
+    // PR 4A.1 invariant: sidecar metadata must stay aligned with mesh positions,
+    // one record per vertex, through every transformation below. Enforced in the
+    // test build; the census (release) relies on it holding by construction here.
+    debug_assert_eq!(vertex_metadata.len(), positions.len());
+
+    let mesh = PolygonMesh::debug_new(
         StandardAttributes {
             positions,
             uv_coords,
             normals,
         },
         Faces::from_tri_and_quad_faces(tri_faces, Vec::new()),
-    )
+    );
+
+    TessellationOutcome::Mesh(FaceTessellation {
+        mesh,
+        diagnostics: TessellationDiagnostics {
+            vertex_metadata,
+            seam_pairs: Vec::new(),
+            singular_groups: Vec::new(),
+        },
+    })
+}
+
+#[allow(dead_code)]
+fn triangulation_into_polymesh<S: ParametricSurface3D>(
+    triangulation: &Cdt,
+    surface: &S,
+    polyline: &PolyBoundary,
+    boundary_map: &HashMap<FixedVertexHandle, Point3>,
+) -> PolygonMesh {
+    match triangulation_into_polymesh_outcome(triangulation, surface, polyline, boundary_map) {
+        TessellationOutcome::Mesh(ft) => ft.mesh,
+        TessellationOutcome::Failed(_) => PolygonMesh::default(),
+    }
 }
 
 fn polyline_on_surface(
@@ -1439,29 +2065,39 @@ impl CollapsedPeriodicBoundaryPair {
             return None;
         }
 
-        let vp = surface.v_period()?;
+        let (period, is_v) = match (surface.v_period(), surface.u_period()) {
+            (Some(vp), _) if vp > 1e-6 => (vp, true),
+            (_, Some(up)) if up > 1e-6 => (up, false),
+            _ => return None,
+        };
         let loop0 = &closed[0];
 
         // 2. Regular loop must span the periodic parameter (winding ±1, span ~ period)
-        let (v_min, v_max) = loop0
-            .iter()
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), p| {
-                (mn.min(p.uv.y), mx.max(p.uv.y))
-            });
-        if (v_max - v_min) < 0.75 * vp {
+        let (p_min, p_max) =
+            loop0
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), p| {
+                    let val = if is_v { p.uv.y } else { p.uv.x };
+                    (mn.min(val), mx.max(val))
+                });
+        if (p_max - p_min) < 0.75 * period {
             return None;
         }
 
-        let u_mean: f64 = loop0.iter().map(|p| p.uv.x).sum::<f64>() / loop0.len() as f64;
+        let base_r: f64 = loop0
+            .iter()
+            .map(|p| if is_v { p.uv.x } else { p.uv.y })
+            .sum::<f64>()
+            / loop0.len() as f64;
 
-        // 3. Analytically compute exact u_apex where the angular orbit collapses to a point in 3D.
-        //    For any conical surface (revolved line), W(u) = P(u, 0) - P(u, π) is linear in u:
-        //    W(u) = W(0) + u * (W(1) - W(0)).
-        //    The apex is where W(u) = 0 => u_apex = -W(0) . ΔW / ||ΔW||^2.
+        // 3. Analytically compute exact apex parameter where angular orbit collapses in 3D.
         use cgmath::InnerSpace;
-        let w = |u: f64| -> Vector3 {
-            let p0 = surface.subs(u, 0.0);
-            let p_half = surface.subs(u, 0.5 * vp);
+        let w = |r: f64| -> Vector3 {
+            let (p0, p_half) = if is_v {
+                (surface.subs(r, 0.0), surface.subs(r, 0.5 * period))
+            } else {
+                (surface.subs(0.0, r), surface.subs(0.5 * period, r))
+            };
             p0 - p_half
         };
 
@@ -1474,21 +2110,21 @@ impl CollapsedPeriodicBoundaryPair {
             return None;
         }
 
-        let u_apex = -w0.dot(dw) / dw2;
+        let apex_r = -w0.dot(dw) / dw2;
 
-        // 4. Certificate guard: verify 3D point collapse at u_apex
-        if w(u_apex).magnitude() > 1e-3 {
+        // 4. Certificate guard: verify 3D point collapse at apex
+        if w(apex_r).magnitude() > 1e-3 {
             return None;
         }
 
         // 5. Axial separation between base loop and apex must be nonzero
-        if (u_mean - u_apex).abs() < 1e-6 {
+        if (base_r - apex_r).abs() < 1e-6 {
             return None;
         }
 
         Some(Self {
-            base_u: u_mean,
-            apex_u: u_apex,
+            base_u: base_r,
+            apex_u: apex_r,
         })
     }
 }
@@ -1759,5 +2395,472 @@ mod cone_topology_tests {
         let sem = TraversalSemantics::resolve(&circle, &proc_cone, 1e-4);
         let path = project_boundary_curve(&circle, &proc_cone, sem, 1.0).unwrap();
         assert!(!path.samples.is_empty());
+    }
+
+    #[test]
+    fn test_periodic_closure_cone_tessellation() {
+        let cone = make_test_cone(10.0, 0.0, 10.0);
+        let tol = 0.1;
+        let n = 32usize;
+        let circle_pts: Vec<SurfacePoint> = (0..=n)
+            .map(|i| {
+                let v = (i as f64 / n as f64) * 2.0 * PI;
+                let uv = Point2::new(1.0, v);
+                (uv, cone.subs(uv.x, uv.y)).into()
+            })
+            .collect();
+        let piece = PolyBoundaryPiece(circle_pts);
+        let boundary = PolyBoundary::new(vec![piece], &cone, tol);
+        let mesh = trimming_tessellation(&cone, &boundary, tol);
+        assert!(
+            !mesh.faces().is_empty(),
+            "Cone C-APEX-DISK face must tessellate to non-empty mesh"
+        );
+    }
+
+    #[test]
+    fn test_parity_single_disk() {
+        use truck_geometry::prelude::*;
+        let plane = Plane::new(Point3::origin(), Point3::new(1.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0));
+        let tol = 0.01;
+        let loop0: Vec<SurfacePoint> = vec![
+            (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
+            (Point2::new(10.0, 0.0), Point3::new(10.0, 0.0, 0.0)).into(),
+            (Point2::new(10.0, 10.0), Point3::new(10.0, 10.0, 0.0)).into(),
+            (Point2::new(0.0, 10.0), Point3::new(0.0, 10.0, 0.0)).into(),
+            (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
+        ];
+        let boundary = PolyBoundary::new(vec![PolyBoundaryPiece(loop0)], &plane, tol);
+        let mesh = trimming_tessellation(&plane, &boundary, tol);
+        assert!(!mesh.faces().is_empty());
+    }
+
+    #[test]
+    fn test_parity_disk_with_hole() {
+        use truck_geometry::prelude::*;
+        let plane = Plane::new(Point3::origin(), Point3::new(1.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0));
+        let tol = 0.01;
+        let outer: Vec<SurfacePoint> = vec![
+            (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
+            (Point2::new(10.0, 0.0), Point3::new(10.0, 0.0, 0.0)).into(),
+            (Point2::new(10.0, 10.0), Point3::new(10.0, 10.0, 0.0)).into(),
+            (Point2::new(0.0, 10.0), Point3::new(0.0, 10.0, 0.0)).into(),
+            (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
+        ];
+        let hole: Vec<SurfacePoint> = vec![
+            (Point2::new(3.0, 3.0), Point3::new(3.0, 3.0, 0.0)).into(),
+            (Point2::new(7.0, 3.0), Point3::new(7.0, 3.0, 0.0)).into(),
+            (Point2::new(7.0, 7.0), Point3::new(7.0, 7.0, 0.0)).into(),
+            (Point2::new(3.0, 7.0), Point3::new(3.0, 7.0, 0.0)).into(),
+            (Point2::new(3.0, 3.0), Point3::new(3.0, 3.0, 0.0)).into(),
+        ];
+        let boundary = PolyBoundary::new(vec![PolyBoundaryPiece(outer), PolyBoundaryPiece(hole)], &plane, tol);
+        let mesh = trimming_tessellation(&plane, &boundary, tol);
+        assert!(!mesh.faces().is_empty());
+        // Verify hole centroid (5.0, 5.0) has no triangle containing it
+        for tri in mesh.faces().tri_faces() {
+            let p0 = mesh.uv_coords()[tri[0].pos];
+            let p1 = mesh.uv_coords()[tri[1].pos];
+            let p2 = mesh.uv_coords()[tri[2].pos];
+            let center = (p0 + p1 + p2) / 3.0;
+            assert!(!(center.x > 3.1 && center.x < 6.9 && center.y > 3.1 && center.y < 6.9), "Hole interior must not contain triangles");
+        }
+    }
+
+    #[test]
+    fn test_parity_concave_outer_loop() {
+        use truck_geometry::prelude::*;
+        let plane = Plane::new(Point3::origin(), Point3::new(1.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0));
+        let tol = 0.01;
+        // L-shaped concave outer loop
+        let loop0: Vec<SurfacePoint> = vec![
+            (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
+            (Point2::new(10.0, 0.0), Point3::new(10.0, 0.0, 0.0)).into(),
+            (Point2::new(10.0, 5.0), Point3::new(10.0, 5.0, 0.0)).into(),
+            (Point2::new(5.0, 5.0), Point3::new(5.0, 5.0, 0.0)).into(),
+            (Point2::new(5.0, 10.0), Point3::new(5.0, 10.0, 0.0)).into(),
+            (Point2::new(0.0, 10.0), Point3::new(0.0, 10.0, 0.0)).into(),
+            (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
+        ];
+        let boundary = PolyBoundary::new(vec![PolyBoundaryPiece(loop0)], &plane, tol);
+        let mesh = trimming_tessellation(&plane, &boundary, tol);
+        assert!(!mesh.faces().is_empty());
+    }
+
+    #[test]
+    fn test_parity_intersecting_constraints_rejected() {
+        use truck_geometry::prelude::*;
+        let plane = Plane::new(Point3::origin(), Point3::new(1.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0));
+        let tol = 0.01;
+        // Self-overlapping loop traversing same segment (0,0)->(10,0) twice in forward direction
+        let loop0: Vec<SurfacePoint> = vec![
+            (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
+            (Point2::new(10.0, 0.0), Point3::new(10.0, 0.0, 0.0)).into(),
+            (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
+            (Point2::new(10.0, 0.0), Point3::new(10.0, 0.0, 0.0)).into(),
+            (Point2::new(10.0, 10.0), Point3::new(10.0, 10.0, 0.0)).into(),
+            (Point2::new(0.0, 10.0), Point3::new(0.0, 10.0, 0.0)).into(),
+            (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
+        ];
+        let boundary = PolyBoundary::new(vec![PolyBoundaryPiece(loop0)], &plane, tol);
+        let mesh = trimming_tessellation(&plane, &boundary, tol);
+        assert!(mesh.faces().is_empty(), "Self-overlapping degenerate loop must fail or produce empty mesh");
+    }
+}
+
+#[cfg(test)]
+mod singular_transition_tests {
+    use super::*;
+    use truck_modeling::{Point2, Point3, Vector3};
+
+    /// `v` collapses at `u = 1`: the whole `u = 1` row maps to the single
+    /// point `(0, 1, 0)`, so every `(1, v)` is a legitimate UV representative
+    /// of that one singular 3D point. This is the abstract shape of the
+    /// representative face #54588 collapse.
+    #[derive(Clone, Copy)]
+    struct CollapsedPatch;
+
+    impl ParametricSurface for CollapsedPatch {
+        type Point = Point3;
+        type Vector = Vector3;
+        fn subs(&self, u: f64, v: f64) -> Point3 {
+            Point3::new((1.0 - u) * v, u, 0.0)
+        }
+        fn uder(&self, _: f64, v: f64) -> Vector3 {
+            Vector3::new(-v, 1.0, 0.0)
+        }
+        fn vder(&self, u: f64, _: f64) -> Vector3 {
+            Vector3::new(1.0 - u, 0.0, 0.0)
+        }
+        fn uuder(&self, _: f64, _: f64) -> Vector3 {
+            Vector3::zero()
+        }
+        fn uvder(&self, _: f64, _: f64) -> Vector3 {
+            Vector3::new(-1.0, 0.0, 0.0)
+        }
+        fn vvder(&self, _: f64, _: f64) -> Vector3 {
+            Vector3::zero()
+        }
+        fn der_mn(&self, m: usize, n: usize, u: f64, v: f64) -> Vector3 {
+            match (m, n) {
+                (0, 0) => self.subs(u, v).to_vec(),
+                (1, 0) => self.uder(u, v),
+                (0, 1) => self.vder(u, v),
+                (1, 1) => self.uvder(u, v),
+                _ => Vector3::zero(),
+            }
+        }
+    }
+
+    impl ParametricSurface3D for CollapsedPatch {}
+
+    impl ParameterDivision2D for CollapsedPatch {
+        fn parameter_division(
+            &self,
+            ((u0, u1), (v0, v1)): ((f64, f64), (f64, f64)),
+            _: f64,
+        ) -> (Vec<f64>, Vec<f64>) {
+            (vec![u0, u1], vec![v0, v1])
+        }
+    }
+
+    /// Mirror of `CollapsedPatch` with the axes swapped, so `u` collapses at
+    /// `v = 1`. Used to exercise the u-direction enter/leave branches.
+    #[derive(Clone, Copy)]
+    struct CollapsedPatchU;
+
+    impl ParametricSurface for CollapsedPatchU {
+        type Point = Point3;
+        type Vector = Vector3;
+        fn subs(&self, u: f64, v: f64) -> Point3 {
+            Point3::new((1.0 - v) * u, v, 0.0)
+        }
+        fn uder(&self, _: f64, v: f64) -> Vector3 {
+            Vector3::new(1.0 - v, 0.0, 0.0)
+        }
+        fn vder(&self, u: f64, _: f64) -> Vector3 {
+            Vector3::new(-u, 1.0, 0.0)
+        }
+        fn uuder(&self, _: f64, _: f64) -> Vector3 {
+            Vector3::zero()
+        }
+        fn uvder(&self, _: f64, _: f64) -> Vector3 {
+            Vector3::new(-1.0, 0.0, 0.0)
+        }
+        fn vvder(&self, _: f64, _: f64) -> Vector3 {
+            Vector3::zero()
+        }
+        fn der_mn(&self, m: usize, n: usize, u: f64, v: f64) -> Vector3 {
+            match (m, n) {
+                (0, 0) => self.subs(u, v).to_vec(),
+                (1, 0) => self.uder(u, v),
+                (0, 1) => self.vder(u, v),
+                (1, 1) => self.uvder(u, v),
+                _ => Vector3::zero(),
+            }
+        }
+    }
+
+    impl ParametricSurface3D for CollapsedPatchU {}
+
+    impl ParameterDivision2D for CollapsedPatchU {
+        fn parameter_division(
+            &self,
+            ((u0, u1), (v0, v1)): ((f64, f64), (f64, f64)),
+            _: f64,
+        ) -> (Vec<f64>, Vec<f64>) {
+            (vec![u0, u1], vec![v0, v1])
+        }
+    }
+
+    /// Items 5-7: at least one triangle, no zero-area triangles, and a single
+    /// consistent orientation sign. CollapsedPatch is planar (z = 0), so the
+    /// orientation reduces to the sign of the z component of the cross product.
+    fn assert_no_zero_area_or_orientation_flip(mesh: &PolygonMesh) {
+        assert!(!mesh.faces().is_empty(), "tessellation produced no triangles");
+        let mut orientation = 0.0_f64;
+        for tri in mesh.faces().tri_faces() {
+            let [p0, p1, p2] = tri.map(|v| mesh.positions()[v.pos]);
+            let cross = (p1 - p0).cross(p2 - p0);
+            assert!(cross.magnitude2() > 1.0e-18, "zero-area triangle");
+            if orientation == 0.0 {
+                orientation = cross.z.signum();
+            }
+            assert_eq!(
+                cross.z.signum(),
+                orientation,
+                "inconsistent triangle orientation"
+            );
+        }
+    }
+
+    /// Items 1-8: entering the collapsed row preserves the incoming UV branch,
+    /// leaving it appends a bridge paired with the singular 3D point, every
+    /// touched point re-evaluates within tolerance, the reconstructed boundary
+    /// does not backtrack across the singular row, and the surface tessellates
+    /// with consistent triangle orientation. The reverse-traversal shape is
+    /// checked at the end.
+    #[test]
+    fn singular_transition_preserves_incidence_and_tessellates() {
+        let surface = CollapsedPatch;
+        let tolerance = 1.0e-9;
+        let uv = |u, v| Point2::new(u, v);
+        let sp = |p: Point2| (p, surface.subs(p.x, p.y)).into();
+        // Approach the singular row along v = 0, leave it along v = 1.
+        let mut points: Vec<SurfacePoint> =
+            [uv(0.0, 1.0), uv(0.0, 0.5), uv(0.0, 0.0), uv(0.5, 0.0)]
+                .into_iter()
+                .map(sp)
+                .collect();
+
+        // Enter the collapse. The raw lift proposes (1, 1.1006...) but the
+        // singular row u = 1 evaluates it to (0, 1, 0).
+        let previous_uv = uv(0.5, 0.0);
+        let previous_point = surface.subs(previous_uv.x, previous_uv.y);
+        let mut entering_uv = uv(1.0, 1.100_620_084_301_750_6);
+        let singular_point = surface.subs(entering_uv.x, entering_uv.y);
+        assert!(singular_point.near(&Point3::new(0.0, 1.0, 0.0)));
+        reconcile_singular_transition(
+            &surface,
+            previous_uv,
+            previous_point,
+            &mut entering_uv,
+            singular_point,
+            tolerance,
+            &mut points,
+        );
+        // (1) The incoming v = 0 branch is preserved.
+        assert!(entering_uv.near(&uv(1.0, 0.0)));
+        points.push((entering_uv, singular_point).into());
+
+        // Leave the collapse toward v = 1.
+        let mut leaving_uv = uv(0.5, 1.0);
+        let leaving_point = surface.subs(leaving_uv.x, leaving_uv.y);
+        reconcile_singular_transition(
+            &surface,
+            entering_uv,
+            singular_point,
+            &mut leaving_uv,
+            leaving_point,
+            tolerance,
+            &mut points,
+        );
+        // (2) A bridge was appended, paired with the singular 3D point.
+        let bridge = *points.last().unwrap();
+        assert!(bridge.uv.near(&uv(1.0, 1.0)));
+        assert!(bridge.point.near(&singular_point));
+        points.push((leaving_uv, leaving_point).into());
+
+        // (3) Every modified or inserted point re-evaluates within tolerance.
+        assert!(points
+            .iter()
+            .all(|p| surface.subs(p.uv.x, p.uv.y).distance(p.point) <= tolerance));
+
+        // (4) No improper backtracking crossing. The original defect produced
+        // the spike (0.5,0) -> (1,1.1006) -> (1,1); the repaired boundary
+        // enters and leaves the singular row u = 1 exactly once each.
+        let u_visits: Vec<f64> = points.iter().map(|p| p.uv.x).collect();
+        let near_row = |x: f64| (x - 1.0).abs() < 1.0e-7;
+        let crossings = u_visits
+            .windows(2)
+            .filter(|w| near_row(w[0]) ^ near_row(w[1]))
+            .count();
+        assert_eq!(
+            crossings, 2,
+            "boundary must enter and leave u = 1 exactly once each"
+        );
+
+        // Close the loop and tessellate.
+        points.push(sp(uv(0.0, 1.0)));
+        let boundary = PolyBoundary::new(vec![PolyBoundaryPiece(points)], &surface, tolerance);
+        let mesh = trimming_tessellation(&surface, &boundary, tolerance);
+        // (5),(6),(7) at least one triangle, no zero-area, consistent orientation.
+        assert_no_zero_area_or_orientation_flip(&mesh);
+
+        // (8) Reverse traversal: walk the same collapse the other way. The
+        // singular 3D point must still be preserved on both enter and leave,
+        // with a bridge inserted on the leave.
+        let mut rev: Vec<SurfacePoint> = [uv(0.5, 1.0)].into_iter().map(sp).collect();
+        let prev_uv = uv(0.5, 1.0);
+        let prev_pt = surface.subs(prev_uv.x, prev_uv.y);
+        let mut enter_uv = uv(1.0, 0.9);
+        let singular_pt = surface.subs(enter_uv.x, enter_uv.y);
+        assert!(singular_pt.near(&Point3::new(0.0, 1.0, 0.0)));
+        reconcile_singular_transition(
+            &surface,
+            prev_uv,
+            prev_pt,
+            &mut enter_uv,
+            singular_pt,
+            tolerance,
+            &mut rev,
+        );
+        assert!(
+            enter_uv.near(&uv(1.0, 1.0)),
+            "reverse enter preserves the singular row"
+        );
+        rev.push((enter_uv, singular_pt).into());
+        let mut leave_uv = uv(0.5, 0.0);
+        let leave_pt = surface.subs(leave_uv.x, leave_uv.y);
+        reconcile_singular_transition(
+            &surface,
+            enter_uv,
+            singular_pt,
+            &mut leave_uv,
+            leave_pt,
+            tolerance,
+            &mut rev,
+        );
+        let rev_bridge = *rev.last().unwrap();
+        assert!(
+            rev_bridge.point.near(&singular_pt),
+            "reverse leave bridges with the singular 3D point"
+        );
+        assert!(
+            rev.iter()
+                .all(|p| surface.subs(p.uv.x, p.uv.y).distance(p.point) <= tolerance),
+            "reverse traversal: every point re-evaluates within tolerance"
+        );
+    }
+
+    /// Item 9: the u-direction enter/leave branches on a surface whose `u`
+    /// collapses at `v = 1`.
+    #[test]
+    fn singular_transition_both_parameter_directions() {
+        let surface = CollapsedPatchU;
+        let tolerance = 1.0e-9;
+        let uv = |u, v| Point2::new(u, v);
+        let sp = |p: Point2| (p, surface.subs(p.x, p.y)).into();
+        let mut points: Vec<SurfacePoint> =
+            [uv(1.0, 0.0), uv(0.5, 0.0), uv(0.0, 0.0), uv(0.0, 0.5)]
+                .into_iter()
+                .map(sp)
+                .collect();
+        let previous_uv = uv(0.0, 0.5);
+        let previous_point = surface.subs(previous_uv.x, previous_uv.y);
+        let mut entering_uv = uv(1.100_620_084_301_750_6, 1.0);
+        let singular_point = surface.subs(entering_uv.x, entering_uv.y);
+        assert!(singular_point.near(&Point3::new(0.0, 1.0, 0.0)));
+        reconcile_singular_transition(
+            &surface,
+            previous_uv,
+            previous_point,
+            &mut entering_uv,
+            singular_point,
+            tolerance,
+            &mut points,
+        );
+        assert!(
+            entering_uv.near(&uv(0.0, 1.0)),
+            "u-collapse enter preserves the incoming u branch"
+        );
+        points.push((entering_uv, singular_point).into());
+
+        let mut leaving_uv = uv(1.0, 0.5);
+        let leaving_point = surface.subs(leaving_uv.x, leaving_uv.y);
+        reconcile_singular_transition(
+            &surface,
+            entering_uv,
+            singular_point,
+            &mut leaving_uv,
+            leaving_point,
+            tolerance,
+            &mut points,
+        );
+        let bridge = *points.last().unwrap();
+        assert!(bridge.uv.near(&uv(1.0, 1.0)));
+        assert!(bridge.point.near(&singular_point));
+        points.push((leaving_uv, leaving_point).into());
+        assert!(
+            points
+                .iter()
+                .all(|p| surface.subs(p.uv.x, p.uv.y).distance(p.point) <= tolerance),
+            "u-direction: every point re-evaluates within tolerance"
+        );
+    }
+
+    /// Item 10: a derivative that is small but whose candidate UV does NOT
+    /// reconstruct the associated 3D point must not be substituted.
+    #[test]
+    fn singular_transition_negative_case_rejects_non_reconstructing_candidate() {
+        let surface = CollapsedPatch;
+        let tolerance = 1.0e-9;
+        // At u = 1 - delta the v-derivative has magnitude delta < TOLERANCE, so
+        // `so_small()` proposes a substitution, but the point still genuinely
+        // depends on v, so the residual check must reject it.
+        let delta = 5.0e-7;
+        let previous_uv = Point2::new(0.5, 0.0);
+        let previous_point = surface.subs(previous_uv.x, previous_uv.y);
+        let raw_uv = Point2::new(1.0 - delta, 0.6);
+        let raw_point = surface.subs(raw_uv.x, raw_uv.y);
+        // Sanity: the v-derivative really is small here, and the candidate
+        // really would move the point beyond tolerance.
+        assert!(surface.vder(raw_uv.x, raw_uv.y).so_small());
+        let candidate = Point2::new(raw_uv.x, previous_uv.y);
+        assert!(
+            surface.subs(candidate.x, candidate.y).distance(raw_point) > tolerance,
+            "test setup: candidate must fail the residual check"
+        );
+
+        let mut current_uv = raw_uv;
+        let mut out: Vec<SurfacePoint> = Vec::new();
+        reconcile_singular_transition(
+            &surface,
+            previous_uv,
+            previous_point,
+            &mut current_uv,
+            raw_point,
+            tolerance,
+            &mut out,
+        );
+        // The candidate did not reconstruct the point: nothing changed.
+        assert!(
+            current_uv.near(&raw_uv),
+            "helper must not substitute a non-reconstructing candidate"
+        );
+        assert!(
+            out.is_empty(),
+            "no bridge may be appended when the residual check fails"
+        );
     }
 }
