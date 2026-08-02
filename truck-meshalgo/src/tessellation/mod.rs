@@ -387,6 +387,28 @@ pub trait LatticeMeshableShape<S> {
         tol: f64,
         lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
     ) -> MeshedShellOutcome;
+
+    /// As [`Self::robust_triangulation_with_lattice_outcome`], but the caller
+    /// also supplies each surface's *structural schema*.
+    ///
+    /// A second resolver rather than a richer lattice, because the two answer
+    /// different questions. `lattice_of` answers "what periods does this
+    /// surface have"; `schema_of` answers "what *is* this surface", which is
+    /// what the formal system's analytic rules are stated against and what
+    /// [`CertifiedLattice`] cannot express — its `NonPeriodic` is produced both
+    /// by a plane's analytic aperiodicity and by an accessor that returned
+    /// nothing, and after construction the two are indistinguishable.
+    ///
+    /// Supplying a schema does not change the mesh. The formal path consumes
+    /// it; the legacy producer-consumer chain does not read it at all. The two
+    /// forms above remain available and behave exactly as before, passing a
+    /// schema that identifies nothing.
+    fn robust_triangulation_with_schema_outcome(
+        &self,
+        tol: f64,
+        lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
+        schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
+    ) -> MeshedShellOutcome;
 }
 
 impl<C: PolylineableCurve, S: RobustMeshableSurface> LatticeMeshableShape<S>
@@ -409,12 +431,31 @@ impl<C: PolylineableCurve, S: RobustMeshableSurface> LatticeMeshableShape<S>
         tol: f64,
         lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
     ) -> MeshedShellOutcome {
+        // No structural reader was supplied, so none is claimed. Every face
+        // takes the conservative legacy adapter and resolves no ambient rank,
+        // which is exactly the Step 1 behaviour this form had before.
+        self.robust_triangulation_with_schema_outcome(tol, lattice_of, |_| {
+            formal::SupportSurfaceSchema::not_structurally_identified(
+                formal::SchemaIdentificationFailure::NoStructuralReader {
+                    representation: "caller_supplied_no_schema_resolver",
+                },
+            )
+        })
+    }
+
+    fn robust_triangulation_with_schema_outcome(
+        &self,
+        tol: f64,
+        lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
+        schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
+    ) -> MeshedShellOutcome {
         nonpositive_tolerance!(tol);
         triangulation::cshell_tessellation_with_outcomes(
             self,
             tol,
             triangulation::by_search_nearest_parameter,
             lattice_of,
+            schema_of,
         )
     }
 }

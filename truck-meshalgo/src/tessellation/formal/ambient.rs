@@ -65,6 +65,7 @@ use super::evidence::{
     SourceDeclaredProvenance, SurfaceAccessor, UseSite, ANALYTIC_ONLY,
 };
 use super::numeric::{FiniteF64, NumericDomainError, PositiveFinite};
+use super::support::{PlaneSchema, SupportSurfaceSchema};
 use super::outcome::{
     ContradictionWitness, FaceKey, InconsistencyReport, InvariantId, OperationalFailure,
     ProvenanceRecord, ProvenanceSet, ResourceOperation, StageEvaluation, StageOutcome,
@@ -467,11 +468,20 @@ fn absence_use_site(axis: ParameterAxis) -> UseSite {
 /// Certify that a plane has no period on an axis.
 ///
 /// The rule is `PlaneHasNoPeriodicDirection` and its premise is
-/// `SupportSurfaceIsAPlane`, which the caller asserts by calling *this*
-/// function rather than a general one — the premise is in the rule's name and
-/// in its signature's applicability, not in a field a caller fills in.
+/// `SupportSurfaceIsAPlane`. The premise is discharged by the *argument*: a
+/// [`PlaneSchema`] has one constructor, [`super::support::identify_plane`],
+/// which takes a `truck_geometry` plane representation and refuses a basis it
+/// cannot separate. A caller therefore cannot assert plane-ness by choosing to
+/// call this function; it has to present the plane.
+///
+/// The witness is taken by reference and not read. That is deliberate: this
+/// rule is about the *schema*, not about any number in it — a plane is
+/// aperiodic whatever its origin and axes are, once the basis is separated,
+/// which is the one quantitative fact [`PlaneSchema`]'s existence already
+/// carries.
 pub fn certify_plane_aperiodicity(
     axis: ParameterAxis,
+    _plane: &PlaneSchema,
 ) -> Result<AuthoritativeFact<PeriodAbsence>, IntroductionError> {
     let certificate = AnalyticCertificate::new(
         AnalyticRule::PlaneHasNoPeriodicDirection,
@@ -1745,6 +1755,86 @@ pub fn ambient_evidence_from_legacy(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Bridge from the authoritative support-surface schema
+// ---------------------------------------------------------------------------
+
+/// Both axes of a plane, proved absent.
+///
+/// The narrow evidence-ingestion path Step 1's census called for. It reads the
+/// *representation* — through [`PlaneSchema`], whose only constructor inspects
+/// a real `truck_geometry` plane — rather than the legacy lattice, which has
+/// already erased which of its two producers said `NonPeriodic`.
+///
+/// This is the only function in the subtree that can produce an
+/// `AuthoritativelyAbsent` pair, and it can only be called with a plane in
+/// hand.
+pub fn ambient_evidence_from_plane_schema(
+    plane: &PlaneSchema,
+) -> Result<AmbientPeriodEvidence, IntroductionError> {
+    Ok(AmbientPeriodEvidence {
+        u: PeriodAxisEvidence::AuthoritativelyAbsent {
+            axis: ParameterAxis::U,
+            evidence: certify_plane_aperiodicity(ParameterAxis::U, plane)?,
+        },
+        v: PeriodAxisEvidence::AuthoritativelyAbsent {
+            axis: ParameterAxis::V,
+            evidence: certify_plane_aperiodicity(ParameterAxis::V, plane)?,
+        },
+    })
+}
+
+/// Build ambient evidence from whatever the composition layer established,
+/// falling back to the conservative legacy adapter.
+///
+/// The dispatch is the point of the whole bridge, so it is written once here
+/// rather than at each call site:
+///
+/// - a structurally identified plane takes the analytic route and can resolve
+///   rank 0;
+/// - **everything else** — including a surface whose legacy lattice says
+///   `NonPeriodic` — takes the legacy adapter, which maps `NonPeriodic` to
+///   `Undetermined` and therefore cannot resolve a rank at all.
+///
+/// There is deliberately no arm that consults the legacy lattice *first*. A
+/// torus reaching `look::lattice_of` goes through `from_unevidenced_accessors`,
+/// and its accessors returning `None` would look exactly like a plane's
+/// analytic absence at that layer.
+pub fn ambient_evidence_from_schema(
+    schema: &SupportSurfaceSchema,
+    lattice: &super::super::domain::lattice::CertifiedLattice,
+    origin: LatticeOrigin,
+) -> Result<AmbientPeriodEvidence, AmbientEvidenceError> {
+    match schema {
+        SupportSurfaceSchema::Plane(plane) => {
+            ambient_evidence_from_plane_schema(plane).map_err(AmbientEvidenceError::Introduction)
+        }
+        SupportSurfaceSchema::NotStructurallyIdentified(_) => {
+            ambient_evidence_from_legacy(lattice, origin).map_err(AmbientEvidenceError::Adapter)
+        }
+    }
+}
+
+/// Why ambient evidence could not be built for a face.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AmbientEvidenceError {
+    /// The legacy adapter refused. See [`AdapterError`].
+    Adapter(AdapterError),
+    /// An analytic introduction rule refused. A defect here rather than a fact
+    /// about the face: the plane rule's premises are supplied by this module.
+    Introduction(IntroductionError),
+}
+
+impl AmbientEvidenceError {
+    /// A short stable tag, for probe records.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::Adapter(error) => error.tag(),
+            Self::Introduction(_) => "introduction_rule_refused",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::envelope::PolicyInstanceId;
@@ -1769,10 +1859,24 @@ mod tests {
             .expect("well-formed")
     }
 
+    /// A structurally identified plane, for the rules that require the
+    /// premise to be witnessed rather than asserted.
+    fn a_test_plane() -> PlaneSchema {
+        let plane = truck_geometry::prelude::Plane::new(
+            truck_geometry::prelude::Point3::new(0.0, 0.0, 0.0),
+            truck_geometry::prelude::Point3::new(1.0, 0.0, 0.0),
+            truck_geometry::prelude::Point3::new(0.0, 1.0, 0.0),
+        );
+        *super::super::support::identify_plane(&plane)
+            .plane()
+            .expect("a unit plane identifies")
+    }
+
     fn absent(axis: ParameterAxis) -> PeriodAxisEvidence {
         PeriodAxisEvidence::AuthoritativelyAbsent {
             axis,
-            evidence: certify_plane_aperiodicity(axis).expect("a plane's absence is analytic"),
+            evidence: certify_plane_aperiodicity(axis, &a_test_plane())
+                .expect("a plane's absence is analytic"),
         }
     }
 
@@ -2291,7 +2395,7 @@ mod tests {
 
     #[test]
     fn an_absence_rule_carries_its_premise() {
-        let plane = certify_plane_aperiodicity(ParameterAxis::U).unwrap();
+        let plane = certify_plane_aperiodicity(ParameterAxis::U, &a_test_plane()).unwrap();
         match plane.certificate() {
             EvidenceCertificate::Analytic(certificate) => {
                 assert_eq!(certificate.rule(), AnalyticRule::PlaneHasNoPeriodicDirection);
@@ -2402,5 +2506,148 @@ mod tests {
         for record in provenance.iter() {
             assert_eq!(record.tag(), "legacy_lattice_axis");
         }
+    }
+
+    // -- the structural support-surface bridge ------------------------------
+    //
+    // Step 1's census resolved 0 of 24,199 faces because the legacy lattice
+    // had already erased which producer said `NonPeriodic`. These tests fix
+    // the shape of the replacement: authority comes from the *representation*,
+    // and every route that does not start there still resolves nothing.
+
+    #[test]
+    fn a_structurally_identified_plane_resolves_rank_zero() {
+        let evidence = ambient_evidence_from_plane_schema(&a_test_plane())
+            .expect("the plane rule supplies its own premise");
+        let outcome = resolve_ambient_periods(evidence, &a_test_envelope(), a_face())
+            .expect("no operational failure");
+        match outcome {
+            StageOutcome::Resolved(CertifiedAmbientLattice::Rank0(_)) => {}
+            other => panic!("expected a certified rank 0 lattice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn both_planar_axes_carry_analytic_absence_evidence() {
+        let evidence = ambient_evidence_from_plane_schema(&a_test_plane()).unwrap();
+        for (axis, side) in [(ParameterAxis::U, &evidence.u), (ParameterAxis::V, &evidence.v)] {
+            match side {
+                PeriodAxisEvidence::AuthoritativelyAbsent { axis: got, evidence } => {
+                    assert_eq!(*got, axis);
+                    assert_eq!(evidence.basis(), AuthoritativeBasis::Analytic);
+                    match evidence.certificate() {
+                        EvidenceCertificate::Analytic(certificate) => assert_eq!(
+                            certificate.rule(),
+                            AnalyticRule::PlaneHasNoPeriodicDirection
+                        ),
+                        other => panic!("expected an analytic certificate, got {other:?}"),
+                    }
+                }
+                other => panic!("expected authoritative absence on {axis:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// The measured corpus case the bridge must not break. `look::lattice_of`
+    /// routes a torus through `from_unevidenced_accessors`, and a torus is
+    /// doubly periodic whatever those accessors return — so `None` on both
+    /// axes must not become absence.
+    #[test]
+    fn a_torus_with_absent_accessor_periods_does_not_resolve_rank_zero() {
+        let torus = CertifiedLattice::from_unevidenced_accessors(None, None);
+        let schema = SupportSurfaceSchema::not_structurally_identified(
+            super::super::support::SchemaIdentificationFailure::NoStructuralReader {
+                representation: "toroidal_surface",
+            },
+        );
+        let evidence = ambient_evidence_from_schema(
+            &schema,
+            &torus,
+            LatticeOrigin::UnattributedLegacyLattice,
+        )
+        .expect("the legacy adapter accepts an all-`None` lattice");
+        let outcome = resolve_ambient_periods(evidence, &a_test_envelope(), a_face()).unwrap();
+        match outcome {
+            StageOutcome::Unresolved(report) => {
+                assert_eq!(report.reason(), UnresolvedReason::PeriodAbsenceNotEstablished);
+            }
+            other => panic!("a torus must not resolve, got {other:?}"),
+        }
+    }
+
+    /// The forbidden inference, stated as a test: `NON_PERIODIC` on a surface
+    /// whose schema was never read resolves nothing. Only presenting the plane
+    /// changes the answer.
+    #[test]
+    fn an_unknown_schema_with_legacy_non_periodic_stays_unresolved() {
+        let schema = SupportSurfaceSchema::not_structurally_identified(
+            super::super::support::SchemaIdentificationFailure::NoStructuralReader {
+                representation: "b_spline_surface",
+            },
+        );
+        let evidence = ambient_evidence_from_schema(
+            &schema,
+            &CertifiedLattice::NON_PERIODIC,
+            LatticeOrigin::UnattributedLegacyLattice,
+        )
+        .unwrap();
+        let outcome = resolve_ambient_periods(evidence, &a_test_envelope(), a_face()).unwrap();
+        match outcome {
+            StageOutcome::Unresolved(report) => {
+                assert_eq!(report.reason(), UnresolvedReason::PeriodAbsenceNotEstablished);
+            }
+            other => panic!("legacy NON_PERIODIC must not resolve, got {other:?}"),
+        }
+    }
+
+    /// The same lattice value, the same origin, one difference: the schema.
+    /// This is the whole content of the bridge.
+    #[test]
+    fn only_the_schema_distinguishes_the_two_producers_of_non_periodic() {
+        let unknown = SupportSurfaceSchema::not_structurally_identified(
+            super::super::support::SchemaIdentificationFailure::NoStructuralReader {
+                representation: "b_spline_surface",
+            },
+        );
+        let plane = SupportSurfaceSchema::Plane(a_test_plane());
+        let resolve = |schema: &SupportSurfaceSchema| {
+            let evidence = ambient_evidence_from_schema(
+                schema,
+                &CertifiedLattice::NON_PERIODIC,
+                LatticeOrigin::UnattributedLegacyLattice,
+            )
+            .unwrap();
+            resolve_ambient_periods(evidence, &a_test_envelope(), a_face()).unwrap()
+        };
+        assert!(matches!(resolve(&unknown), StageOutcome::Unresolved(_)));
+        assert!(matches!(
+            resolve(&plane),
+            StageOutcome::Resolved(CertifiedAmbientLattice::Rank0(_))
+        ));
+    }
+
+    /// A degenerate plane never becomes a `PlaneSchema`, so the rank-0 route is
+    /// closed to it at the type level — there is no value to call the bridge
+    /// with. Restated here because it is an ambient-authority fact, not only a
+    /// schema-reader fact.
+    #[test]
+    fn a_degenerate_plane_cannot_reach_the_rank_zero_route() {
+        let degenerate = truck_geometry::prelude::Plane::new(
+            truck_geometry::prelude::Point3::new(0.0, 0.0, 0.0),
+            truck_geometry::prelude::Point3::new(1.0, 0.0, 0.0),
+            truck_geometry::prelude::Point3::new(2.0, 0.0, 0.0),
+        );
+        let schema = super::super::support::identify_plane(&degenerate);
+        assert!(schema.plane().is_none());
+        let evidence = ambient_evidence_from_schema(
+            &schema,
+            &CertifiedLattice::NON_PERIODIC,
+            LatticeOrigin::UnattributedLegacyLattice,
+        )
+        .unwrap();
+        assert!(matches!(
+            resolve_ambient_periods(evidence, &a_test_envelope(), a_face()).unwrap(),
+            StageOutcome::Unresolved(_)
+        ));
     }
 }

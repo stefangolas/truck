@@ -52,12 +52,14 @@ pub mod envelope;
 pub mod evidence;
 pub mod numeric;
 pub mod outcome;
+pub mod support;
 
 // The Step 1 surface, re-exported for the probe and for later stages. Types
 // only: every proof-introduction rule stays behind its module's visibility.
 pub use ambient::{
-    ambient_axis_evidence_from_legacy, ambient_evidence_from_legacy, certify_period_numerically,
-    certify_plane_aperiodicity, certify_revolution_period,
+    ambient_axis_evidence_from_legacy, ambient_evidence_from_legacy,
+    ambient_evidence_from_plane_schema, ambient_evidence_from_schema, certify_period_numerically,
+    certify_plane_aperiodicity, certify_revolution_period, AmbientEvidenceError,
     certify_straight_generatrix_aperiodicity, resolve_ambient_periods, AdapterError,
     AmbientAlternative, AmbientPeriodEvidence, CertifiedAmbientLattice, CertifiedPeriodBasisRef,
     CertifiedPeriodGenerator, CertifiedRank0, CertifiedRank1, CertifiedRank2,
@@ -77,6 +79,10 @@ pub use evidence::{
     FormalPredicate, NonEmptyVec, NumericalCertificate, ParameterAxis, PredicateDescription,
     SemanticStage, SourceEntityKey, ANALYTIC_ONLY, ANALYTIC_OR_CERTIFIED_NUMERICAL,
     ANY_AUTHORITATIVE, SOURCE_DECLARATION,
+};
+pub use support::{
+    identify_plane, PlaneGram, PlaneSchema, SchemaIdentificationFailure, SupportSurfaceSchema,
+    MINIMUM_NORMALISED_GRAM_DETERMINANT,
 };
 pub use outcome::{
     Ambiguity, AmbiguityReport, ContradictionWitness, DocumentKey, DocumentScope, FaceKey,

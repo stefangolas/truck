@@ -205,7 +205,14 @@ where
     C: PolylineableCurve + 'a,
     S: PreMeshableSurface + 'a,
 {
-    cshell_tessellation_with_outcomes(shell, tol, sp, lattice_of).shell
+    cshell_tessellation_with_outcomes(shell, tol, sp, lattice_of, |_| {
+        formal::SupportSurfaceSchema::not_structurally_identified(
+            formal::SchemaIdentificationFailure::NoStructuralReader {
+                representation: "legacy_entry_point_reads_no_schema",
+            },
+        )
+    })
+    .shell
 }
 
 /// Tessellates faces, preserving why each face that failed did so.
@@ -214,6 +221,7 @@ pub(super) fn cshell_tessellation_with_outcomes<'a, C, S>(
     tol: f64,
     sp: impl SP<S>,
     lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
+    schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
 ) -> MeshedShellOutcome
 where
     C: PolylineableCurve + 'a,
@@ -384,6 +392,9 @@ where
         let boundaries = face.boundaries.clone();
         let surface = &face.surface;
         let lattice = lattice_of(surface);
+        // The structural schema, read before the lattice erases which producer
+        // said `NonPeriodic`. Nothing in the legacy chain below reads it.
+        let schema = schema_of(surface);
         // Step 0: build the rewrite's input seam beside the legacy path and
         // report it. Nothing below reads it, so geometry is unchanged by
         // construction — the point is to count what the seam carries before
@@ -399,7 +410,13 @@ where
         // construction. The point is to measure where the legacy
         // representation collapses uncertainty, before anything depends on it.
         if ambient_probe {
-            emit_ambient_probe(source_face_id, declared_face_index, shell_ordinal, &lattice);
+            emit_ambient_probe(
+                source_face_id,
+                declared_face_index,
+                shell_ordinal,
+                &lattice,
+                &schema,
+            );
         }
         let create_edge = |edge_idx: &CompressedEdgeIndex| match edge_idx.orientation {
             true => Some(edges.get(edge_idx.index)?.curve.clone()),
@@ -620,6 +637,7 @@ fn emit_ambient_probe(
     declared_face_index: usize,
     shell_ordinal: u64,
     lattice: &CertifiedLattice,
+    schema: &formal::SupportSurfaceSchema,
 ) {
     let declared_rank = usize::from(lattice.declared_u_period().is_some())
         + usize::from(lattice.declared_v_period().is_some());
@@ -629,7 +647,8 @@ fn emit_ambient_probe(
         None => "none".to_string(),
     };
 
-    let record = match formal::ambient_evidence_from_legacy(
+    let record = match formal::ambient_evidence_from_schema(
+        schema,
         lattice,
         formal::LatticeOrigin::UnattributedLegacyLattice,
     ) {
@@ -701,10 +720,12 @@ fn emit_ambient_probe(
             )
         }
     };
+    let support_schema = schema.tag();
     eprintln!(
         "AMBIENT\tsource_face_id={id}\tdeclared_face_index={declared_face_index}\t\
          shell_ordinal={shell_ordinal}\tdeclared_rank={declared_rank}\t\
-         legacy_certified_rank={legacy_certified_rank}\t{record}"
+         legacy_certified_rank={legacy_certified_rank}\tsupport_schema={support_schema}\t\
+         {record}"
     );
 }
 
