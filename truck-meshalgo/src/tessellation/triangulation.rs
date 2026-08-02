@@ -6,6 +6,7 @@
 
 use super::*;
 use super::domain::lattice::CertifiedLattice;
+use super::formal;
 use super::source_evidence::{
     BoundId, EdgeUseId, ErasedOrientationMechanism, OrientationEvidence, OrientationOrigin,
     SourceBoundInput, SourceEdgeOrientationEvidence, SourceEdgeUseInput, SourceEvidenceError,
@@ -221,6 +222,12 @@ where
     let vertices = shell.vertices.clone();
     let edge_probe = std::env::var_os("TRUCK_PROBE_EDGE").is_some();
     let evidence_probe = std::env::var_os("TRUCK_PROBE_EVIDENCE").is_some();
+    let ambient_probe = std::env::var_os("TRUCK_PROBE_AMBIENT").is_some();
+    // A per-run shell ordinal, so a `FaceKey` is unique across shells:
+    // `declared_face_index` is an index *within* a shell and collides between
+    // them. Assigned once per shell here, before the parallel face loop, so
+    // every face of one shell shares it.
+    let shell_ordinal = SHELL_ORDINAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tessellate_edge = |edge: &CompressedEdge<C>| {
         let curve = &edge.curve;
         let range = curve.range_tuple();
@@ -385,6 +392,14 @@ where
             let input =
                 source_face_input_from_compressed(declared_face_index, source_face_id, face, &edges);
             emit_evidence_probe(&input, source_face_id, declared_face_index, &lattice);
+        }
+        // Step 1: resolve the same lattice through the formal ambient-period
+        // model and report what it concludes. Nothing below reads the result --
+        // it is dropped at the end of this block -- so geometry is unchanged by
+        // construction. The point is to measure where the legacy
+        // representation collapses uncertainty, before anything depends on it.
+        if ambient_probe {
+            emit_ambient_probe(source_face_id, declared_face_index, shell_ordinal, &lattice);
         }
         let create_edge = |edge_idx: &CompressedEdgeIndex| match edge_idx.orientation {
             true => Some(edges.get(edge_idx.index)?.curve.clone()),
@@ -556,6 +571,141 @@ fn source_face_input_from_compressed<S, C>(
             },
         },
     })
+}
+
+/// Per-run shell ordinal for the Step-1 `FaceKey`. Diagnostic only.
+static SHELL_ORDINAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The formal envelope the ambient probe evaluates against.
+///
+/// **This is not a production policy.** No project document specifies values
+/// for `s_max`, `n_max`, `e_max`, `w_max`, `x_max`, `v_max` or `g_max` --
+/// `FORMAL_SYSTEM.md` Definition 6 says only that they are policy and that the
+/// closure proof needs them finite -- so these are diagnostic constants chosen
+/// to be non-binding. The one value the documents *do* fix, `r_max <= 2`, is
+/// set to that maximum.
+///
+/// The rank clause is the only one Step 1 evaluates. Every other bound is
+/// unreachable at this stage and is stated because the envelope has no
+/// `Default` and must be given in full.
+fn diagnostic_envelope() -> formal::FormalEnvelope {
+    formal::FormalEnvelope::new(
+        formal::PolicyInstanceId::new(0),
+        2,
+        usize::MAX,
+        usize::MAX,
+        usize::MAX,
+        u64::MAX,
+        usize::MAX,
+        usize::MAX,
+        usize::MAX,
+    )
+    .expect("r_max = 2 is Definition 6's own maximum")
+}
+
+/// Step-1 ambient-period probe.
+///
+/// One `eprintln!` per successfully converted compressed face, for the same
+/// reason as the `EVIDENCE` probe: face tessellation is parallel and a record
+/// split across calls interleaves. Consumers must parse order-independently and
+/// key on `source_face_id` / `declared_face_index`.
+///
+/// The record reports the legacy `declared_rank` and `certified_rank` beside
+/// the formal resolution so the two can be compared face by face. They are
+/// **not expected to agree**: `certified_rank == 0` covers both "proved
+/// aperiodic" and "periodicity declared and never certified", and separating
+/// those is what this step exists for.
+fn emit_ambient_probe(
+    source_face_id: Option<u64>,
+    declared_face_index: usize,
+    shell_ordinal: u64,
+    lattice: &CertifiedLattice,
+) {
+    let declared_rank = usize::from(lattice.declared_u_period().is_some())
+        + usize::from(lattice.declared_v_period().is_some());
+    let legacy_certified_rank = lattice.certified_rank();
+    let id = match source_face_id {
+        Some(id) => id.to_string(),
+        None => "none".to_string(),
+    };
+
+    let record = match formal::ambient_evidence_from_legacy(
+        lattice,
+        formal::LatticeOrigin::UnattributedLegacyLattice,
+    ) {
+        Err(error) => format!(
+            "u_state=none\tv_state=none\tformal_resolution=adapter_error\tformal_rank=none\t\
+             unresolved_reason=none\tinconsistency_reason=none\tunsupported_clause=none\t\
+             diagnostic_hint_count=0\tauthoritative_generator_count=0\tadapter_error={}",
+            error.tag(),
+        ),
+        Ok(evidence) => {
+            let u_state = evidence.u.tag();
+            let v_state = evidence.v.tag();
+            let hints = evidence.diagnostic_hints().len();
+            let generators = evidence.authoritative_generator_count();
+            let face = formal::FaceKey {
+                document: formal::DocumentScope::SingleDocumentRun,
+                shell: formal::ShellKey::new(shell_ordinal),
+                source_face_id: source_face_id.map(formal::SourceEntityKey::new),
+                declared_face_index,
+            };
+            // An operational failure is not a semantic judgment, so it is
+            // reported as itself rather than folded into a resolution.
+            let (resolution, rank, unresolved, inconsistency, unsupported) =
+                match formal::resolve_ambient_periods(evidence, &diagnostic_envelope(), face) {
+                    Err(failure) => (failure.tag(), "none".to_string(), "none", "none", "none"),
+                    Ok(outcome) => {
+                        let tag = outcome.tag();
+                        match &outcome {
+                            formal::StageOutcome::Resolved(resolved) => {
+                                (tag, resolved.rank().to_string(), "none", "none", "none")
+                            }
+                            formal::StageOutcome::Unresolved(report) => (
+                                tag,
+                                "none".to_string(),
+                                report.reason().tag(),
+                                "none",
+                                "none",
+                            ),
+                            formal::StageOutcome::Inconsistent(report) => (
+                                tag,
+                                "none".to_string(),
+                                "none",
+                                report.reason().tag(),
+                                "none",
+                            ),
+                            formal::StageOutcome::Unsupported(report) => (
+                                tag,
+                                "none".to_string(),
+                                "none",
+                                "none",
+                                report.cause().tag(),
+                            ),
+                            formal::StageOutcome::Ambiguous(report) => (
+                                tag,
+                                "none".to_string(),
+                                "none",
+                                report.reason().tag(),
+                                "none",
+                            ),
+                        }
+                    }
+                };
+            format!(
+                "u_state={u_state}\tv_state={v_state}\tformal_resolution={resolution}\t\
+                 formal_rank={rank}\tunresolved_reason={unresolved}\t\
+                 inconsistency_reason={inconsistency}\tunsupported_clause={unsupported}\t\
+                 diagnostic_hint_count={hints}\tauthoritative_generator_count={generators}\t\
+                 adapter_error=none"
+            )
+        }
+    };
+    eprintln!(
+        "AMBIENT\tsource_face_id={id}\tdeclared_face_index={declared_face_index}\t\
+         shell_ordinal={shell_ordinal}\tdeclared_rank={declared_rank}\t\
+         legacy_certified_rank={legacy_certified_rank}\t{record}"
+    );
 }
 
 // Step-0 evidence-audit probe. Remove after `SourceFaceInput` becomes the
