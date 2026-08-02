@@ -453,6 +453,8 @@ impl Table {
                 use_id: use_id.map(SourceEntityId::new),
                 definition_id: definition_id.map(SourceEntityId::new),
                 surface_id: None,
+                // Established below, once the bounds have been read.
+                outer_bound: OuterBoundStanding::NotRetained,
             };
             let Some((mut surface, surface_id)) = self.face_surface(&face, &mut surfaces) else {
                 losses.push(FaceLoss {
@@ -496,6 +498,17 @@ impl Table {
                 })
                 .collect();
             let collapsed = collapsed_pts.len();
+            // The outer-bound standing, computed against the *surviving* wires
+            // because `boundaries` below is the filtered list and an index into
+            // the unfiltered one would name a different bound. A collapsed
+            // outer bound is not silently reassigned to a neighbour: it simply
+            // leaves no index, and the face reports `NoneDeclared`.
+            let outer_flags = face.bound_outer_flags(self);
+            let outer_bound = outer_bound_standing(&outer_flags, &outcomes);
+            let provenance = FaceProvenance {
+                outer_bound,
+                ..provenance
+            };
             let wires: Vec<TopologicallyClosedWire> = outcomes
                 .into_iter()
                 .filter_map(|o| match o {
@@ -1234,6 +1247,46 @@ pub struct FaceLoss {
 }
 
 /// What one face bound contributed to the trimming domain.
+/// The face's outer-bound standing, stated against the surviving wires.
+///
+/// `flags` is per declared bound, in source order: `Some(true)` for a
+/// `FACE_OUTER_BOUND`, `Some(false)` for a plain `FACE_BOUND`, `None` for a
+/// bound the document inlined, whose entity type this reader cannot recover.
+///
+/// Any `None` makes the whole face `NotRetained`. That is deliberate: a face
+/// with one inlined bound and one referenced `FACE_BOUND` would otherwise
+/// report `NoneDeclared`, which is a *claim* about the source, and the reader
+/// is not in a position to make it.
+fn outer_bound_standing(flags: &[Option<bool>], outcomes: &[BoundOutcome]) -> OuterBoundStanding {
+    if flags.len() != outcomes.len() || flags.iter().any(Option::is_none) {
+        return OuterBoundStanding::NotRetained;
+    }
+    let declared_count = flags.iter().filter(|flag| **flag == Some(true)).count();
+    // Index among the wires that survive, since those are what `boundaries`
+    // will hold. A collapsed outer bound contributes no wire and so no index.
+    let mut surviving = 0u32;
+    let mut bound_index = None;
+    for (flag, outcome) in flags.iter().zip(outcomes) {
+        match outcome {
+            BoundOutcome::Wire(_) => {
+                if *flag == Some(true) && bound_index.is_none() {
+                    bound_index = Some(surviving);
+                }
+                surviving += 1;
+            }
+            BoundOutcome::Collapsed(_) => {}
+        }
+    }
+    match (declared_count, bound_index) {
+        (0, _) => OuterBoundStanding::NoneDeclared,
+        (_, None) => OuterBoundStanding::NoneDeclared,
+        (count, Some(bound_index)) => OuterBoundStanding::Declared {
+            bound_index,
+            declared_count: count as u32,
+        },
+    }
+}
+
 enum BoundOutcome {
     /// An ordinary closed wire of edges.
     Wire(TopologicallyClosedWire),

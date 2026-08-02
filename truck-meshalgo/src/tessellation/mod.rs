@@ -354,7 +354,7 @@ impl<C: PolylineableCurve, S: RobustMeshableSurface> RobustMeshableShape
 }
 
 /// Tessellation with a caller-supplied deck lattice.
-pub trait LatticeMeshableShape<S> {
+pub trait LatticeMeshableShape<S, C> {
     /// The meshed shape.
     type MeshedShape: MeshedShape;
     /// As [`RobustMeshableShape::robust_triangulation`], but the caller supplies
@@ -408,10 +408,11 @@ pub trait LatticeMeshableShape<S> {
         tol: f64,
         lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
         schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
+        curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
     ) -> MeshedShellOutcome;
 }
 
-impl<C: PolylineableCurve, S: RobustMeshableSurface> LatticeMeshableShape<S>
+impl<C: PolylineableCurve, S: RobustMeshableSurface> LatticeMeshableShape<S, C>
     for CompressedShell<Point3, C, S>
 {
     type MeshedShape = CompressedShell<Point3, PolylineCurve, Option<PolygonMesh>>;
@@ -434,13 +435,24 @@ impl<C: PolylineableCurve, S: RobustMeshableSurface> LatticeMeshableShape<S>
         // No structural reader was supplied, so none is claimed. Every face
         // takes the conservative legacy adapter and resolves no ambient rank,
         // which is exactly the Step 1 behaviour this form had before.
-        self.robust_triangulation_with_schema_outcome(tol, lattice_of, |_| {
-            formal::SupportSurfaceSchema::not_structurally_identified(
-                formal::SchemaIdentificationFailure::NoStructuralReader {
-                    representation: "caller_supplied_no_schema_resolver",
-                },
-            )
-        })
+        self.robust_triangulation_with_schema_outcome(
+            tol,
+            lattice_of,
+            |_| {
+                formal::SupportSurfaceSchema::not_structurally_identified(
+                    formal::SchemaIdentificationFailure::NoStructuralReader {
+                        representation: "caller_supplied_no_schema_resolver",
+                    },
+                )
+            },
+            |_| {
+                formal::CurveSchema::not_structurally_identified(
+                    formal::CurveSchemaFailure::NoStructuralReader {
+                        representation: "caller_supplied_no_schema_resolver",
+                    },
+                )
+            },
+        )
     }
 
     fn robust_triangulation_with_schema_outcome(
@@ -448,6 +460,7 @@ impl<C: PolylineableCurve, S: RobustMeshableSurface> LatticeMeshableShape<S>
         tol: f64,
         lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
         schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
+        curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
     ) -> MeshedShellOutcome {
         nonpositive_tolerance!(tol);
         triangulation::cshell_tessellation_with_outcomes(
@@ -456,6 +469,7 @@ impl<C: PolylineableCurve, S: RobustMeshableSurface> LatticeMeshableShape<S>
             triangulation::by_search_nearest_parameter,
             lattice_of,
             schema_of,
+            curve_schema_of,
         )
     }
 }
@@ -492,9 +506,7 @@ pub mod source_evidence;
 mod triangulation;
 
 use domain::lattice::CertifiedLattice;
-pub use triangulation::{
-    MeshedShellOutcome, TessellationFailure, TessellationFailureReason,
-};
+pub use triangulation::{MeshedShellOutcome, TessellationFailure, TessellationFailureReason};
 
 /// The lattice a surface reports through its bare accessors, with no evidence.
 ///

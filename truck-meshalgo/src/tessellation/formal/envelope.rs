@@ -175,10 +175,7 @@ impl FeatureExclusionWitness {
     /// that can actually prove these does not exist yet; when it does, it
     /// constructs them here. Unused until then.
     #[allow(dead_code)]
-    pub(super) fn new(
-        exclusion: FeatureExclusion,
-        grounds: NonEmptyVec<ExclusionGround>,
-    ) -> Self {
+    pub(super) fn new(exclusion: FeatureExclusion, grounds: NonEmptyVec<ExclusionGround>) -> Self {
         Self { exclusion, grounds }
     }
 
@@ -848,10 +845,8 @@ impl ExecutionBudget {
 
 #[cfg(test)]
 mod tests {
-    use super::super::outcome::{
-        ExecutionResource, OperationalFailure, ResourceOperation,
-    };
     use super::super::evidence::SemanticStage;
+    use super::super::outcome::{ExecutionResource, OperationalFailure, ResourceOperation};
     use super::*;
 
     /// A policy for tests only. It is *not* a production value: no project
@@ -897,7 +892,17 @@ mod tests {
     fn the_envelope_has_no_default_and_caps_the_lattice_rank() {
         assert_eq!(a_test_envelope().max_lattice_rank(), 2);
         assert_eq!(
-            FormalEnvelope::new(PolicyInstanceId::new(1), 3, 4, 64, 4096, 16, 64, 32, 1 << 20),
+            FormalEnvelope::new(
+                PolicyInstanceId::new(1),
+                3,
+                4,
+                64,
+                4096,
+                16,
+                64,
+                32,
+                1 << 20
+            ),
             Err(PolicyConstructionError::LatticeRankAboveDefinitionMaximum {
                 requested: 3,
                 permitted: 2,
@@ -964,28 +969,19 @@ mod tests {
         );
         assert_eq!(
             envelope
-                .check_native_boundary_strata(exact(
-                    64,
-                    MeasurementSubject::NativeBoundaryStrata
-                ))
+                .check_native_boundary_strata(exact(64, MeasurementSubject::NativeBoundaryStrata))
                 .unwrap(),
             Ok(())
         );
         assert_eq!(
             envelope
-                .check_regular_vertex_valence(exact(
-                    32,
-                    MeasurementSubject::RegularVertexValence
-                ))
+                .check_regular_vertex_valence(exact(32, MeasurementSubject::RegularVertexValence))
                 .unwrap(),
             Ok(())
         );
         assert_eq!(
             envelope
-                .check_arrangement_elements(exact(
-                    1 << 20,
-                    MeasurementSubject::ArrangementElements
-                ))
+                .check_arrangement_elements(exact(1 << 20, MeasurementSubject::ArrangementElements))
                 .unwrap(),
             Ok(())
         );
@@ -998,7 +994,10 @@ mod tests {
             .check_pair_intersections(exact(65, MeasurementSubject::PairIntersections))
             .unwrap()
             .expect_err("65 > 64");
-        assert_eq!(violation.clause(), NumericEnvelopeClause::PairIntersectionCount);
+        assert_eq!(
+            violation.clause(),
+            NumericEnvelopeClause::PairIntersectionCount
+        );
         assert_eq!(violation.maximum(), 64);
         assert_eq!(violation.observation().value(), 65);
 
@@ -1129,7 +1128,10 @@ mod tests {
             FeatureExclusion::UnboundedCurveEnclosure,
             NonEmptyVec::one(ExclusionGround::EnclosureProvedUnbounded),
         );
-        assert_eq!(witness.exclusion(), FeatureExclusion::UnboundedCurveEnclosure);
+        assert_eq!(
+            witness.exclusion(),
+            FeatureExclusion::UnboundedCurveEnclosure
+        );
     }
 
     #[test]

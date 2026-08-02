@@ -117,6 +117,74 @@ pub struct FaceProvenance {
     /// many faces, so "which surface did this face name" is a different
     /// question from "which face is this".
     pub surface_id: Option<SourceEntityId>,
+    /// Which of this face's bounds the source declared as its *outer* bound.
+    ///
+    /// `boundaries` is a bare `Vec` and gives no bound any standing, so
+    /// "the outer one" is not recoverable from it. STEP does distinguish them —
+    /// `FACE_OUTER_BOUND` is a subtype of `FACE_BOUND` — and material selection
+    /// needs the distinction: with one outer loop the material region is the
+    /// bounded complementary component, and with an inner loop it is not. See
+    /// [`OuterBoundStanding`].
+    #[serde(default)]
+    pub outer_bound: OuterBoundStanding,
+}
+
+/// Which bound of a face its source declared to be the outer one.
+///
+/// The distinction between "nothing recorded this" and "the source declared no
+/// outer bound" is the whole point of the type: a face reaching a consumer with
+/// [`Self::NotRetained`] is one whose outer-bound authority was never carried,
+/// and inferring outer standing from a face happening to have one bound is
+/// exactly the guess this prevents. A `FACE_BOUND`-only face is legal STEP and
+/// its single bound is *not* thereby an outer bound.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum OuterBoundStanding {
+    /// No stage carried the standing. The default, so a face built by
+    /// modelling, healing or deserialization of an older document claims
+    /// nothing.
+    #[default]
+    NotRetained,
+    /// The standing was read and the source declared no `FACE_OUTER_BOUND`.
+    NoneDeclared,
+    /// The source declared an outer bound, at this index into `boundaries`.
+    Declared {
+        /// Index into the face's `boundaries`, after any bound that
+        /// contributed no wire was dropped.
+        bound_index: u32,
+        /// How many `FACE_OUTER_BOUND` entities the face declared. STEP
+        /// permits at most one; more than one is a source contradiction, and
+        /// recording the count is what lets a consumer say so rather than
+        /// silently take the first.
+        declared_count: u32,
+    },
+}
+
+impl OuterBoundStanding {
+    /// The outer bound's index, when exactly one was declared.
+    ///
+    /// `None` for every other state, including a face declaring two outer
+    /// bounds — that is a contradiction, not a choice.
+    pub fn unique_outer_bound_index(self) -> Option<u32> {
+        match self {
+            Self::Declared {
+                bound_index,
+                declared_count: 1,
+            } => Some(bound_index),
+            _ => None,
+        }
+    }
+
+    /// A short stable tag, for probe records.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::NotRetained => "not_retained",
+            Self::NoneDeclared => "none_declared",
+            Self::Declared {
+                declared_count: 1, ..
+            } => "declared",
+            Self::Declared { .. } => "multiply_declared",
+        }
+    }
 }
 
 impl FaceProvenance {

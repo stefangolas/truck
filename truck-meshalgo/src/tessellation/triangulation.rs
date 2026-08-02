@@ -4,7 +4,6 @@
 // wire them up; remove this `allow` when the diagnostic API is finalized.
 #![allow(dead_code, unused)]
 
-use super::*;
 use super::domain::lattice::CertifiedLattice;
 use super::formal;
 use super::source_evidence::{
@@ -12,6 +11,7 @@ use super::source_evidence::{
     SourceBoundInput, SourceEdgeOrientationEvidence, SourceEdgeUseInput, SourceEvidenceError,
     SourceFaceInput, SourceFaceOrientationEvidence, SourceVertexKey,
 };
+use super::*;
 use crate::filters::NormalFilters;
 use crate::Point2;
 use array_macro::array;
@@ -117,7 +117,14 @@ where
             .map(create_boundary)
             .collect();
         let lattice = lattice_of(&face.surface());
-        shell_create_polygon(&face.surface(), wires, face.orientation(), tol, &sp, &lattice)
+        shell_create_polygon(
+            &face.surface(),
+            wires,
+            face.orientation(),
+            tol,
+            &sp,
+            &lattice,
+        )
     };
     shell.face_par_iter().map(create_face).collect()
 }
@@ -169,7 +176,14 @@ where
             .map(&mut create_boundary)
             .collect();
         let lattice = lattice_of(&face.surface());
-        shell_create_polygon(&face.surface(), wires, face.orientation(), tol, &sp, &lattice)
+        shell_create_polygon(
+            &face.surface(),
+            wires,
+            face.orientation(),
+            tol,
+            &sp,
+            &lattice,
+        )
     };
     shell.face_iter().map(create_face).collect()
 }
@@ -205,13 +219,26 @@ where
     C: PolylineableCurve + 'a,
     S: PreMeshableSurface + 'a,
 {
-    cshell_tessellation_with_outcomes(shell, tol, sp, lattice_of, |_| {
-        formal::SupportSurfaceSchema::not_structurally_identified(
-            formal::SchemaIdentificationFailure::NoStructuralReader {
-                representation: "legacy_entry_point_reads_no_schema",
-            },
-        )
-    })
+    cshell_tessellation_with_outcomes(
+        shell,
+        tol,
+        sp,
+        lattice_of,
+        |_| {
+            formal::SupportSurfaceSchema::not_structurally_identified(
+                formal::SchemaIdentificationFailure::NoStructuralReader {
+                    representation: "legacy_entry_point_reads_no_schema",
+                },
+            )
+        },
+        |_| {
+            formal::CurveSchema::not_structurally_identified(
+                formal::CurveSchemaFailure::NoStructuralReader {
+                    representation: "legacy_entry_point_reads_no_schema",
+                },
+            )
+        },
+    )
     .shell
 }
 
@@ -222,6 +249,7 @@ pub(super) fn cshell_tessellation_with_outcomes<'a, C, S>(
     sp: impl SP<S>,
     lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
     schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
+    curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
 ) -> MeshedShellOutcome
 where
     C: PolylineableCurve + 'a,
@@ -231,6 +259,13 @@ where
     let edge_probe = std::env::var_os("TRUCK_PROBE_EDGE").is_some();
     let evidence_probe = std::env::var_os("TRUCK_PROBE_EVIDENCE").is_some();
     let ambient_probe = std::env::var_os("TRUCK_PROBE_AMBIENT").is_some();
+    // The planar vertical slice. `TRUCK_PROBE_SLICE` runs it in shadow and
+    // reports; `TRUCK_FORMAL_RECOVERY` additionally lets a validated formal
+    // mesh replace a face the *legacy path lost*, and nothing else. Both are
+    // off by default, so production output is unchanged by construction.
+    let slice_probe = std::env::var_os("TRUCK_PROBE_SLICE").is_some();
+    let recovery_gate = std::env::var_os("TRUCK_FORMAL_RECOVERY").is_some();
+    let run_slice = slice_probe || recovery_gate;
     // A per-run shell ordinal, so a `FaceKey` is unique across shells:
     // `declared_face_index` is an index *within* a shell and collides between
     // them. Assigned once per shell here, before the parallel face loop, so
@@ -400,8 +435,12 @@ where
         // construction — the point is to count what the seam carries before
         // the pipeline that depends on it exists.
         if evidence_probe {
-            let input =
-                source_face_input_from_compressed(declared_face_index, source_face_id, face, &edges);
+            let input = source_face_input_from_compressed(
+                declared_face_index,
+                source_face_id,
+                face,
+                &edges,
+            );
             emit_evidence_probe(&input, source_face_id, declared_face_index, &lattice);
         }
         // Step 1: resolve the same lattice through the formal ambient-period
@@ -446,6 +485,70 @@ where
                 }
             }
         };
+        // The planar vertical slice, run beside the legacy result. Its input
+        // is Step 0's source evidence, Step 1's certified lattice and the
+        // structural schemas; it reads nothing the legacy path produced, so a
+        // face's formal verdict is independent of whether the legacy path
+        // succeeded.
+        let (polygon, failure) = if !run_slice {
+            (polygon, failure)
+        } else {
+            let record = run_slice_for_face(
+                declared_face_index,
+                source_face_id,
+                shell_ordinal,
+                face,
+                &shell.edges,
+                &shell.vertices,
+                &lattice,
+                &schema,
+                &curve_schema_of,
+                tol,
+            );
+            if slice_probe {
+                emit_slice_probe(source_face_id, declared_face_index, shell_ordinal, &record);
+            }
+            // The recovery gate. Every conjunct is explicit and the whole
+            // thing is one `if`: a validated formal mesh replaces a face the
+            // legacy path *lost*, and never a face it meshed.
+            let legacy_failed = failure.is_some();
+            match (recovery_gate, legacy_failed, record.as_ref()) {
+                (true, true, Some(record))
+                    if record.stage == formal::SliceStage::FinalValidity
+                        && record.category == formal::SliceCategory::Resolved =>
+                {
+                    match record.mesh.as_ref() {
+                        Some(formal_mesh) => {
+                            eprintln!(
+                                "RECOVERED\tsource_face_id={}\t\
+                                 declared_face_index={declared_face_index}\ttriangles={}",
+                                source_face_id
+                                    .map(|id| id.to_string())
+                                    .unwrap_or_else(|| "none".into()),
+                                formal_mesh.triangles.len(),
+                            );
+                            // The recovered geometry, so a corpus face can
+                            // become a regression fixture without shipping the
+                            // 400 MB model it came from.
+                            for position in &formal_mesh.positions {
+                                eprintln!(
+                                    "RECOVERED_VERTEX	source_face_id={}	x={:?}	y={:?}	z={:?}",
+                                    source_face_id
+                                        .map(|id| id.to_string())
+                                        .unwrap_or_else(|| "none".into()),
+                                    position.x,
+                                    position.y,
+                                    position.z,
+                                );
+                            }
+                            (Some(planar_mesh_to_polygon(formal_mesh)), None)
+                        }
+                        None => (polygon, failure),
+                    }
+                }
+                _ => (polygon, failure),
+            }
+        };
         let result = CompressedFace {
             boundaries,
             orientation: face.orientation,
@@ -467,12 +570,8 @@ where
         .map(tessellate_face)
         .unzip();
     #[cfg(target_arch = "wasm32")]
-    let (faces, face_failures): (Vec<_>, Vec<_>) = shell
-        .faces
-        .iter()
-        .enumerate()
-        .map(tessellate_face)
-        .unzip();
+    let (faces, face_failures): (Vec<_>, Vec<_>) =
+        shell.faces.iter().enumerate().map(tessellate_face).unzip();
     MeshedShellOutcome {
         shell: MeshedCShell {
             vertices,
@@ -523,12 +622,13 @@ fn source_face_input_from_compressed<S, C>(
         let mut edge_uses = Vec::with_capacity(wire.len());
         for (use_index, edge_idx) in wire.iter().enumerate() {
             let id = EdgeUseId::new(bound, use_index);
-            let edge = edges.get(edge_idx.index).ok_or(
-                SourceEvidenceError::EdgeIndexOutOfRange {
-                    edge_use: id,
-                    index: edge_idx.index,
-                },
-            )?;
+            let edge =
+                edges
+                    .get(edge_idx.index)
+                    .ok_or(SourceEvidenceError::EdgeIndexOutOfRange {
+                        edge_use: id,
+                        index: edge_idx.index,
+                    })?;
             // The edge's vertices are stated in the edge's own direction, so
             // the composed sense selects which is the *use's* start. This is
             // the one place the retained orientation is read as a fact rather
@@ -729,6 +829,159 @@ fn emit_ambient_probe(
     );
 }
 
+// ---------------------------------------------------------------------------
+// The planar vertical slice, run beside the legacy tessellator
+// ---------------------------------------------------------------------------
+
+/// Run the formal planar slice for one face, when it is a candidate.
+///
+/// `None` means the face never entered: it is not a structurally identified
+/// plane, or Step 1 did not resolve it to a certified rank-0 lattice. Those two
+/// populations are already reported by the ambient probe, so they are counted
+/// there rather than duplicated here as slice exits.
+///
+/// Nothing in here reads the legacy result, so a face's formal verdict is
+/// independent of whether the legacy path succeeded on it.
+#[allow(clippy::too_many_arguments)]
+fn run_slice_for_face<S, C>(
+    declared_face_index: usize,
+    source_face_id: Option<u64>,
+    shell_ordinal: u64,
+    face: &CompressedFace<S>,
+    edges: &[CompressedEdge<C>],
+    vertices: &[Point3],
+    lattice: &CertifiedLattice,
+    schema: &formal::SupportSurfaceSchema,
+    curve_schema_of: &impl Fn(&C) -> formal::CurveSchema,
+    tol: f64,
+) -> Option<formal::SliceRecord> {
+    // Step 1. The same call the ambient probe makes, on the same evidence.
+    let plane = schema.plane()?;
+    let evidence = formal::ambient_evidence_from_schema(
+        schema,
+        lattice,
+        formal::LatticeOrigin::UnattributedLegacyLattice,
+    )
+    .ok()?;
+    let key = formal::FaceKey {
+        document: formal::DocumentScope::SingleDocumentRun,
+        shell: formal::ShellKey::new(shell_ordinal),
+        source_face_id: source_face_id.map(formal::SourceEntityKey::new),
+        declared_face_index,
+    };
+    let formal::StageOutcome::Resolved(certified) =
+        formal::resolve_ambient_periods(evidence, &diagnostic_envelope(), key).ok()?
+    else {
+        return None;
+    };
+
+    // Step 0. The same seam the evidence probe reports.
+    let input =
+        source_face_input_from_compressed(declared_face_index, source_face_id, face, edges).ok()?;
+
+    Some(formal::run_planar_slice(
+        &input,
+        plane,
+        &certified,
+        face.provenance.outer_bound,
+        &mut |edge_index| match edges.get(edge_index) {
+            Some(edge) => curve_schema_of(&edge.curve),
+            None => formal::CurveSchema::not_structurally_identified(
+                formal::CurveSchemaFailure::NoStructuralReader {
+                    representation: "edge_index_out_of_range",
+                },
+            ),
+        },
+        &|vertex| match vertex {
+            SourceVertexKey::ShellVertex(index) => vertices.get(index).copied(),
+            _ => None,
+        },
+        tol,
+    ))
+}
+
+/// Turn a validated planar mesh into the polygon mesh the shell holds.
+///
+/// The normal is the support plane's chart normal, constant over the face
+/// because the face is planar. It carries no material-side meaning: Step 0
+/// measured the normalized physical sign as unavailable on all 110,770 edge
+/// uses, and nothing here invents one.
+fn planar_mesh_to_polygon(mesh: &formal::PlanarMesh) -> PolygonMesh {
+    let positions = mesh.positions.clone();
+    let normals = vec![mesh.chart_normal; positions.len()];
+    let tri_faces: Vec<[StandardVertex; 3]> = mesh
+        .triangles
+        .iter()
+        .map(|indices| {
+            array![i => StandardVertex {
+                pos: indices[i],
+                uv: None,
+                nor: Some(indices[i]),
+            }; 3]
+        })
+        .collect();
+    PolygonMesh::debug_new(
+        StandardAttributes {
+            positions,
+            uv_coords: Vec::new(),
+            normals,
+        },
+        Faces::from_tri_and_quad_faces(tri_faces, Vec::new()),
+    )
+}
+
+/// One tab-separated record per candidate face, for the funnel and the
+/// obstruction histogram.
+///
+/// Emitted from inside a parallel tessellation, so consumers must parse
+/// order-independently and key on `source_face_id` / `declared_face_index`.
+fn emit_slice_probe(
+    source_face_id: Option<u64>,
+    declared_face_index: usize,
+    shell_ordinal: u64,
+    record: &Option<formal::SliceRecord>,
+) {
+    let id = source_face_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let Some(record) = record else {
+        eprintln!(
+            "SLICE\tsource_face_id={id}\tdeclared_face_index={declared_face_index}\t\
+             shell_ordinal={shell_ordinal}\tcandidate=0\tstage=not_attempted\t\
+             category=unresolved\texit=not_a_planar_rank0_candidate\tbounds=0\t\
+             edge_uses=0\touter_bound=none\tcurves=none\tcertificate_route=none\t\
+             polygon_vertices=none\ttriangles=none"
+        );
+        return;
+    };
+    let curves = match record.curve_representations.is_empty() {
+        true => "none".to_string(),
+        false => record.curve_representations.join(","),
+    };
+    let exit = record.exit.map_or("none", formal::SliceExit::tag);
+    let route = record
+        .certificate_route
+        .map_or("none", formal::CertificateRoute::tag);
+    let polygon_vertices = record
+        .polygon_vertices
+        .map_or("none".to_string(), |count| count.to_string());
+    let triangles = record.validity.map_or("none".to_string(), |validity| {
+        validity.triangles.to_string()
+    });
+    eprintln!(
+        "SLICE\tsource_face_id={id}\tdeclared_face_index={declared_face_index}\t\
+         shell_ordinal={shell_ordinal}\tcandidate=1\tstage={}\tcategory={}\texit={exit}\t\
+         bounds={}\tedge_uses={}\touter_bound={}\tcurves={curves}\t\
+         certificate_route={route}\tpolygon_vertices={polygon_vertices}\t\
+         triangles={triangles}",
+        record.stage.tag(),
+        record.category.tag(),
+        record.bound_count,
+        record.edge_use_count,
+        record.outer_bound.tag(),
+    );
+}
+
 // Step-0 evidence-audit probe. Remove after `SourceFaceInput` becomes the
 // production input, or promote these fields into the permanent census.
 //
@@ -847,7 +1100,6 @@ impl From<(Point2, Point3)> for SurfacePoint {
     }
 }
 
-
 /// Reconciles a UV step entering or leaving a detected collapsed direction.
 ///
 /// A small derivative only proposes a chart substitution. The candidate UV
@@ -863,9 +1115,8 @@ fn reconcile_singular_transition<S: ParametricSurface3D>(
     tolerance: f64,
     output: &mut Vec<SurfacePoint>,
 ) {
-    let represents = |uv: Point2, point: Point3| {
-        surface.subs(uv.x, uv.y).distance(point) <= tolerance
-    };
+    let represents =
+        |uv: Point2, point: Point3| surface.subs(uv.x, uv.y).distance(point) <= tolerance;
     if !previous_uv.x.near(&current_uv.x) && surface.uder(current_uv.x, current_uv.y).so_small() {
         let candidate = Point2::new(previous_uv.x, current_uv.y);
         if represents(candidate, current_point) {
@@ -1448,9 +1699,7 @@ impl SegmentOrigin {
     fn role(self) -> ConstraintRole {
         match self {
             Self::Source => ConstraintRole::PhysicalBoundary,
-            Self::SyntheticClosure | Self::Seam => {
-                ConstraintRole::UnresolvedSyntheticClosure
-            }
+            Self::SyntheticClosure | Self::Seam => ConstraintRole::UnresolvedSyntheticClosure,
         }
     }
 }
@@ -1487,7 +1736,10 @@ impl BoundaryLoop {
     /// rebuilt from scratch — taking `.points` and relabelling would, for
     /// instance, silently turn a periodic walk's deck seam back into `Source`.
     fn into_path_cutting_wrap(self) -> BoundaryPath {
-        let Self { points, mut origins } = self;
+        let Self {
+            points,
+            mut origins,
+        } = self;
         origins.pop();
         BoundaryPath { points, origins }
     }
@@ -1527,7 +1779,6 @@ impl BoundaryLoop {
         }
         Self::new(points, origins)
     }
-
 }
 
 /// How one boundary part meets the next.
@@ -1657,7 +1908,6 @@ impl BoundaryPath {
 }
 
 impl BoundaryLoop {
-
     fn len(&self) -> usize {
         self.points.len()
     }
@@ -1853,8 +2103,10 @@ impl PolyBoundary {
             if area0.abs() < 1e-4 && area1.abs() < 1e-4 {
                 let loop0 = closed.remove(0);
                 let mut loop1 = closed.remove(0);
-                let u0_mean: f64 = loop0.points.iter().map(|p| p.uv.x).sum::<f64>() / loop0.points.len() as f64;
-                let u1_mean: f64 = loop1.points.iter().map(|p| p.uv.x).sum::<f64>() / loop1.points.len() as f64;
+                let u0_mean: f64 =
+                    loop0.points.iter().map(|p| p.uv.x).sum::<f64>() / loop0.points.len() as f64;
+                let u1_mean: f64 =
+                    loop1.points.iter().map(|p| p.uv.x).sum::<f64>() / loop1.points.len() as f64;
                 if let Some(up) = lattice.declared_u_period() {
                     let ku = ((u0_mean - u1_mean) / up).round();
                     if ku != 0.0 {
@@ -1863,8 +2115,10 @@ impl PolyBoundary {
                         }
                     }
                 }
-                let v0_mean: f64 = loop0.points.iter().map(|p| p.uv.y).sum::<f64>() / loop0.len() as f64;
-                let v1_mean: f64 = loop1.points.iter().map(|p| p.uv.y).sum::<f64>() / loop1.len() as f64;
+                let v0_mean: f64 =
+                    loop0.points.iter().map(|p| p.uv.y).sum::<f64>() / loop0.len() as f64;
+                let v1_mean: f64 =
+                    loop1.points.iter().map(|p| p.uv.y).sum::<f64>() / loop1.len() as f64;
                 if let Some(vp) = lattice.declared_v_period() {
                     let kv = ((v0_mean - v1_mean) / vp).round();
                     if kv != 0.0 {
@@ -1889,15 +2143,13 @@ impl PolyBoundary {
                 path.append_path(loop1_path, PartJoin::Bridge(SegmentOrigin::Seam));
                 closed.push(path.close(PartJoin::Bridge(SegmentOrigin::Seam)));
             }
-        } else if let Some(pair) =
-            CollapsedPeriodicBoundaryPair::try_classify(
-                surface,
-                &closed.iter().map(|l| l.points.clone()).collect::<Vec<_>>(),
-                &open,
-                range,
-                lattice,
-            )
-        {
+        } else if let Some(pair) = CollapsedPeriodicBoundaryPair::try_classify(
+            surface,
+            &closed.iter().map(|l| l.points.clone()).collect::<Vec<_>>(),
+            &open,
+            range,
+            lattice,
+        ) {
             let mut loop0 = closed.remove(0).points;
             if loop0.len() > 1 && loop0[0].uv.distance(loop0.last().unwrap().uv) < 1e-3 {
                 loop0.pop();
@@ -2230,9 +2482,8 @@ impl PolyBoundary {
         let mut probe_add_returned_false = 0usize;
         // These are post-stitch loop/segment proxies, not source-edge
         // provenance. Keep all direct contributors because duplicates exist.
-        let mut installed_origins = probe.then(
-            HashMap::<FixedUndirectedEdgeHandle, Vec<(usize, usize)>>::default,
-        );
+        let mut installed_origins =
+            probe.then(HashMap::<FixedUndirectedEdgeHandle, Vec<(usize, usize)>>::default);
         let mut first_conflict = None;
         for (piece_index, piece) in self.0.iter().enumerate() {
             let poly2tri: Vec<Option<FixedVertexHandle>> = piece
@@ -2298,8 +2549,7 @@ impl PolyBoundary {
                 // segments into the same pieces as source trim, so before the
                 // origin was recorded at creation every one of them arrived
                 // here indistinguishable from a real boundary.
-                let segment_origin =
-                    piece.origins.get(i).unwrap_or(SegmentOrigin::Source);
+                let segment_origin = piece.origins.get(i).unwrap_or(SegmentOrigin::Source);
                 let segment_role = segment_origin.role();
                 let overlapping = triangulation
                     .get_edge_from_neighbors(vi, vj)
@@ -2307,9 +2557,7 @@ impl PolyBoundary {
                     .map(|e| e.as_undirected().fix())
                     .is_some_and(|handle| roles.role_of(handle).is_some());
                 if overlapping {
-                    failure.get_or_insert(
-                        TessellationFailureReason::ConstraintOverlapUnsupported,
-                    );
+                    failure.get_or_insert(TessellationFailureReason::ConstraintOverlapUnsupported);
                     continue;
                 }
                 // G5a: ask once, and label what was actually realized.
@@ -2417,8 +2665,7 @@ impl PolyBoundary {
                             }
                         }
                     }
-                    failure
-                        .get_or_insert(TessellationFailureReason::ConstraintInsertionIncomplete);
+                    failure.get_or_insert(TessellationFailureReason::ConstraintInsertionIncomplete);
                 }
             }
         }
@@ -2468,11 +2715,7 @@ impl PolyBoundary {
                 );
             }
         }
-        if probe
-            && (failure.is_some()
-                || probe_degenerate != 0
-                || probe_add_returned_false != 0)
-        {
+        if probe && (failure.is_some() || probe_degenerate != 0 || probe_add_returned_false != 0) {
             eprintln!(
                 "PF,{},{probe_point_fail},{probe_degenerate},\
                  {probe_already_direct},{probe_refused_with_conflicts},\
@@ -2871,8 +3114,8 @@ fn trimming_tessellation_result<S>(
     polyboundary: &PolyBoundary,
     tol: f64,
     lattice: &CertifiedLattice,
-// `Result` here is `truck_topology::Result<T>`, which fixes the error type, so
-// the standard two-parameter form must be named explicitly.
+    // `Result` here is `truck_topology::Result<T>`, which fixes the error type, so
+    // the standard two-parameter form must be named explicitly.
 ) -> std::result::Result<PolygonMesh, TessellationFailure>
 where
     S: PreMeshableSurface,
@@ -3045,9 +3288,11 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
                 // than being assigned a material meaning it does not have.
                 match roles.toggles_material(e.as_undirected().fix()) {
                     Some(toggles) => toggles,
-                    None => return TessellationOutcome::Failed(
-                        TessellationFailureReason::ConstraintRoleMissing.into(),
-                    ),
+                    None => {
+                        return TessellationOutcome::Failed(
+                            TessellationFailureReason::ConstraintRoleMissing.into(),
+                        )
+                    }
                 }
             } else {
                 false
@@ -3071,7 +3316,9 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
     }
 
     if contradictory_parity {
-        return TessellationOutcome::Failed(TessellationFailureReason::ContradictoryDualParity.into());
+        return TessellationOutcome::Failed(
+            TessellationFailureReason::ContradictoryDualParity.into(),
+        );
     }
 
     // 2. Vertex positions, parameter coordinates, and roles
@@ -3103,8 +3350,10 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
             // Determine vertex roles (bitflags)
             let mut roles = VertexRoles::default();
             if boundary_map.contains_key(&idx) {
-                let is_seam = (u_period.is_some() && (p.x <= 1e-4 || (p.x - u_period.unwrap()).abs() <= 1e-4))
-                    || (v_period.is_some() && (p.y <= 1e-4 || (p.y - v_period.unwrap()).abs() <= 1e-4));
+                let is_seam = (u_period.is_some()
+                    && (p.x <= 1e-4 || (p.x - u_period.unwrap()).abs() <= 1e-4))
+                    || (v_period.is_some()
+                        && (p.y <= 1e-4 || (p.y - v_period.unwrap()).abs() <= 1e-4));
                 if is_seam {
                     roles.insert(VertexRoles::ARTIFICIAL_SEAM);
                 } else {
@@ -3117,13 +3366,16 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
             }
 
             let n = surface.normal(p.x, p.y);
-            let n_valid =
-                if n.x.is_finite() && n.y.is_finite() && n.z.is_finite() && n.magnitude2() > 1e-12 {
-                    n.normalize()
-                } else {
-                    roles.insert(VertexRoles::SINGULAR_COLLAPSE);
-                    Vector3::zero()
-                };
+            let n_valid = if n.x.is_finite()
+                && n.y.is_finite()
+                && n.z.is_finite()
+                && n.magnitude2() > 1e-12
+            {
+                n.normalize()
+            } else {
+                roles.insert(VertexRoles::SINGULAR_COLLAPSE);
+                Vector3::zero()
+            };
             normals.push(n_valid);
 
             vertex_metadata.push(VertexMetadata {
@@ -3527,7 +3779,13 @@ mod cone_topology_tests {
             })
             .collect();
         let range = (Some((0.0, 1.0)), None);
-        let res = CollapsedPeriodicBoundaryPair::try_classify(&cone, &[loop0], &[], range, &unevidenced_lattice(&cone));
+        let res = CollapsedPeriodicBoundaryPair::try_classify(
+            &cone,
+            &[loop0],
+            &[],
+            range,
+            &unevidenced_lattice(&cone),
+        );
         assert!(res.is_some());
         let pair = res.unwrap();
         assert!((pair.apex_u - 0.0).abs() < 1e-6);
@@ -3552,7 +3810,13 @@ mod cone_topology_tests {
             })
             .collect();
         let range = (Some((0.0, 1.0)), None);
-        let res = CollapsedPeriodicBoundaryPair::try_classify(&cone, &[loop0, loop1], &[], range, &unevidenced_lattice(&cone));
+        let res = CollapsedPeriodicBoundaryPair::try_classify(
+            &cone,
+            &[loop0, loop1],
+            &[],
+            range,
+            &unevidenced_lattice(&cone),
+        );
         assert!(res.is_none());
     }
 
@@ -3571,7 +3835,13 @@ mod cone_topology_tests {
             (Point2::new(1.0, 0.0), cone.subs(1.0, 0.0)).into(),
         ];
         let range = (Some((0.0, 1.0)), None);
-        let res = CollapsedPeriodicBoundaryPair::try_classify(&cone, &[loop0], &[open_edge], range, &unevidenced_lattice(&cone));
+        let res = CollapsedPeriodicBoundaryPair::try_classify(
+            &cone,
+            &[loop0],
+            &[open_edge],
+            range,
+            &unevidenced_lattice(&cone),
+        );
         assert!(res.is_none());
     }
 
@@ -3590,7 +3860,13 @@ mod cone_topology_tests {
             })
             .collect();
         let range = (Some((0.0, 1.0)), None);
-        let res = CollapsedPeriodicBoundaryPair::try_classify(&cylinder, &[loop0], &[], range, &unevidenced_lattice(&cylinder));
+        let res = CollapsedPeriodicBoundaryPair::try_classify(
+            &cylinder,
+            &[loop0],
+            &[],
+            range,
+            &unevidenced_lattice(&cylinder),
+        );
         assert!(res.is_none());
     }
 
@@ -3652,7 +3928,11 @@ mod cone_topology_tests {
     #[test]
     fn test_parity_single_disk() {
         use truck_geometry::prelude::*;
-        let plane = Plane::new(Point3::origin(), Point3::new(1.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0));
+        let plane = Plane::new(
+            Point3::origin(),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        );
         let tol = 0.01;
         let loop0: Vec<SurfacePoint> = vec![
             (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
@@ -3661,7 +3941,12 @@ mod cone_topology_tests {
             (Point2::new(0.0, 10.0), Point3::new(0.0, 10.0, 0.0)).into(),
             (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
         ];
-        let boundary = PolyBoundary::new(vec![PolyBoundaryPiece(loop0)], &plane, tol, &unevidenced_lattice(&plane));
+        let boundary = PolyBoundary::new(
+            vec![PolyBoundaryPiece(loop0)],
+            &plane,
+            tol,
+            &unevidenced_lattice(&plane),
+        );
         let mesh = trimming_tessellation(&plane, &boundary, tol, &unevidenced_lattice(&plane));
         assert!(!mesh.faces().is_empty());
     }
@@ -3669,7 +3954,11 @@ mod cone_topology_tests {
     #[test]
     fn test_parity_disk_with_hole() {
         use truck_geometry::prelude::*;
-        let plane = Plane::new(Point3::origin(), Point3::new(1.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0));
+        let plane = Plane::new(
+            Point3::origin(),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        );
         let tol = 0.01;
         let outer: Vec<SurfacePoint> = vec![
             (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
@@ -3685,7 +3974,12 @@ mod cone_topology_tests {
             (Point2::new(3.0, 7.0), Point3::new(3.0, 7.0, 0.0)).into(),
             (Point2::new(3.0, 3.0), Point3::new(3.0, 3.0, 0.0)).into(),
         ];
-        let boundary = PolyBoundary::new(vec![PolyBoundaryPiece(outer), PolyBoundaryPiece(hole)], &plane, tol, &unevidenced_lattice(&plane));
+        let boundary = PolyBoundary::new(
+            vec![PolyBoundaryPiece(outer), PolyBoundaryPiece(hole)],
+            &plane,
+            tol,
+            &unevidenced_lattice(&plane),
+        );
         let mesh = trimming_tessellation(&plane, &boundary, tol, &unevidenced_lattice(&plane));
         assert!(!mesh.faces().is_empty());
         // Verify hole centroid (5.0, 5.0) has no triangle containing it
@@ -3694,14 +3988,21 @@ mod cone_topology_tests {
             let p1 = mesh.uv_coords()[tri[1].pos];
             let p2 = mesh.uv_coords()[tri[2].pos];
             let center = (p0 + p1 + p2) / 3.0;
-            assert!(!(center.x > 3.1 && center.x < 6.9 && center.y > 3.1 && center.y < 6.9), "Hole interior must not contain triangles");
+            assert!(
+                !(center.x > 3.1 && center.x < 6.9 && center.y > 3.1 && center.y < 6.9),
+                "Hole interior must not contain triangles"
+            );
         }
     }
 
     #[test]
     fn test_parity_concave_outer_loop() {
         use truck_geometry::prelude::*;
-        let plane = Plane::new(Point3::origin(), Point3::new(1.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0));
+        let plane = Plane::new(
+            Point3::origin(),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        );
         let tol = 0.01;
         // L-shaped concave outer loop
         let loop0: Vec<SurfacePoint> = vec![
@@ -3713,7 +4014,12 @@ mod cone_topology_tests {
             (Point2::new(0.0, 10.0), Point3::new(0.0, 10.0, 0.0)).into(),
             (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
         ];
-        let boundary = PolyBoundary::new(vec![PolyBoundaryPiece(loop0)], &plane, tol, &unevidenced_lattice(&plane));
+        let boundary = PolyBoundary::new(
+            vec![PolyBoundaryPiece(loop0)],
+            &plane,
+            tol,
+            &unevidenced_lattice(&plane),
+        );
         let mesh = trimming_tessellation(&plane, &boundary, tol, &unevidenced_lattice(&plane));
         assert!(!mesh.faces().is_empty());
     }
@@ -3721,7 +4027,11 @@ mod cone_topology_tests {
     #[test]
     fn test_parity_intersecting_constraints_rejected() {
         use truck_geometry::prelude::*;
-        let plane = Plane::new(Point3::origin(), Point3::new(1.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0));
+        let plane = Plane::new(
+            Point3::origin(),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        );
         let tol = 0.01;
         // Self-overlapping loop traversing same segment (0,0)->(10,0) twice in forward direction
         let loop0: Vec<SurfacePoint> = vec![
@@ -3733,9 +4043,17 @@ mod cone_topology_tests {
             (Point2::new(0.0, 10.0), Point3::new(0.0, 10.0, 0.0)).into(),
             (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
         ];
-        let boundary = PolyBoundary::new(vec![PolyBoundaryPiece(loop0)], &plane, tol, &unevidenced_lattice(&plane));
+        let boundary = PolyBoundary::new(
+            vec![PolyBoundaryPiece(loop0)],
+            &plane,
+            tol,
+            &unevidenced_lattice(&plane),
+        );
         let mesh = trimming_tessellation(&plane, &boundary, tol, &unevidenced_lattice(&plane));
-        assert!(mesh.faces().is_empty(), "Self-overlapping degenerate loop must fail or produce empty mesh");
+        assert!(
+            mesh.faces().is_empty(),
+            "Self-overlapping degenerate loop must fail or produce empty mesh"
+        );
     }
 }
 
@@ -3848,7 +4166,10 @@ mod singular_transition_tests {
     /// consistent orientation sign. CollapsedPatch is planar (z = 0), so the
     /// orientation reduces to the sign of the z component of the cross product.
     fn assert_no_zero_area_or_orientation_flip(mesh: &PolygonMesh) {
-        assert!(!mesh.faces().is_empty(), "tessellation produced no triangles");
+        assert!(
+            !mesh.faces().is_empty(),
+            "tessellation produced no triangles"
+        );
         let mut orientation = 0.0_f64;
         for tri in mesh.faces().tri_faces() {
             let [p0, p1, p2] = tri.map(|v| mesh.positions()[v.pos]);
@@ -3943,8 +4264,18 @@ mod singular_transition_tests {
 
         // Close the loop and tessellate.
         points.push(sp(uv(0.0, 1.0)));
-        let boundary = PolyBoundary::new(vec![PolyBoundaryPiece(points)], &surface, tolerance, &unevidenced_lattice(&surface));
-        let mesh = trimming_tessellation(&surface, &boundary, tolerance, &unevidenced_lattice(&surface));
+        let boundary = PolyBoundary::new(
+            vec![PolyBoundaryPiece(points)],
+            &surface,
+            tolerance,
+            &unevidenced_lattice(&surface),
+        );
+        let mesh = trimming_tessellation(
+            &surface,
+            &boundary,
+            tolerance,
+            &unevidenced_lattice(&surface),
+        );
         // (5),(6),(7) at least one triangle, no zero-area, consistent orientation.
         assert_no_zero_area_or_orientation_flip(&mesh);
 
@@ -4140,8 +4471,16 @@ mod segment_origin_tests {
             PartJoin::Bridge(SegmentOrigin::Seam),
         );
         assert_eq!(path.points.len(), 6, "no source point may be dropped");
-        assert_eq!(path.points[2].uv, pt(2.0, 0.0).uv, "the first part keeps its tail");
-        assert_eq!(path.points[3].uv, pt(5.0, 5.0).uv, "the second keeps its head");
+        assert_eq!(
+            path.points[2].uv,
+            pt(2.0, 0.0).uv,
+            "the first part keeps its tail"
+        );
+        assert_eq!(
+            path.points[3].uv,
+            pt(5.0, 5.0).uv,
+            "the second keeps its head"
+        );
         assert_eq!(
             path.origins,
             vec![
@@ -4166,7 +4505,11 @@ mod segment_origin_tests {
         );
         let loop_ = path.close(PartJoin::SharedEndpoint);
         assert_eq!(loop_.points.len(), 2);
-        assert_eq!(loop_.points.len(), loop_.origins.len(), "one origin per segment");
+        assert_eq!(
+            loop_.points.len(),
+            loop_.origins.len(),
+            "one origin per segment"
+        );
         assert_eq!(
             loop_.origins,
             vec![SegmentOrigin::Source, SegmentOrigin::SyntheticClosure],
@@ -4194,11 +4537,8 @@ mod segment_origin_tests {
     /// cyclic wrap is the deck closure and must not be labelled `Source`.
     #[test]
     fn a_periodic_walk_does_not_call_its_wrap_a_source_segment() {
-        let walk = BoundaryLoop::periodic_source_walk(vec![
-            pt(0.0, 0.0),
-            pt(0.0, 1.0),
-            pt(0.0, 2.0),
-        ]);
+        let walk =
+            BoundaryLoop::periodic_source_walk(vec![pt(0.0, 0.0), pt(0.0, 1.0), pt(0.0, 2.0)]);
         assert_eq!(walk.points.len(), walk.origins.len());
         assert_eq!(
             walk.origins,

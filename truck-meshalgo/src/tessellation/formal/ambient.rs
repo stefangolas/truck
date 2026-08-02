@@ -65,12 +65,12 @@ use super::evidence::{
     SourceDeclaredProvenance, SurfaceAccessor, UseSite, ANALYTIC_ONLY,
 };
 use super::numeric::{FiniteF64, NumericDomainError, PositiveFinite};
-use super::support::{PlaneSchema, SupportSurfaceSchema};
 use super::outcome::{
     ContradictionWitness, FaceKey, InconsistencyReport, InvariantId, OperationalFailure,
     ProvenanceRecord, ProvenanceSet, ResourceOperation, StageEvaluation, StageOutcome,
     UnresolvedReason, UnresolvedReport, UnsupportedCause, UnsupportedReport,
 };
+use super::support::{PlaneSchema, SupportSurfaceSchema};
 
 // ---------------------------------------------------------------------------
 // Declarations and hints
@@ -232,18 +232,16 @@ pub enum TranslationComponent {
 impl CertifiedUvTranslation {
     /// Build a translation, refusing non-finite components and the identity.
     pub fn new(du: f64, dv: f64) -> Result<Self, GeneratorConstructionError> {
-        let du = FiniteF64::new(du).map_err(|cause| {
-            GeneratorConstructionError::NonFiniteComponent {
+        let du =
+            FiniteF64::new(du).map_err(|cause| GeneratorConstructionError::NonFiniteComponent {
                 component: TranslationComponent::Du,
                 cause,
-            }
-        })?;
-        let dv = FiniteF64::new(dv).map_err(|cause| {
-            GeneratorConstructionError::NonFiniteComponent {
+            })?;
+        let dv =
+            FiniteF64::new(dv).map_err(|cause| GeneratorConstructionError::NonFiniteComponent {
                 component: TranslationComponent::Dv,
                 cause,
-            }
-        })?;
+            })?;
         match du.is_zero() && dv.is_zero() {
             true => Err(GeneratorConstructionError::ZeroTranslation),
             false => Ok(Self { du, dv }),
@@ -329,9 +327,9 @@ impl PeriodCertificate {
         certificate: EvidenceCertificate,
     ) -> Result<Self, GeneratorConstructionError> {
         match certificate {
-            EvidenceCertificate::Declared(provenance) => Err(
-                GeneratorConstructionError::DeclarationCannotAuthorizeDeckUse { provenance },
-            ),
+            EvidenceCertificate::Declared(provenance) => {
+                Err(GeneratorConstructionError::DeclarationCannotAuthorizeDeckUse { provenance })
+            }
             other => Ok(Self { certificate: other }),
         }
     }
@@ -1431,9 +1429,7 @@ pub fn resolve_ambient_periods(
                 return Ok(StageOutcome::Unresolved(UnresolvedReport::new(
                     face,
                     stage,
-                    PredicateDescription::of(FormalPredicate::DeclaredPeriodIsADeckGenerator(
-                        axis,
-                    )),
+                    PredicateDescription::of(FormalPredicate::DeclaredPeriodIsADeckGenerator(axis)),
                     UnresolvedReason::DeclaredPeriodNotCertified,
                     certification_attempts(&attempts),
                     provenance,
@@ -1840,9 +1836,7 @@ mod tests {
     use super::super::envelope::PolicyInstanceId;
     use super::super::outcome::{DocumentScope, Inconsistency, ShellKey};
     use super::*;
-    use crate::tessellation::domain::lattice::{
-        Axis, AxisPeriodStatus, CertifiedLattice,
-    };
+    use crate::tessellation::domain::lattice::{Axis, AxisPeriodStatus, CertifiedLattice};
 
     fn a_face() -> FaceKey {
         FaceKey {
@@ -1855,8 +1849,18 @@ mod tests {
 
     /// A test policy. Not a production value; none is specified.
     fn a_test_envelope() -> FormalEnvelope {
-        FormalEnvelope::new(PolicyInstanceId::new(1), 2, 4, 64, 4096, 16, 64, 32, 1 << 20)
-            .expect("well-formed")
+        FormalEnvelope::new(
+            PolicyInstanceId::new(1),
+            2,
+            4,
+            64,
+            4096,
+            16,
+            64,
+            32,
+            1 << 20,
+        )
+        .expect("well-formed")
     }
 
     /// A structurally identified plane, for the rules that require the
@@ -1930,7 +1934,10 @@ mod tests {
         };
         match resolve_ambient_periods(evidence, &a_test_envelope(), a_face()).unwrap() {
             StageOutcome::Unresolved(report) => {
-                assert_eq!(report.reason(), UnresolvedReason::DeclaredPeriodNotCertified);
+                assert_eq!(
+                    report.reason(),
+                    UnresolvedReason::DeclaredPeriodNotCertified
+                );
             }
             other => panic!(
                 "a declared uncertified axis must not resolve: {}",
@@ -1997,11 +2004,10 @@ mod tests {
                 axis: ParameterAxis::U,
                 declaration: None,
                 certified: Some(generator),
-                witness:
-                    PeriodContradictionWitness::DeclaredValueDiffersFromCertifiedGenerator {
-                        declared,
-                        certified: magnitude,
-                    },
+                witness: PeriodContradictionWitness::DeclaredValueDiffersFromCertifiedGenerator {
+                    declared,
+                    certified: magnitude,
+                },
             },
             v: absent(ParameterAxis::V),
         };
@@ -2153,7 +2159,10 @@ mod tests {
 
         match resolve_ambient_periods(evidence, &a_test_envelope(), a_face()).unwrap() {
             StageOutcome::Unresolved(report) => {
-                assert_eq!(report.reason(), UnresolvedReason::DeclaredPeriodNotCertified);
+                assert_eq!(
+                    report.reason(),
+                    UnresolvedReason::DeclaredPeriodNotCertified
+                );
             }
             other => panic!(
                 "certified_rank()==0 must not become formal Rank0; got {}",
@@ -2182,7 +2191,10 @@ mod tests {
 
         match resolve_ambient_periods(evidence, &a_test_envelope(), a_face()).unwrap() {
             StageOutcome::Unresolved(report) => {
-                assert_eq!(report.reason(), UnresolvedReason::DeclaredPeriodNotCertified);
+                assert_eq!(
+                    report.reason(),
+                    UnresolvedReason::DeclaredPeriodNotCertified
+                );
             }
             other => panic!("expected Unresolved, got {}", other.tag()),
         }
@@ -2193,9 +2205,18 @@ mod tests {
         // A policy admitting rank 1 at most. A genuine rank-2 face is then
         // proved outside the envelope — an `Unsupported`, because the rank was
         // established before the bound was applied.
-        let envelope =
-            FormalEnvelope::new(PolicyInstanceId::new(2), 1, 4, 64, 4096, 16, 64, 32, 1 << 20)
-                .unwrap();
+        let envelope = FormalEnvelope::new(
+            PolicyInstanceId::new(2),
+            1,
+            4,
+            64,
+            4096,
+            16,
+            64,
+            32,
+            1 << 20,
+        )
+        .unwrap();
         let evidence = AmbientPeriodEvidence {
             u: certified(ParameterAxis::U),
             v: certified(ParameterAxis::V),
@@ -2346,7 +2367,10 @@ mod tests {
         // `CertifiedAmbientLattice` alone. This evidence yields none.
         match resolve_ambient_periods(evidence, &a_test_envelope(), a_face()).unwrap() {
             StageOutcome::Unresolved(report) => {
-                assert_eq!(report.reason(), UnresolvedReason::DeclaredPeriodNotCertified);
+                assert_eq!(
+                    report.reason(),
+                    UnresolvedReason::DeclaredPeriodNotCertified
+                );
             }
             other => panic!("expected Unresolved, got {}", other.tag()),
         }
@@ -2376,7 +2400,10 @@ mod tests {
         else {
             panic!("expected Rank1");
         };
-        assert_eq!(lattice.quotient_identification_authority().lattice().rank(), 1);
+        assert_eq!(
+            lattice.quotient_identification_authority().lattice().rank(),
+            1
+        );
         assert_eq!(lattice.cover_enumeration_authority().lattice().rank(), 1);
         assert!(matches!(
             lattice.authoritative_basis(),
@@ -2398,7 +2425,10 @@ mod tests {
         let plane = certify_plane_aperiodicity(ParameterAxis::U, &a_test_plane()).unwrap();
         match plane.certificate() {
             EvidenceCertificate::Analytic(certificate) => {
-                assert_eq!(certificate.rule(), AnalyticRule::PlaneHasNoPeriodicDirection);
+                assert_eq!(
+                    certificate.rule(),
+                    AnalyticRule::PlaneHasNoPeriodicDirection
+                );
                 assert_eq!(
                     *certificate.premises().first(),
                     AnalyticPremise::SupportSurfaceIsAPlane
@@ -2483,7 +2513,10 @@ mod tests {
         );
         let generator = evidence.v.certified_generator().expect("certified");
         assert_eq!(generator.axis(), ParameterAxis::V);
-        assert_eq!(generator.certificate().basis(), AuthoritativeBasis::Analytic);
+        assert_eq!(
+            generator.certificate().basis(),
+            AuthoritativeBasis::Analytic
+        );
         assert_eq!(evidence.authoritative_generator_count(), 1);
 
         // Even a certified axis does not make the *face* rank 1: the `u` axis
@@ -2530,9 +2563,15 @@ mod tests {
     #[test]
     fn both_planar_axes_carry_analytic_absence_evidence() {
         let evidence = ambient_evidence_from_plane_schema(&a_test_plane()).unwrap();
-        for (axis, side) in [(ParameterAxis::U, &evidence.u), (ParameterAxis::V, &evidence.v)] {
+        for (axis, side) in [
+            (ParameterAxis::U, &evidence.u),
+            (ParameterAxis::V, &evidence.v),
+        ] {
             match side {
-                PeriodAxisEvidence::AuthoritativelyAbsent { axis: got, evidence } => {
+                PeriodAxisEvidence::AuthoritativelyAbsent {
+                    axis: got,
+                    evidence,
+                } => {
                     assert_eq!(*got, axis);
                     assert_eq!(evidence.basis(), AuthoritativeBasis::Analytic);
                     match evidence.certificate() {
@@ -2560,16 +2599,16 @@ mod tests {
                 representation: "toroidal_surface",
             },
         );
-        let evidence = ambient_evidence_from_schema(
-            &schema,
-            &torus,
-            LatticeOrigin::UnattributedLegacyLattice,
-        )
-        .expect("the legacy adapter accepts an all-`None` lattice");
+        let evidence =
+            ambient_evidence_from_schema(&schema, &torus, LatticeOrigin::UnattributedLegacyLattice)
+                .expect("the legacy adapter accepts an all-`None` lattice");
         let outcome = resolve_ambient_periods(evidence, &a_test_envelope(), a_face()).unwrap();
         match outcome {
             StageOutcome::Unresolved(report) => {
-                assert_eq!(report.reason(), UnresolvedReason::PeriodAbsenceNotEstablished);
+                assert_eq!(
+                    report.reason(),
+                    UnresolvedReason::PeriodAbsenceNotEstablished
+                );
             }
             other => panic!("a torus must not resolve, got {other:?}"),
         }
@@ -2594,7 +2633,10 @@ mod tests {
         let outcome = resolve_ambient_periods(evidence, &a_test_envelope(), a_face()).unwrap();
         match outcome {
             StageOutcome::Unresolved(report) => {
-                assert_eq!(report.reason(), UnresolvedReason::PeriodAbsenceNotEstablished);
+                assert_eq!(
+                    report.reason(),
+                    UnresolvedReason::PeriodAbsenceNotEstablished
+                );
             }
             other => panic!("legacy NON_PERIODIC must not resolve, got {other:?}"),
         }

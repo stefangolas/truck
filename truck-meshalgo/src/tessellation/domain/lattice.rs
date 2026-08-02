@@ -214,7 +214,11 @@ mod tests {
             AxisPeriodStatus::from_unevidenced_accessor(Some(4.0)),
         );
         assert_eq!(lattice.v_generator(), Some(std::f64::consts::PI * 2.0));
-        assert_eq!(lattice.u_generator(), None, "generatrix rests on an accessor");
+        assert_eq!(
+            lattice.u_generator(),
+            None,
+            "generatrix rests on an accessor"
+        );
         assert_eq!(lattice.declared_u_period(), Some(4.0), "still usable");
         assert_eq!(lattice.certified_rank(), 1);
     }
@@ -222,7 +226,8 @@ mod tests {
     /// Inversion moves every axis-indexed fact to the other axis.
     #[test]
     fn swapping_moves_the_exact_period_to_the_other_axis() {
-        let lattice = CertifiedLattice::revolution(Axis::V, AxisPeriodStatus::NonPeriodic).swapped();
+        let lattice =
+            CertifiedLattice::revolution(Axis::V, AxisPeriodStatus::NonPeriodic).swapped();
         assert_eq!(lattice.u_generator(), Some(std::f64::consts::PI * 2.0));
         assert_eq!(lattice.v_generator(), None);
     }

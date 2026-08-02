@@ -40,8 +40,8 @@
 //! that can masquerade as physical trim geometry.
 
 use crate::cgmath::{One, Vector2};
-use truck_geometry::prelude::{Plane, Processor, RevolutedCurve};
 use truck_geometry::prelude::{BoundedCurve, ParametricCurve3D, ParametricSurface};
+use truck_geometry::prelude::{Plane, Processor, RevolutedCurve};
 
 use super::schema::DeckLattice;
 
@@ -271,11 +271,9 @@ impl<C: ParametricCurve3D + BoundedCurve> AmbientSchemaSource for RevolutedCurve
             // Not periodic: its extent is the face's business, never the
             // primitive's declared `[0,1]`.
             None => Some(CertifiedAxisDomain {
-                interval: face_context.u_extent.ok_or(
-                    SchemaFailure::DomainUnderdetermined {
-                        axis: ParamAxis::U,
-                    },
-                )?,
+                interval: face_context
+                    .u_extent
+                    .ok_or(SchemaFailure::DomainUnderdetermined { axis: ParamAxis::U })?,
                 evidence: DomainEvidence::StepFaceEvidence,
             }),
         };

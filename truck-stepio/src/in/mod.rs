@@ -83,6 +83,15 @@ pub struct Table {
     pub edge_loop: HashMap<u64, EdgeLoopHolder>,
     pub vertex_loop: HashMap<u64, VertexLoopHolder>,
     pub face_bound: HashMap<u64, FaceBoundHolder>,
+    /// The ids in `face_bound` that arrived as `FACE_OUTER_BOUND` rather than
+    /// as a plain `FACE_BOUND`.
+    ///
+    /// Both entity types deserialize into `FaceBoundHolder`, which has no field
+    /// for the distinction, so without this set the standing is erased at parse
+    /// and no later stage can recover it. STEP does distinguish them, and the
+    /// material region of a face with an inner loop is not the material region
+    /// of the same loops read as outer ones.
+    pub face_outer_bound_ids: std::collections::HashSet<u64>,
     pub face_surface: HashMap<u64, FaceSurfaceHolder>,
     pub oriented_face: HashMap<u64, OrientedFaceHolder>,
     pub shell: HashMap<u64, ShellHolder>,
@@ -357,6 +366,7 @@ impl Table {
                 "FACE_OUTER_BOUND" => {
                     self.face_bound
                         .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    self.face_outer_bound_ids.insert(*id);
                 }
                 "FACE_SURFACE" => {
                     self.face_surface
@@ -3123,6 +3133,25 @@ pub struct FaceSurface {
 }
 
 impl FaceSurfaceHolder {
+    /// Whether each bound arrived as a `FACE_OUTER_BOUND`, in `bounds` order.
+    ///
+    /// `None` for a bound the document *inlined*: the entity type was known
+    /// while the record was being read and is not recoverable from the
+    /// embedded holder, so the honest answer is that this reader does not
+    /// know. A caller that meets one must decline to claim standing for the
+    /// whole face rather than read `None` as "not outer".
+    fn bound_outer_flags(&self, table: &Table) -> Vec<Option<bool>> {
+        self.bounds
+            .iter()
+            .map(|bound| match bound {
+                PlaceHolder::Ref(Name::Entity(idx)) => {
+                    Some(table.face_outer_bound_ids.contains(idx))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     fn bounds_holder<'a>(&'a self, table: &'a Table) -> Vec<Option<FaceBoundHolder>> {
         self.bounds
             .iter()

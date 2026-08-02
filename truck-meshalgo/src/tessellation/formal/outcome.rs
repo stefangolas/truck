@@ -1055,9 +1055,7 @@ impl InequivalenceWitness {
             Self::DistinctRank {
                 first: a,
                 second: b,
-            } => {
-                a != b && first.lattice_rank() == *a && second.lattice_rank() == *b
-            }
+            } => a != b && first.lattice_rank() == *a && second.lattice_rank() == *b,
             // A generator or subgroup difference is a claim about readings of
             // the same rank; a rank difference would be the stronger witness
             // and should have been used instead.
@@ -1071,9 +1069,7 @@ impl InequivalenceWitness {
 #[cfg(test)]
 mod tests {
     use super::super::ambient::AmbientAlternative;
-    use super::super::evidence::{
-        AttemptOutcome, FormalPredicate, ResolutionMethod,
-    };
+    use super::super::evidence::{AttemptOutcome, FormalPredicate, ResolutionMethod};
     use super::*;
 
     fn a_face() -> FaceKey {

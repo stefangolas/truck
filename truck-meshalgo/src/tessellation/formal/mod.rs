@@ -7,18 +7,19 @@
 //! > represents a stronger state and carries evidence for the obligations that
 //! > were discharged.
 //!
-//! **Step 1 only.** This subtree currently contains the ambient-period
-//! authority model, the intermediate judgment algebra, and the bounded
-//! evaluation policy. There is no traversal classification, no projection, no
-//! source-local lifting, no deck solving, no finite-cover enumeration, no
-//! arrangement, no material selection and no meshing. `FORMAL_SYSTEM.md`
-//! §XVIII lists those stages; each arrives with its own step.
+//! **Steps 1 through 8, on a declared subset.** The ambient-period authority
+//! model, the judgment algebra and the bounded evaluation policy are general;
+//! [`planar_slice`] carries Steps 2 to 8 only as far as one *planar,
+//! line-bounded, hole-free* face needs, and refuses everything else with a
+//! named reason. `FORMAL_SYSTEM.md` §XVIII lists the stages in full; each
+//! expansion arrives with the measured obstruction population it targets.
 //!
-//! **Nothing here is read by production geometry.** `triangulation.rs` gets a
-//! module declaration and one diagnostic probe. The legacy producer-consumer
-//! chain is untouched, and the measured Step 0 baseline — 1,358,543 triangles,
-//! 4,486 faces lost — is unchanged by construction, because no value computed
-//! in this subtree reaches it.
+//! **Production geometry is unchanged unless the recovery gate is opened.**
+//! With `TRUCK_FORMAL_RECOVERY` unset the formal chain either does not run or
+//! runs in shadow and its result is dropped, so the measured baseline —
+//! 1,358,543 triangles, 4,486 faces lost — holds by construction. With the gate
+//! open, a *validated* formal mesh may replace a face the legacy path **lost**,
+//! and nothing else; on `00009190` that is 2 faces and 2 triangles.
 //!
 //! # The layout
 //!
@@ -34,6 +35,11 @@
 //! - [`ambient`] — `Λ` of Definition 7: the five distinguishable states of an
 //!   axis's period evidence, and the rank-structured lattice they can resolve
 //!   to.
+//! - [`support`] — structural identification of the support surface and of the
+//!   edge curves, read from the representation *before* the legacy types erase
+//!   it. The only route by which the premise `SupportSurfaceIsAPlane` enters.
+//! - [`planar_slice`] — Steps 2 to 8 for the admitted planar subset, with one
+//!   [`SliceExit`] per obstruction the corpus can present.
 //!
 //! # What the subtree will not let you do
 //!
@@ -52,6 +58,7 @@ pub mod envelope;
 pub mod evidence;
 pub mod numeric;
 pub mod outcome;
+pub mod planar_slice;
 pub mod support;
 
 // The Step 1 surface, re-exported for the probe and for later stages. Types
@@ -59,15 +66,16 @@ pub mod support;
 pub use ambient::{
     ambient_axis_evidence_from_legacy, ambient_evidence_from_legacy,
     ambient_evidence_from_plane_schema, ambient_evidence_from_schema, certify_period_numerically,
-    certify_plane_aperiodicity, certify_revolution_period, AmbientEvidenceError,
+    certify_plane_aperiodicity, certify_revolution_period,
     certify_straight_generatrix_aperiodicity, resolve_ambient_periods, AdapterError,
-    AmbientAlternative, AmbientPeriodEvidence, CertifiedAmbientLattice, CertifiedPeriodBasisRef,
-    CertifiedPeriodGenerator, CertifiedRank0, CertifiedRank1, CertifiedRank2,
-    CertifiedUvTranslation, CoverEnumerationAuthority, DeckDisplacement, DeckVector0, DeckVector1,
-    DeckVector2, DeclaredPeriod, DeclaredPeriodHint, GeneratorIndependenceCertificate,
-    LatticeOrigin, ObservedPeriod, PeriodAbsence, PeriodAxisEvidence, PeriodCertificate,
-    PeriodCertificationAttempt, PeriodCertificationFailure, PeriodContradictionWitness,
-    PeriodHintSet, PeriodHintSource, QuotientIdentificationAuthority, UncertifiedPeriodValue,
+    AmbientAlternative, AmbientEvidenceError, AmbientPeriodEvidence, CertifiedAmbientLattice,
+    CertifiedPeriodBasisRef, CertifiedPeriodGenerator, CertifiedRank0, CertifiedRank1,
+    CertifiedRank2, CertifiedUvTranslation, CoverEnumerationAuthority, DeckDisplacement,
+    DeckVector0, DeckVector1, DeckVector2, DeclaredPeriod, DeclaredPeriodHint,
+    GeneratorIndependenceCertificate, LatticeOrigin, ObservedPeriod, PeriodAbsence,
+    PeriodAxisEvidence, PeriodCertificate, PeriodCertificationAttempt, PeriodCertificationFailure,
+    PeriodContradictionWitness, PeriodHintSet, PeriodHintSource, QuotientIdentificationAuthority,
+    UncertifiedPeriodValue,
 };
 pub use envelope::{
     BoundObservation, CertifiedLowerBoundCount, ExactCount, ExecutionBudget, FeatureExclusion,
@@ -80,13 +88,18 @@ pub use evidence::{
     SemanticStage, SourceEntityKey, ANALYTIC_ONLY, ANALYTIC_OR_CERTIFIED_NUMERICAL,
     ANY_AUTHORITATIVE, SOURCE_DECLARATION,
 };
-pub use support::{
-    identify_plane, PlaneGram, PlaneSchema, SchemaIdentificationFailure, SupportSurfaceSchema,
-    MINIMUM_NORMALISED_GRAM_DETERMINANT,
-};
 pub use outcome::{
     Ambiguity, AmbiguityReport, ContradictionWitness, DocumentKey, DocumentScope, FaceKey,
     Inconsistency, InconsistencyReport, OperationalFailure, RealizationOutcome, SemanticOutcome,
     ShellKey, StageEvaluation, StageOutcome, UnresolvedReason, UnresolvedReport, UnsupportedCause,
     UnsupportedReport, ValidSemantic,
+};
+pub use planar_slice::{
+    run_planar_slice, CertificateRoute, FinalValidityReport, PlanarMesh, SliceCategory, SliceExit,
+    SliceRecord, SliceStage,
+};
+pub use support::{
+    identify_line_segment, identify_plane, identify_polyline, CurveSchema, CurveSchemaFailure,
+    PlaneGram, PlaneSchema, SchemaIdentificationFailure, SupportSurfaceSchema,
+    MINIMUM_NORMALISED_GRAM_DETERMINANT,
 };

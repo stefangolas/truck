@@ -399,10 +399,9 @@ mod tests {
             naive_u.abs() > 0.3,
             "the naive inverse should be visibly wrong, got {naive_u}"
         );
-        let (u, v) = plane.gram().solve(
-            offset.dot(plane.u_axis()),
-            offset.dot(plane.v_axis()),
-        );
+        let (u, v) = plane
+            .gram()
+            .solve(offset.dot(plane.u_axis()), offset.dot(plane.v_axis()));
         assert!(u.abs() < 1e-12 && (v - 1.0).abs() < 1e-12);
     }
 
@@ -494,5 +493,194 @@ mod tests {
         );
         assert!(schema.plane().is_none());
         assert_eq!(schema.tag(), "no_structural_reader");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Curve representations
+// ---------------------------------------------------------------------------
+
+/// The authoritative schema of one edge's 3D curve.
+///
+/// The same discipline as [`SupportSurfaceSchema`], for the same reason:
+/// `Step 3` has to establish a curve-on-surface relation over the *complete*
+/// trimmed interval, and which certificate route is available is a fact about
+/// the representation, not about a handful of sampled points.
+///
+/// Only the two families whose planar projection is *exact* are read. Circles,
+/// ellipses, splines and p-curves each need their own whole-interval
+/// certificate and are P2 coverage work; naming them in the refusal is what
+/// lets the corpus rank them.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CurveSchema {
+    /// A straight segment, complete over its trimmed interval.
+    LineSegment(PolylineSchema),
+    /// A polyline. Every source segment maps exactly to a 2D segment.
+    Polyline(PolylineSchema),
+    /// Nothing structural was established. Carries no authority.
+    NotStructurallyIdentified(CurveSchemaFailure),
+}
+
+impl CurveSchema {
+    /// The negative case. Public because it grants nothing.
+    pub fn not_structurally_identified(cause: CurveSchemaFailure) -> Self {
+        Self::NotStructurallyIdentified(cause)
+    }
+
+    /// The vertex chain, when this curve has an exact polygonal
+    /// representation.
+    pub fn polygonal(&self) -> Option<&PolylineSchema> {
+        match self {
+            Self::LineSegment(schema) | Self::Polyline(schema) => Some(schema),
+            Self::NotStructurallyIdentified(_) => None,
+        }
+    }
+
+    /// A short stable tag, for probe records.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::LineSegment(_) => "line_segment",
+            Self::Polyline(_) => "polyline",
+            Self::NotStructurallyIdentified(cause) => cause.tag(),
+        }
+    }
+}
+
+/// Why no structural curve schema was established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurveSchemaFailure {
+    /// The composition layer has no structural reader for this representation.
+    NoStructuralReader {
+        /// The representation's own name.
+        representation: &'static str,
+    },
+    /// A polygonal representation was read and a coordinate was not finite.
+    VertexNotFinite {
+        /// Why the value was refused.
+        cause: NumericDomainError,
+    },
+    /// A polygonal representation was read and had fewer than two vertices, so
+    /// it traverses nothing and has no direction.
+    FewerThanTwoVertices,
+}
+
+impl CurveSchemaFailure {
+    /// A short stable tag, for probe records.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::NoStructuralReader { .. } => "curve_no_structural_reader",
+            Self::VertexNotFinite { .. } => "curve_vertex_not_finite",
+            Self::FewerThanTwoVertices => "curve_fewer_than_two_vertices",
+        }
+    }
+}
+
+/// A chain of at least two finite points, in the curve's own parameter
+/// direction, covering the complete trimmed interval.
+///
+/// Private field and no public constructor: the claim "these points *are* the
+/// complete trimmed curve" is what the type carries, and it is discharged by
+/// the readers below reading a representation that has no other content.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PolylineSchema {
+    vertices: Vec<Point3>,
+}
+
+impl PolylineSchema {
+    /// The vertex chain, in the curve's own parameter direction.
+    pub fn vertices(&self) -> &[Point3] {
+        &self.vertices
+    }
+
+    /// The first point: the curve at its trimmed interval's lower end.
+    pub fn start(&self) -> Point3 {
+        self.vertices[0]
+    }
+
+    /// The last point: the curve at its trimmed interval's upper end.
+    pub fn end(&self) -> Point3 {
+        self.vertices[self.vertices.len() - 1]
+    }
+}
+
+fn polyline_schema(vertices: Vec<Point3>) -> Result<PolylineSchema, CurveSchemaFailure> {
+    if vertices.len() < 2 {
+        return Err(CurveSchemaFailure::FewerThanTwoVertices);
+    }
+    for vertex in &vertices {
+        for coordinate in [vertex.x, vertex.y, vertex.z] {
+            if let Err(cause) = FiniteF64::new(coordinate) {
+                return Err(CurveSchemaFailure::VertexNotFinite { cause });
+            }
+        }
+    }
+    Ok(PolylineSchema { vertices })
+}
+
+/// Read a `Line` structurally.
+///
+/// `Line(a, b)` is `subs(t) = a + t(b - a)` on the parameter range `0..=1` —
+/// the representation *is* the segment, with no trimming to reconcile — so the
+/// complete trimmed occurrence is the two endpoints and nothing is
+/// approximated. That exactness is why line segments are the first admitted
+/// curve family.
+pub fn identify_line_segment(line: &truck_geometry::prelude::Line<Point3>) -> CurveSchema {
+    match polyline_schema(vec![line.0, line.1]) {
+        Ok(schema) => CurveSchema::LineSegment(schema),
+        Err(cause) => CurveSchema::NotStructurallyIdentified(cause),
+    }
+}
+
+/// Read a `PolylineCurve` structurally.
+///
+/// `subs` interpolates linearly between consecutive vertices on `0..=n-1`, so
+/// each source segment maps to exactly one 2D segment under an affine
+/// projection and the approximation error is again zero.
+pub fn identify_polyline(curve: &[Point3]) -> CurveSchema {
+    match polyline_schema(curve.to_vec()) {
+        Ok(schema) => CurveSchema::Polyline(schema),
+        Err(cause) => CurveSchema::NotStructurallyIdentified(cause),
+    }
+}
+
+#[cfg(test)]
+mod curve_tests {
+    use super::*;
+    use truck_geometry::prelude::Line;
+
+    #[test]
+    fn a_line_is_its_own_complete_trimmed_occurrence() {
+        let line = Line(Point3::new(0.0, 0.0, 0.0), Point3::new(3.0, 4.0, 0.0));
+        let schema = identify_line_segment(&line);
+        let polygonal = schema.polygonal().expect("a line is polygonal");
+        assert_eq!(polygonal.vertices().len(), 2);
+        assert_eq!(polygonal.start(), Point3::new(0.0, 0.0, 0.0));
+        assert_eq!(polygonal.end(), Point3::new(3.0, 4.0, 0.0));
+    }
+
+    #[test]
+    fn a_degenerate_polyline_is_refused() {
+        assert_eq!(
+            identify_polyline(&[Point3::new(0.0, 0.0, 0.0)]),
+            CurveSchema::NotStructurallyIdentified(CurveSchemaFailure::FewerThanTwoVertices)
+        );
+        assert_eq!(
+            identify_polyline(&[]).tag(),
+            "curve_fewer_than_two_vertices"
+        );
+    }
+
+    #[test]
+    fn a_non_finite_vertex_is_refused() {
+        let broken = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(f64::INFINITY, 0.0, 0.0),
+        ];
+        assert_eq!(
+            identify_polyline(&broken),
+            CurveSchema::NotStructurallyIdentified(CurveSchemaFailure::VertexNotFinite {
+                cause: NumericDomainError::Infinite
+            })
+        );
     }
 }

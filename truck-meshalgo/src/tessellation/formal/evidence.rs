@@ -1074,7 +1074,10 @@ impl<T> AuthoritativeFact<T> {
                 certificate,
                 use_site,
             }),
-            false => Err(refuse(RefusalReason::BasisNotAdmitted { basis, certificate })),
+            false => Err(refuse(RefusalReason::BasisNotAdmitted {
+                basis,
+                certificate,
+            })),
         }
     }
 
@@ -1275,7 +1278,10 @@ mod tests {
             // The rejected certificate survives the refusal.
             RefusalReason::BasisNotAdmitted { basis, certificate } => {
                 assert_eq!(basis, AuthoritativeBasis::Analytic);
-                assert_eq!(certificate, EvidenceCertificate::Analytic(an_analytic_certificate()));
+                assert_eq!(
+                    certificate,
+                    EvidenceCertificate::Analytic(an_analytic_certificate())
+                );
             }
             other => panic!("wrong refusal: {other:?}"),
         }
@@ -1329,7 +1335,10 @@ mod tests {
         let evidence: Evidence<u32> = Evidence::unresolved(predicate, an_attempt());
         assert_eq!(evidence.status(), EvidenceStatus::Unresolved);
         assert_eq!(evidence.unresolved_predicate(), Some(predicate));
-        assert_eq!(evidence.unresolved_attempts().map(NonEmptyVec::len), Some(1));
+        assert_eq!(
+            evidence.unresolved_attempts().map(NonEmptyVec::len),
+            Some(1)
+        );
     }
 
     #[test]
@@ -1377,7 +1386,10 @@ mod tests {
     #[test]
     fn an_analytic_certificate_retains_its_premises() {
         let certificate = an_analytic_certificate();
-        assert_eq!(certificate.rule(), AnalyticRule::RevolutionAngularPeriodIsTwoPi);
+        assert_eq!(
+            certificate.rule(),
+            AnalyticRule::RevolutionAngularPeriodIsTwoPi
+        );
         assert_eq!(
             *certificate.premises().first(),
             AnalyticPremise::SupportSurfaceIsARevolvedCurve
@@ -1440,10 +1452,12 @@ mod tests {
                 TerminationEvidence::ConvergedWithinTolerance,
                 NonEmptyVec::one(AnalyticPremise::RepresentedBasisIsAxisAligned),
             ),
-            Err(CertificateConstructionError::AchievedBoundExceedsRequiredTolerance {
-                required: 1e-12,
-                achieved: 1e-9,
-            })
+            Err(
+                CertificateConstructionError::AchievedBoundExceedsRequiredTolerance {
+                    required: 1e-12,
+                    achieved: 1e-9,
+                }
+            )
         );
         assert_eq!(
             ClosedInterval::new(1.0, 0.0),

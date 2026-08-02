@@ -377,8 +377,7 @@ impl SourceBoundInput {
             .zip(edge_uses.iter().cycle().skip(1))
             .take(edge_uses.len())
             .all(|(current, next)| {
-                current.end_vertex().is_identified()
-                    && current.end_vertex() == next.start_vertex()
+                current.end_vertex().is_identified() && current.end_vertex() == next.start_vertex()
             });
         Some(continuous)
     }
@@ -469,7 +468,8 @@ impl SourceFaceInput {
 
     /// Whether every edge use satisfies [`SourceEdgeUseInput::endpoints_consistent`].
     pub fn endpoints_consistent(&self) -> bool {
-        self.edge_uses().all(SourceEdgeUseInput::endpoints_consistent)
+        self.edge_uses()
+            .all(SourceEdgeUseInput::endpoints_consistent)
     }
 
     /// How many edge-use-bearing bounds close on source vertex identity.
