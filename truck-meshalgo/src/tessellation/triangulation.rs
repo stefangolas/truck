@@ -1340,6 +1340,7 @@ impl PolyBoundary {
         &self,
         triangulation: &mut Cdt,
         boundary_map: &mut HashMap<FixedVertexHandle, Point3>,
+        roles: &mut ConstraintRoles,
     ) -> bool {
         let mut success = true;
         let probe = std::env::var_os("TRUCK_PROBE_FAIL").is_some();
@@ -1428,14 +1429,25 @@ impl PolyBoundary {
                 let can_add = !is_already_constraint && triangulation.can_add_constraint(vi, vj);
                 if can_add {
                     if triangulation.add_constraint(vi, vj) {
-                        if let (Some(installed_origins), Some(edge)) = (
-                            installed_origins.as_mut(),
-                            triangulation.get_edge_from_neighbors(vi, vj),
-                        ) {
-                            installed_origins
-                                .entry(edge.as_undirected().fix())
-                                .or_default()
-                                .push((piece_index, k));
+                        if let Some(edge) = triangulation.get_edge_from_neighbors(vi, vj) {
+                            let handle = edge.as_undirected().fix();
+                            // Audit A1: every segment reaching here comes from a
+                            // `PolyBoundary` piece, so it is treated as physical
+                            // boundary. That is deliberately *not* the whole
+                            // truth — `PolyBoundary::new` also stitches synthetic
+                            // closure segments into these same pieces, and those
+                            // are `UnresolvedSyntheticClosure` in reality (audit
+                            // A6). Distinguishing them needs per-piece
+                            // provenance, which would be a second semantic change
+                            // in the same experiment. Tagged as it behaves today;
+                            // A6 splits the population.
+                            roles.record(handle, ConstraintRole::PhysicalBoundary);
+                            if let Some(installed_origins) = installed_origins.as_mut() {
+                                installed_origins
+                                    .entry(handle)
+                                    .or_default()
+                                    .push((piece_index, k));
+                            }
                         }
                     } else {
                         probe_add_returned_false += 1;
@@ -1573,6 +1585,100 @@ fn spade_round(x: f64) -> f64 {
     }
 }
 
+/// What a Spade constraint edge *means*, so that material semantics can be
+/// derived from it.
+///
+/// **Audit A1.** The dual-parity flood in [`triangulation_into_polymesh_outcome`]
+/// asks `edge.is_constraint_edge()` and toggles material parity on every `true`.
+/// That is one bit where the formal system requires a role: `insert_surface`
+/// adds constraints across the *interior sampling grid*, wholly inside the
+/// material region, and those toggle parity exactly as a trim segment does.
+///
+/// FORMAL_SYSTEM.md §IX distinguishes `Physical`, `ArtificialCut`,
+/// `NativeBoundary` and `SingularLink`; Definition 20 gives them different
+/// material constraints — a physical half-edge pins `μ_L = 1, μ_R = 0` while an
+/// artificial cut requires `μ_L = μ_R`. This enum is that distinction, carried
+/// far enough to make the A1 experiment causal.
+///
+/// It is deliberately *not* the general cell-constraint solver. Parity is still
+/// the mechanism; the only thing that changes is which edges are entitled to
+/// flip it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ConstraintRole {
+    /// A trim segment carrying source boundary evidence. Toggles material side.
+    PhysicalBoundary,
+    /// A chart cut or seam introduced to make the domain simply connected.
+    /// Both sides are the same material state, so it must not toggle.
+    ArtificialCut,
+    /// The ambient parameter domain's own edge. Does not itself toggle;
+    /// its interpretation is schema-dependent (FORMAL_SYSTEM Definition 20).
+    NativeBoundary,
+    /// An interior grid constraint inserted by [`insert_surface`] to control
+    /// triangle shape. Carries no material meaning whatsoever.
+    SurfaceSampling,
+    /// A closure segment synthesised by [`PolyBoundary::new`] that no source
+    /// entity justifies. Its role is genuinely unknown; it must not be silently
+    /// assigned equality semantics (audit A6).
+    UnresolvedSyntheticClosure,
+}
+
+/// Roles for the constraint edges of one face's triangulation.
+///
+/// A side table rather than a Spade edge-data parameter: `add_constraint` does
+/// not hand back the edges it marked, so a role can only be attached by looking
+/// the edge up afterwards. When that lookup fails — Spade may mark a collinear
+/// chain rather than the direct edge — the role is genuinely unresolved, and
+/// [`Self::role_of`] says so rather than guessing.
+#[derive(Debug, Default)]
+struct ConstraintRoles {
+    roles: HashMap<FixedUndirectedEdgeHandle, ConstraintRole>,
+    /// Constraint edges the flood met that no `record` call had claimed.
+    /// Counted, not assumed: this is the size of the gap between what we asked
+    /// Spade to constrain and what we can name (CDT-001, CDT-002).
+    unresolved_at_flood: std::cell::Cell<usize>,
+    /// How many edges each role claimed, for the experiment's own report.
+    recorded: HashMap<ConstraintRole, usize>,
+}
+
+impl ConstraintRoles {
+    fn record(&mut self, edge: FixedUndirectedEdgeHandle, role: ConstraintRole) {
+        // First claim wins. A later, weaker claim must not overwrite a physical
+        // boundary: an interior grid segment that happens to land on an edge a
+        // trim segment already constrained is still a trim segment.
+        if !self.roles.contains_key(&edge) {
+            self.roles.insert(edge, role);
+            *self.recorded.entry(role).or_insert(0) += 1;
+        }
+    }
+
+    fn role_of(&self, edge: FixedUndirectedEdgeHandle) -> Option<ConstraintRole> {
+        self.roles.get(&edge).copied()
+    }
+
+    /// Whether a constraint edge is entitled to flip material parity.
+    ///
+    /// **Legacy-preserving by construction.** Everything except
+    /// `SurfaceSampling` and `ArtificialCut` toggles, including the unresolved
+    /// case. The single semantic change in the A1 experiment is that interior
+    /// sampling constraints stop toggling; every other population keeps the
+    /// behaviour it had, tagged but unaltered, so a difference in the census is
+    /// attributable to that one change and not to a reclassification.
+    fn toggles_material(&self, edge: FixedUndirectedEdgeHandle) -> bool {
+        match self.role_of(edge) {
+            Some(ConstraintRole::SurfaceSampling) => false,
+            Some(ConstraintRole::ArtificialCut) => false,
+            Some(ConstraintRole::PhysicalBoundary) => true,
+            Some(ConstraintRole::NativeBoundary) => true,
+            Some(ConstraintRole::UnresolvedSyntheticClosure) => true,
+            None => {
+                self.unresolved_at_flood
+                    .set(self.unresolved_at_flood.get() + 1);
+                true
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TessellationFailureReason {
     ContradictoryDualParity,
@@ -1706,16 +1812,36 @@ where
 {
     let mut triangulation = Cdt::new();
     let mut boundary_map = HashMap::<FixedVertexHandle, Point3>::default();
-    if !polyboundary.insert_to(&mut triangulation, &mut boundary_map) {
+    let mut roles = ConstraintRoles::default();
+    if !polyboundary.insert_to(&mut triangulation, &mut boundary_map, &mut roles) {
         return TessellationOutcome::Failed(TessellationFailureReason::ConstraintInsertionIncomplete.into());
     }
-    insert_surface(&mut triangulation, surface, polyboundary, tol);
-    triangulation_into_polymesh_outcome(
+    insert_surface(&mut triangulation, surface, polyboundary, tol, &mut roles);
+    let outcome = triangulation_into_polymesh_outcome(
         &triangulation,
         surface,
         polyboundary,
         &boundary_map,
-    )
+        &roles,
+    );
+    if std::env::var_os("TRUCK_PROBE_ROLES").is_some() {
+        // The population sizes the A1 comparison rests on. `unresolved` is the
+        // honest gap: constraint edges the flood met that no `record` call had
+        // claimed, which keep their legacy toggling behaviour. A large number
+        // here would mean the experiment is less causal than it looks.
+        let count = |role| roles.recorded.get(&role).copied().unwrap_or(0);
+        eprintln!(
+            "ROLES\tphysical={}\tsampling={}\tartificial={}\tnative={}\t\
+             unresolved_synth={}\tunresolved_at_flood={}",
+            count(ConstraintRole::PhysicalBoundary),
+            count(ConstraintRole::SurfaceSampling),
+            count(ConstraintRole::ArtificialCut),
+            count(ConstraintRole::NativeBoundary),
+            count(ConstraintRole::UnresolvedSyntheticClosure),
+            roles.unresolved_at_flood.get(),
+        );
+    }
+    outcome
 }
 
 /// Tessellates one surface trimmed by polyline, returning `TessellationOutcome`.
@@ -1757,7 +1883,19 @@ fn insert_surface(
     surface: impl PreMeshableSurface,
     polyline: &PolyBoundary,
     tol: f64,
+    roles: &mut ConstraintRoles,
 ) {
+    // Audit A1: every constraint added below is an interior sampling edge. It
+    // exists to control triangle shape and lies wholly inside the material
+    // region — `polyline.include` gated the insertion of both its endpoints.
+    // It carries no material meaning and must not toggle parity.
+    let mut constrain = |triangulation: &mut Cdt, a: FixedVertexHandle, b: FixedVertexHandle| {
+        if triangulation.can_add_constraint(a, b) && triangulation.add_constraint(a, b) {
+            if let Some(edge) = triangulation.get_edge_from_neighbors(a, b) {
+                roles.record(edge.as_undirected().fix(), ConstraintRole::SurfaceSampling);
+            }
+        }
+    };
     let bdb: BoundingBox<Point2> = polyline
         .0
         .iter()
@@ -1781,22 +1919,16 @@ fn insert_surface(
         vec[0].windows(2).zip(&vec[1]).for_each(|(a, z)| {
             if let Some(x) = a[0] {
                 if let Some(y) = a[1] {
-                    if triangulation.can_add_constraint(x, y) {
-                        triangulation.add_constraint(x, y);
-                    }
+                    constrain(triangulation, x, y);
                 }
                 if let Some(z) = z {
-                    if triangulation.can_add_constraint(x, *z) {
-                        triangulation.add_constraint(x, *z);
-                    }
+                    constrain(triangulation, x, *z);
                 }
             }
         });
         let idx = vec[0].len() - 1;
         if let (Some(x), Some(y)) = (vec[0][idx], vec[1][idx]) {
-            if triangulation.can_add_constraint(x, y) {
-                triangulation.add_constraint(x, y);
-            }
+            constrain(triangulation, x, y);
         }
     });
 }
@@ -1807,6 +1939,7 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
     surface: &S,
     _polyline: &PolyBoundary,
     boundary_map: &HashMap<FixedVertexHandle, Point3>,
+    roles: &ConstraintRoles,
 ) -> TessellationOutcome {
     use std::collections::{HashMap as StdHashMap, VecDeque};
 
@@ -1830,7 +1963,12 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
             [e0, e1, e2]
         };
         for e in edges {
-            let is_domain_boundary = e.is_constraint_edge();
+            // Audit A1. This was `e.is_constraint_edge()` — one bit, so an
+            // interior sampling constraint flipped material parity exactly as a
+            // trim segment did. A constraint edge is now only a material
+            // transition if its role says so.
+            let is_domain_boundary =
+                e.is_constraint_edge() && roles.toggles_material(e.as_undirected().fix());
             let next_parity = if is_domain_boundary {
                 current_parity ^ 1
             } else {
@@ -2018,8 +2156,10 @@ fn triangulation_into_polymesh<S: ParametricSurface3D>(
     surface: &S,
     polyline: &PolyBoundary,
     boundary_map: &HashMap<FixedVertexHandle, Point3>,
+    roles: &ConstraintRoles,
 ) -> PolygonMesh {
-    match triangulation_into_polymesh_outcome(triangulation, surface, polyline, boundary_map) {
+    match triangulation_into_polymesh_outcome(triangulation, surface, polyline, boundary_map, roles)
+    {
         TessellationOutcome::Mesh(ft) => ft.mesh,
         TessellationOutcome::Failed(_) => PolygonMesh::default(),
     }
