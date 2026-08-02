@@ -1055,7 +1055,7 @@ fn periodic_displacement(start: f64, end: f64, period: f64, tolerance: f64) -> O
 /// `PhysicalBoundary`, fabricated geometry included. The fix is not to
 /// reclassify afterwards but to record the origin where the segment is created,
 /// which is the only place it is known.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum SegmentOrigin {
     /// Carries source boundary evidence: a lifted source edge use.
     Source,
@@ -1096,31 +1096,197 @@ struct BoundaryLoop {
 }
 
 impl BoundaryLoop {
-    /// A loop every segment of which is source-derived.
-    fn source(points: Vec<SurfacePoint>) -> Self {
-        Self {
-            origins: vec![SegmentOrigin::Source; points.len()],
-            points,
+    /// Build from parts that are known to chain end-to-start, closing back on
+    /// the first part's start. Every join is a shared endpoint, so no segment
+    /// is invented; this is the stitching case, where each run was constructed
+    /// to begin where the previous one ended.
+    fn chained(parts: impl IntoIterator<Item = (Vec<SurfacePoint>, SegmentOrigin)>) -> Self {
+        let mut path = BoundaryPath::default();
+        for (part, origin) in parts {
+            path.append(part, origin, PartJoin::SharedEndpoint);
+        }
+        path.close(PartJoin::SharedEndpoint)
+    }
+
+    /// Cut the cyclic loop open at its wrap segment, yielding a path whose
+    /// origins are retained.
+    ///
+    /// The wrap's own origin is dropped because that segment ceases to exist;
+    /// every other segment keeps the label it was created with. This is what
+    /// lets a loop be re-joined to something else without its provenance being
+    /// rebuilt from scratch — taking `.points` and relabelling would, for
+    /// instance, silently turn a periodic walk's deck seam back into `Source`.
+    fn into_path_cutting_wrap(self) -> BoundaryPath {
+        let Self { points, mut origins } = self;
+        origins.pop();
+        BoundaryPath { points, origins }
+    }
+
+    /// Checked constructor. The equal-length relation is the type's whole
+    /// invariant, so it is enforced rather than documented.
+    fn new(points: Vec<SurfacePoint>, origins: Vec<SegmentOrigin>) -> Self {
+        assert_eq!(
+            points.len(),
+            origins.len(),
+            "every boundary segment must carry exactly one origin",
+        );
+        Self { points, origins }
+    }
+
+    /// A loop whose duplicate endpoint has already been removed, so every
+    /// cyclic segment — including the wrap from the last point back to the
+    /// first — is source-derived.
+    fn euclidean_source_loop(points: Vec<SurfacePoint>) -> Self {
+        let origins = vec![SegmentOrigin::Source; points.len()];
+        Self::new(points, origins)
+    }
+
+    /// A lifted walk that closes only *modulo the lattice*: its last point is
+    /// `first + Lδ`, a distinct parameter point, and is retained.
+    ///
+    /// The wrap segment is therefore **not** another source trim segment — it
+    /// is the deck closure, and labelling it `Source` would feed the material
+    /// solve a boundary no source entity describes. Properly this should not be
+    /// a geometric segment at all but a deck identification; until the quotient
+    /// stage exists to hold that relation, it is marked `Seam`, which keeps the
+    /// current toggling behaviour while naming what it is.
+    fn periodic_source_walk(points: Vec<SurfacePoint>) -> Self {
+        let mut origins = vec![SegmentOrigin::Source; points.len()];
+        if let Some(wrap) = origins.last_mut() {
+            *wrap = SegmentOrigin::Seam;
+        }
+        Self::new(points, origins)
+    }
+
+}
+
+/// How one boundary part meets the next.
+///
+/// **Stated by the caller, never inferred.** An earlier version decided this by
+/// testing `tail.uv.distance(next[0].uv) < TOLERANCE`, which is wrong twice
+/// over. A UV epsilon cannot distinguish a retained shared endpoint from a deck
+/// identification, a singular attachment, or an unresolved relation — they are
+/// different facts that can present with the same coordinates — and its
+/// tolerance has no fixed physical meaning across parameterisations. The
+/// stitching site already knows which case it is building; the type now makes
+/// it say so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PartJoin {
+    /// The next part begins at the point the previous one ended on. The
+    /// duplicate is dropped and **no segment is created**.
+    SharedEndpoint,
+    /// The parts do not meet. A segment is created between them, carrying the
+    /// given origin because neither part supplied it.
+    Bridge(SegmentOrigin),
+}
+
+/// An *open* chain of boundary segments, before it is closed into a loop.
+///
+/// `origins[i]` labels the segment `points[i] -> points[i + 1]`, so there is
+/// exactly one fewer origin than point. Keeping the open case in its own type
+/// is what makes the closing segment an explicit decision rather than an
+/// accident of indexing.
+#[derive(Debug, Default, Clone)]
+struct BoundaryPath {
+    points: Vec<SurfacePoint>,
+    origins: Vec<SegmentOrigin>,
+}
+
+impl BoundaryPath {
+    fn start(points: Vec<SurfacePoint>, origin: SegmentOrigin) -> Self {
+        let origins = vec![origin; points.len().saturating_sub(1)];
+        Self { points, origins }
+    }
+
+    /// Append a part, saying explicitly how it meets what is already here.
+    ///
+    /// A shared endpoint drops the duplicate point and creates no segment. A
+    /// bridge keeps **both** endpoints and inserts one labelled segment between
+    /// them — which is the case the previous implementation got wrong: it
+    /// dropped every part's final point unconditionally, so a bridge silently
+    /// replaced `a1 -> a2 -> b0` with the shortcut `a1 -> b0`, deleting a real
+    /// source segment precisely when the distinction mattered most.
+    fn append(&mut self, mut part: Vec<SurfacePoint>, origin: SegmentOrigin, join: PartJoin) {
+        if part.is_empty() {
+            return;
+        }
+        if self.points.is_empty() {
+            *self = Self::start(part, origin);
+            return;
+        }
+        match join {
+            PartJoin::SharedEndpoint => {
+                part.remove(0);
+            }
+            PartJoin::Bridge(bridge) => self.origins.push(bridge),
+        }
+        self.origins
+            .extend(std::iter::repeat_n(origin, part.len().saturating_sub(1)));
+        if !part.is_empty() {
+            // The segment from the current tail into the first retained point
+            // of `part` belongs to `part` when they shared an endpoint, and was
+            // already labelled as the bridge otherwise.
+            if matches!(join, PartJoin::SharedEndpoint) {
+                self.origins.push(origin);
+            }
+            self.points.extend(part);
         }
     }
 
-    /// Concatenate chained parts, each labelled with its own origin.
-    ///
-    /// As the previous `connect_edges`, the last point of every part is dropped
-    /// because it repeats the first point of the next. That also makes the
-    /// origin assignment come out right: the retained tail point of a part
-    /// keeps that part's label, so the segment bridging two parts is attributed
-    /// to the part it geometrically belongs to, and the closing wrap-around
-    /// segment to the final part.
-    fn from_parts(parts: impl IntoIterator<Item = (Vec<SurfacePoint>, SegmentOrigin)>) -> Self {
-        let (mut points, mut origins) = (Vec::new(), Vec::new());
-        for (part, origin) in parts {
-            let keep = part.len().saturating_sub(1);
-            points.extend(part.into_iter().take(keep));
-            origins.resize(points.len(), origin);
+    /// Append another path, preserving its per-segment origins.
+    fn append_path(&mut self, other: BoundaryPath, join: PartJoin) {
+        if other.points.is_empty() {
+            return;
         }
-        Self { points, origins }
+        if self.points.is_empty() {
+            *self = other;
+            return;
+        }
+        let BoundaryPath {
+            mut points,
+            origins,
+        } = other;
+        match join {
+            PartJoin::SharedEndpoint => {
+                points.remove(0);
+            }
+            PartJoin::Bridge(bridge) => self.origins.push(bridge),
+        }
+        self.origins.extend(origins);
+        self.points.extend(points);
     }
+
+    /// Reverse traversal.
+    ///
+    /// Sound on an open path precisely *because* it is open: with `origins[i]`
+    /// labelling `points[i] -> points[i + 1]`, reversing both vectors maps
+    /// segment `i` to old segment `n - 2 - i`, the same segment travelled
+    /// backwards. The cyclic case is **not** this — reversing a loop's two
+    /// vectors directly is off by one, because the wrap segment does not move
+    /// with the rest. Cutting a loop into a path first removes the need to
+    /// reason about where the cut went.
+    fn reverse(&mut self) {
+        self.points.reverse();
+        self.origins.reverse();
+    }
+
+    /// Close the path into a cyclic loop, saying what the closing segment is.
+    ///
+    /// `SharedEndpoint` means the path already returns to its start, so the
+    /// duplicate final point is dropped and the existing last segment becomes
+    /// the wrap. `Bridge` keeps every point and adds one labelled wrap segment.
+    fn close(mut self, join: PartJoin) -> BoundaryLoop {
+        match join {
+            PartJoin::SharedEndpoint => {
+                self.points.pop();
+            }
+            PartJoin::Bridge(bridge) => self.origins.push(bridge),
+        }
+        BoundaryLoop::new(self.points, self.origins)
+    }
+}
+
+impl BoundaryLoop {
 
     fn len(&self) -> usize {
         self.points.len()
@@ -1283,7 +1449,7 @@ impl PolyBoundary {
             match closure {
                 BoundaryClosure::EuclideanClosed => {
                     vec.pop();
-                    closed.push(BoundaryLoop::source(vec));
+                    closed.push(BoundaryLoop::euclidean_source_loop(vec));
                 }
                 BoundaryClosure::PeriodicClosed {
                     displacement: [ku, kv],
@@ -1304,7 +1470,7 @@ impl PolyBoundary {
                             vec.last_mut().unwrap().uv.y = vec[0].uv.y + (kv as f64) * vp;
                         }
                     }
-                    closed.push(BoundaryLoop::source(vec));
+                    closed.push(BoundaryLoop::periodic_source_walk(vec));
                 }
                 BoundaryClosure::Open => open.push(vec),
             }
@@ -1315,32 +1481,43 @@ impl PolyBoundary {
             let area0 = signed_area(&closed[0].points);
             let area1 = signed_area(&closed[1].points);
             if area0.abs() < 1e-4 && area1.abs() < 1e-4 {
-                let loop0 = closed.remove(0).points;
-                let mut loop1 = closed.remove(0).points;
-                let u0_mean: f64 = loop0.iter().map(|p| p.uv.x).sum::<f64>() / loop0.len() as f64;
-                let u1_mean: f64 = loop1.iter().map(|p| p.uv.x).sum::<f64>() / loop1.len() as f64;
+                let loop0 = closed.remove(0);
+                let mut loop1 = closed.remove(0);
+                let u0_mean: f64 = loop0.points.iter().map(|p| p.uv.x).sum::<f64>() / loop0.points.len() as f64;
+                let u1_mean: f64 = loop1.points.iter().map(|p| p.uv.x).sum::<f64>() / loop1.points.len() as f64;
                 if let Some(up) = lattice.declared_u_period() {
                     let ku = ((u0_mean - u1_mean) / up).round();
                     if ku != 0.0 {
-                        for p in &mut loop1 {
+                        for p in &mut loop1.points {
                             p.uv.x += ku * up;
                         }
                     }
                 }
-                let v0_mean: f64 = loop0.iter().map(|p| p.uv.y).sum::<f64>() / loop0.len() as f64;
-                let v1_mean: f64 = loop1.iter().map(|p| p.uv.y).sum::<f64>() / loop1.len() as f64;
+                let v0_mean: f64 = loop0.points.iter().map(|p| p.uv.y).sum::<f64>() / loop0.len() as f64;
+                let v1_mean: f64 = loop1.points.iter().map(|p| p.uv.y).sum::<f64>() / loop1.len() as f64;
                 if let Some(vp) = lattice.declared_v_period() {
                     let kv = ((v0_mean - v1_mean) / vp).round();
                     if kv != 0.0 {
-                        for p in &mut loop1 {
+                        for p in &mut loop1.points {
                             p.uv.y += kv * vp;
                         }
                     }
                 }
-                let mut merged = Vec::new();
-                merged.extend(loop0.into_iter());
-                merged.extend(loop1.into_iter().rev());
-                closed.push(BoundaryLoop::source(merged));
+                // Both halves are source-derived, but joining a loop to a
+                // *reversed* loop introduces two segments that neither
+                // supplied: the jump from `loop0`'s end to `loop1`'s reversed
+                // start, and the closing wrap back to `loop0`'s start. Building
+                // this by parts labels those bridges instead of letting them
+                // inherit `Source`.
+                let mut loop1_path = loop1.into_path_cutting_wrap();
+                loop1_path.reverse();
+                let mut path = loop0.into_path_cutting_wrap();
+                // The two loops are disconnected: joining them creates a
+                // segment neither supplied, and so does closing back to the
+                // start. Both are declared, so no source point is dropped to
+                // manufacture a shortcut.
+                path.append_path(loop1_path, PartJoin::Bridge(SegmentOrigin::Seam));
+                closed.push(path.close(PartJoin::Bridge(SegmentOrigin::Seam)));
             }
         } else if let Some(pair) =
             CollapsedPeriodicBoundaryPair::try_classify(
@@ -1392,23 +1569,24 @@ impl PolyBoundary {
             let seam_down = polyline_on_surface(surface, end_loop0, start_loop1, tol);
             let seam_up = polyline_on_surface(surface, end_loop1, start_loop0, tol);
 
-            // The two chart branches are source-derived; the segments joining
-            // them across the collapsed direction are not.
-            closed.push(BoundaryLoop::from_parts([
+            // Only `loop0_full` carries source evidence, and even it ends with
+            // an appended period-wrap point rather than a source sample. The
+            // apex branch `loop1_rev` is *evaluated from the surface* at
+            // `pair.apex_u` — synthesised geometry that no source edge
+            // describes — and the two joining runs are seams across the
+            // collapsed direction.
+            closed.push(BoundaryLoop::chained([
                 (loop0_full, SegmentOrigin::Source),
                 (seam_down, SegmentOrigin::Seam),
-                (loop1_rev, SegmentOrigin::Source),
+                (loop1_rev, SegmentOrigin::Seam),
                 (seam_up, SegmentOrigin::Seam),
             ]));
         }
         let (n_closed_in, n_open_in) = (closed.len(), open.len());
-        fn connect_edges<P>(vecs: impl IntoIterator<Item = Vec<P>>) -> Vec<P> {
-            let closure = |vec: Vec<P>| {
-                let len = vec.len();
-                vec.into_iter().take(len - 1)
-            };
-            vecs.into_iter().flat_map(closure).collect()
-        }
+        // `connect_edges` used to live here. It dropped each part's last point
+        // unconditionally, which is correct only when parts chain — the
+        // assumption `BoundaryPath::append` now makes the caller state, so the
+        // helper has no remaining callers.
         match open.len() {
             1 => {
                 let mut curve = open.pop().unwrap();
@@ -1424,7 +1602,7 @@ impl PolyBoundary {
                         let vec0 = polyline_on_surface(surface, q, y, tol);
                         let vec1 = polyline_on_surface(surface, y, x, tol);
                         let vec2 = polyline_on_surface(surface, x, p, tol);
-                        closed.push(BoundaryLoop::from_parts([
+                        closed.push(BoundaryLoop::chained([
                             (vec0, SegmentOrigin::SyntheticClosure),
                             (vec1, SegmentOrigin::SyntheticClosure),
                             (vec2, SegmentOrigin::SyntheticClosure),
@@ -1439,7 +1617,7 @@ impl PolyBoundary {
                         let vec0 = polyline_on_surface(surface, q, y, tol);
                         let vec1 = polyline_on_surface(surface, y, x, tol);
                         let vec2 = polyline_on_surface(surface, x, p, tol);
-                        closed.push(BoundaryLoop::from_parts([
+                        closed.push(BoundaryLoop::chained([
                             (vec0, SegmentOrigin::SyntheticClosure),
                             (vec1, SegmentOrigin::SyntheticClosure),
                             (vec2, SegmentOrigin::SyntheticClosure),
@@ -1454,7 +1632,7 @@ impl PolyBoundary {
                         let vec0 = polyline_on_surface(surface, q, y, tol);
                         let vec1 = polyline_on_surface(surface, y, x, tol);
                         let vec2 = polyline_on_surface(surface, x, p, tol);
-                        closed.push(BoundaryLoop::from_parts([
+                        closed.push(BoundaryLoop::chained([
                             (vec0, SegmentOrigin::SyntheticClosure),
                             (vec1, SegmentOrigin::SyntheticClosure),
                             (vec2, SegmentOrigin::SyntheticClosure),
@@ -1469,7 +1647,7 @@ impl PolyBoundary {
                         let vec0 = polyline_on_surface(surface, q, y, tol);
                         let vec1 = polyline_on_surface(surface, y, x, tol);
                         let vec2 = polyline_on_surface(surface, x, p, tol);
-                        closed.push(BoundaryLoop::from_parts([
+                        closed.push(BoundaryLoop::chained([
                             (vec0, SegmentOrigin::SyntheticClosure),
                             (vec1, SegmentOrigin::SyntheticClosure),
                             (vec2, SegmentOrigin::SyntheticClosure),
@@ -1499,7 +1677,7 @@ impl PolyBoundary {
                 let ((p0, p1), (q0, q1)) = (end_pts(&curve0), end_pts(&curve1));
                 let vec0 = polyline_on_surface(surface, p1, q0, tol);
                 let vec1 = polyline_on_surface(surface, q1, p0, tol);
-                closed.push(BoundaryLoop::from_parts([
+                closed.push(BoundaryLoop::chained([
                     (curve0, SegmentOrigin::Source),
                     (vec0, SegmentOrigin::SyntheticClosure),
                     (curve1, SegmentOrigin::Source),
@@ -1539,7 +1717,7 @@ impl PolyBoundary {
                 let vec1 = polyline_on_surface(surface, p[1], p[2], tol);
                 let vec2 = polyline_on_surface(surface, p[2], p[3], tol);
                 let vec3 = polyline_on_surface(surface, p[3], p[0], tol);
-                closed.push(BoundaryLoop::from_parts([
+                closed.push(BoundaryLoop::chained([
                     (vec0, SegmentOrigin::SyntheticClosure),
                     (vec1, SegmentOrigin::SyntheticClosure),
                     (vec2, SegmentOrigin::SyntheticClosure),
@@ -1750,11 +1928,9 @@ impl PolyBoundary {
                 // segments into the same pieces as source trim, so before the
                 // origin was recorded at creation every one of them arrived
                 // here indistinguishable from a real boundary.
-                let segment_role = piece
-                    .origins
-                    .get(i)
-                    .unwrap_or(SegmentOrigin::Source)
-                    .role();
+                let segment_origin =
+                    piece.origins.get(i).unwrap_or(SegmentOrigin::Source);
+                let segment_role = segment_origin.role();
                 let overlapping = triangulation
                     .get_edge_from_neighbors(vi, vj)
                     .filter(|e| e.is_constraint_edge())
@@ -1806,6 +1982,7 @@ impl PolyBoundary {
                         // in the same experiment. Tagged as it behaves today;
                         // A6 splits the population.
                         roles.record(handle, segment_role);
+                        *roles.origin_census.entry(segment_origin).or_insert(0) += 1;
                         if let Some(installed_origins) = installed_origins.as_mut() {
                             installed_origins
                                 .entry(handle)
@@ -2001,6 +2178,11 @@ struct ConstraintRoles {
     unresolved_at_flood: std::cell::Cell<usize>,
     /// How many edges each role claimed, for the experiment's own report.
     recorded: HashMap<ConstraintRole, usize>,
+    /// How many edges each *origin* claimed. Distinct from `recorded`: several
+    /// origins deliberately share one role while the material semantics of
+    /// synthesised geometry stay unchanged, so without this the synthetic
+    /// populations are indistinguishable in the census.
+    origin_census: HashMap<SegmentOrigin, usize>,
 }
 
 impl ConstraintRoles {
@@ -2270,10 +2452,12 @@ where
         // claimed, which keep their legacy toggling behaviour. A large number
         // here would mean the experiment is less causal than it looks.
         let count = |role| roles.recorded.get(&role).copied().unwrap_or(0);
+        let by_origin = |o| roles.origin_census.get(&o).copied().unwrap_or(0);
         eprintln!(
             "ROLES\tphysical={}\tsampling={}\tartificial={}\tnative={}\t\
              unresolved_synth={}\tunresolved_at_flood={}\t\
-             samples_on_boundary={}\tsampling_location_unresolved={}",
+             samples_on_boundary={}\tsampling_location_unresolved={}\t\
+             origin_source={}\torigin_synthetic={}\torigin_seam={}",
             count(ConstraintRole::PhysicalBoundary),
             count(ConstraintRole::SurfaceSampling),
             count(ConstraintRole::ArtificialCut),
@@ -2282,6 +2466,9 @@ where
             roles.unresolved_at_flood.get(),
             samples_on_boundary,
             sampling_location_unresolved,
+            by_origin(SegmentOrigin::Source),
+            by_origin(SegmentOrigin::SyntheticClosure),
+            by_origin(SegmentOrigin::Seam),
         );
     }
     outcome
@@ -3536,5 +3723,145 @@ mod singular_transition_tests {
             out.is_empty(),
             "no bridge may be appended when the residual check fails"
         );
+    }
+}
+
+#[cfg(test)]
+mod segment_origin_tests {
+    use super::*;
+
+    fn pt(x: f64, y: f64) -> SurfacePoint {
+        (Point2::new(x, y), Point3::new(x, y, 0.0)).into()
+    }
+
+    /// A shared endpoint drops the duplicate and creates no segment.
+    #[test]
+    fn shared_endpoint_creates_no_segment() {
+        let mut path = BoundaryPath::start(vec![pt(0.0, 0.0), pt(1.0, 0.0)], SegmentOrigin::Source);
+        path.append(
+            vec![pt(1.0, 0.0), pt(1.0, 1.0)],
+            SegmentOrigin::SyntheticClosure,
+            PartJoin::SharedEndpoint,
+        );
+        assert_eq!(path.points.len(), 3, "the duplicate join point is dropped");
+        assert_eq!(
+            path.origins,
+            vec![SegmentOrigin::Source, SegmentOrigin::SyntheticClosure],
+        );
+    }
+
+    /// A bridge keeps **both** endpoints and inserts exactly one labelled
+    /// segment between them.
+    ///
+    /// This is the case an earlier implementation got wrong: it dropped every
+    /// part's last point unconditionally, so `a1 -> a2 -> b0` silently became
+    /// the shortcut `a1 -> b0`, deleting a source segment. The point count is
+    /// the assertion that matters — metadata retention must not change the
+    /// polygon.
+    #[test]
+    fn a_bridge_preserves_both_endpoints() {
+        let mut path = BoundaryPath::start(
+            vec![pt(0.0, 0.0), pt(1.0, 0.0), pt(2.0, 0.0)],
+            SegmentOrigin::Source,
+        );
+        path.append(
+            vec![pt(5.0, 5.0), pt(6.0, 5.0), pt(7.0, 5.0)],
+            SegmentOrigin::Source,
+            PartJoin::Bridge(SegmentOrigin::Seam),
+        );
+        assert_eq!(path.points.len(), 6, "no source point may be dropped");
+        assert_eq!(path.points[2].uv, pt(2.0, 0.0).uv, "the first part keeps its tail");
+        assert_eq!(path.points[3].uv, pt(5.0, 5.0).uv, "the second keeps its head");
+        assert_eq!(
+            path.origins,
+            vec![
+                SegmentOrigin::Source, // 0 -> 1
+                SegmentOrigin::Source, // 1 -> 2
+                SegmentOrigin::Seam,   // 2 -> 3, the bridge
+                SegmentOrigin::Source, // 3 -> 4
+                SegmentOrigin::Source, // 4 -> 5
+            ],
+        );
+    }
+
+    /// Closing on a shared endpoint drops the repeated point; the existing last
+    /// segment becomes the cyclic wrap.
+    #[test]
+    fn closing_on_a_shared_endpoint_reuses_the_last_segment() {
+        let mut path = BoundaryPath::start(vec![pt(0.0, 0.0), pt(1.0, 0.0)], SegmentOrigin::Source);
+        path.append(
+            vec![pt(1.0, 0.0), pt(0.0, 0.0)],
+            SegmentOrigin::SyntheticClosure,
+            PartJoin::SharedEndpoint,
+        );
+        let loop_ = path.close(PartJoin::SharedEndpoint);
+        assert_eq!(loop_.points.len(), 2);
+        assert_eq!(loop_.points.len(), loop_.origins.len(), "one origin per segment");
+        assert_eq!(
+            loop_.origins,
+            vec![SegmentOrigin::Source, SegmentOrigin::SyntheticClosure],
+        );
+    }
+
+    /// Closing across a gap adds one labelled wrap segment and keeps every point.
+    #[test]
+    fn closing_across_a_gap_adds_a_labelled_wrap() {
+        let path = BoundaryPath::start(
+            vec![pt(0.0, 0.0), pt(1.0, 0.0), pt(1.0, 1.0)],
+            SegmentOrigin::Source,
+        );
+        let loop_ = path.close(PartJoin::Bridge(SegmentOrigin::SyntheticClosure));
+        assert_eq!(loop_.points.len(), 3);
+        assert_eq!(loop_.points.len(), loop_.origins.len());
+        assert_eq!(
+            *loop_.origins.last().unwrap(),
+            SegmentOrigin::SyntheticClosure,
+            "the wrap is not another source segment",
+        );
+    }
+
+    /// A periodically closed walk retains its endpoint at `first + L·δ`, so the
+    /// cyclic wrap is the deck closure and must not be labelled `Source`.
+    #[test]
+    fn a_periodic_walk_does_not_call_its_wrap_a_source_segment() {
+        let walk = BoundaryLoop::periodic_source_walk(vec![
+            pt(0.0, 0.0),
+            pt(0.0, 1.0),
+            pt(0.0, 2.0),
+        ]);
+        assert_eq!(walk.points.len(), walk.origins.len());
+        assert_eq!(
+            walk.origins,
+            vec![
+                SegmentOrigin::Source,
+                SegmentOrigin::Source,
+                SegmentOrigin::Seam,
+            ],
+        );
+    }
+
+    /// A Euclidean loop has already had its duplicate endpoint removed, so
+    /// every cyclic segment including the wrap is genuine source trim.
+    #[test]
+    fn a_euclidean_loop_wraps_on_a_source_segment() {
+        let loop_ =
+            BoundaryLoop::euclidean_source_loop(vec![pt(0.0, 0.0), pt(1.0, 0.0), pt(1.0, 1.0)]);
+        assert!(loop_.origins.iter().all(|o| *o == SegmentOrigin::Source));
+        assert_eq!(loop_.points.len(), loop_.origins.len());
+    }
+
+    /// Every constructed loop must carry exactly one origin per segment.
+    #[test]
+    fn chained_parts_yield_one_origin_per_segment() {
+        let loop_ = BoundaryLoop::chained([
+            (vec![pt(0.0, 0.0), pt(1.0, 0.0)], SegmentOrigin::Source),
+            (
+                vec![pt(1.0, 0.0), pt(1.0, 1.0)],
+                SegmentOrigin::SyntheticClosure,
+            ),
+            (vec![pt(1.0, 1.0), pt(0.0, 0.0)], SegmentOrigin::Seam),
+        ]);
+        assert_eq!(loop_.points.len(), loop_.origins.len());
+        assert_eq!(loop_.points.len(), 3, "join duplicates are dropped");
     }
 }
