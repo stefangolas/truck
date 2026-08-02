@@ -5,6 +5,7 @@
 #![allow(dead_code, unused)]
 
 use super::*;
+use super::domain::lattice::CertifiedLattice;
 use crate::filters::NormalFilters;
 use crate::Point2;
 use array_macro::array;
@@ -73,6 +74,7 @@ pub(super) fn shell_tessellation<'a, C, S>(
     shell: &Shell<Point3, C, S>,
     tol: f64,
     sp: impl SP<S>,
+    lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
 ) -> MeshedShell
 where
     C: PolylineableCurve + 'a,
@@ -108,7 +110,8 @@ where
             .iter()
             .map(create_boundary)
             .collect();
-        shell_create_polygon(&face.surface(), wires, face.orientation(), tol, &sp)
+        let lattice = lattice_of(&face.surface());
+        shell_create_polygon(&face.surface(), wires, face.orientation(), tol, &sp, &lattice)
     };
     shell.face_par_iter().map(create_face).collect()
 }
@@ -119,6 +122,7 @@ pub(super) fn shell_tessellation_single_thread<'a, C, S>(
     shell: &'a Shell<Point3, C, S>,
     tol: f64,
     sp: impl SP<S>,
+    lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
 ) -> MeshedShell
 where
     C: PolylineableCurve + 'a,
@@ -158,7 +162,8 @@ where
             .iter()
             .map(&mut create_boundary)
             .collect();
-        shell_create_polygon(&face.surface(), wires, face.orientation(), tol, &sp)
+        let lattice = lattice_of(&face.surface());
+        shell_create_polygon(&face.surface(), wires, face.orientation(), tol, &sp, &lattice)
     };
     shell.face_iter().map(create_face).collect()
 }
@@ -168,6 +173,7 @@ pub(super) fn cshell_tessellation<'a, C, S>(
     shell: &CompressedShell<Point3, C, S>,
     tol: f64,
     sp: impl SP<S>,
+    lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
 ) -> MeshedCShell
 where
     C: PolylineableCurve + 'a,
@@ -330,18 +336,19 @@ where
 
         let boundaries = face.boundaries.clone();
         let surface = &face.surface;
+        let lattice = lattice_of(surface);
         let create_edge = |edge_idx: &CompressedEdgeIndex| match edge_idx.orientation {
             true => Some(edges.get(edge_idx.index)?.curve.clone()),
             false => Some(edges.get(edge_idx.index)?.curve.inverse()),
         };
         let create_boundary = |wire: &Vec<CompressedEdgeIndex>| {
             let wire_iter = wire.iter().filter_map(create_edge);
-            PolyBoundaryPiece::try_new(surface, wire_iter, &sp, tol)
+            PolyBoundaryPiece::try_new(surface, wire_iter, &sp, tol, &lattice)
         };
         let preboundary: Option<Vec<_>> = boundaries.iter().map(create_boundary).collect();
         let polygon: Option<PolygonMesh> = preboundary.map(|preboundary| {
-            let boundary = PolyBoundary::new(preboundary, &surface, tol);
-            trimming_tessellation(&surface, &boundary, tol)
+            let boundary = PolyBoundary::new(preboundary, &surface, tol, &lattice);
+            trimming_tessellation(&surface, &boundary, tol, &lattice)
         });
         let result = CompressedFace {
             boundaries,
@@ -378,17 +385,18 @@ fn shell_create_polygon<S: PreMeshableSurface>(
     orientation: bool,
     tol: f64,
     sp: impl SP<S>,
+    lattice: &CertifiedLattice,
 ) -> Face<Point3, PolylineCurve, Option<PolygonMesh>> {
     let preboundary = wires
         .iter()
         .map(|wire: &Wire<_, _>| {
             let wire_iter = wire.iter().map(Edge::oriented_curve);
-            PolyBoundaryPiece::try_new(surface, wire_iter, &sp, tol)
+            PolyBoundaryPiece::try_new(surface, wire_iter, &sp, tol, lattice)
         })
         .collect::<Option<Vec<_>>>();
     let polygon: Option<PolygonMesh> = preboundary.map(|preboundary| {
-        let boundary = PolyBoundary::new(preboundary, &surface, tol);
-        trimming_tessellation(surface, &boundary, tol)
+        let boundary = PolyBoundary::new(preboundary, &surface, tol, lattice);
+        trimming_tessellation(surface, &boundary, tol, lattice)
     });
     let mut new_face = Face::debug_new(wires, polygon);
     if !orientation {
@@ -465,8 +473,14 @@ impl PolyBoundaryPiece {
         wire: impl Iterator<Item = PolylineCurve>,
         sp: impl SP<S>,
         tol: f64,
+        lattice: &CertifiedLattice,
     ) -> Option<Self> {
-        let (up, vp) = (surface.u_period(), surface.v_period());
+        // Audit A-ambient: periodicity now arrives as a descriptor whose type
+        // distinguishes exact from accessor-only evidence. `declared_period`
+        // is what this path read before, so the boundary is introduced with no
+        // semantic change; moving a site to `generator` is separate and must
+        // be measured on its own.
+        let (up, vp) = (lattice.declared_u_period(), lattice.declared_v_period());
         let (urange, vrange) = surface.try_range_tuple();
         // How many polylines this bound is assembled from, and how long each
         // is. A bound winding twice is either fed two once-winding pieces --
@@ -614,7 +628,7 @@ impl PolyBoundaryPiece {
         if (bdry3d.len() <= 2 || bdry3d[0].distance(bdry3d[bdry3d.len() - 1]) < 1e-4)
             && piece_lengths.iter().all(|&l| l <= 2)
         {
-            if let Some(up) = surface.u_period() {
+            if let Some(up) = lattice.declared_u_period() {
                 let p0 = bdry3d[0];
                 if let Some((u0, v0)) = sp(surface, p0, None) {
                     let mut dense = Vec::new();
@@ -627,7 +641,7 @@ impl PolyBoundaryPiece {
                     }
                     vec = dense;
                 }
-            } else if let Some(vp) = surface.v_period() {
+            } else if let Some(vp) = lattice.declared_v_period() {
                 let p0 = bdry3d[0];
                 if let Some((u0, v0)) = sp(surface, p0, None) {
                     let mut dense = Vec::new();
@@ -1034,7 +1048,12 @@ fn working_range(
 }
 
 impl PolyBoundary {
-    fn new(pieces: Vec<PolyBoundaryPiece>, surface: &impl PreMeshableSurface, tol: f64) -> Self {
+    fn new(
+        pieces: Vec<PolyBoundaryPiece>,
+        surface: &impl PreMeshableSurface,
+        tol: f64,
+        lattice: &CertifiedLattice,
+    ) -> Self {
         let probe = std::env::var_os("TRUCK_PROBE_BOUNDARY").is_some();
         let had_source_pieces = !pieces.is_empty();
         // EXPERIMENT (TRUCK_FACE_DOMAIN): take the working rectangle from the
@@ -1045,8 +1064,8 @@ impl PolyBoundary {
             false => surface.try_range_tuple(),
         };
         let (mut closed, mut open) = (Vec::new(), Vec::new());
-        let u_period = surface.u_period();
-        let v_period = surface.v_period();
+        let u_period = lattice.declared_u_period();
+        let v_period = lattice.declared_v_period();
         pieces.into_iter().for_each(|PolyBoundaryPiece(mut vec)| {
             let p0 = vec[0].uv;
             let p1 = vec[vec.len() - 1].uv;
@@ -1112,7 +1131,9 @@ impl PolyBoundary {
                 BoundaryClosure::Open => open.push(vec),
             }
         });
-        if closed.len() == 2 && (surface.u_period().is_some() || surface.v_period().is_some()) {
+        if closed.len() == 2
+            && (lattice.declared_u_period().is_some() || lattice.declared_v_period().is_some())
+        {
             let area0 = signed_area(&closed[0]);
             let area1 = signed_area(&closed[1]);
             if area0.abs() < 1e-4 && area1.abs() < 1e-4 {
@@ -1120,7 +1141,7 @@ impl PolyBoundary {
                 let mut loop1 = closed.remove(0);
                 let u0_mean: f64 = loop0.iter().map(|p| p.uv.x).sum::<f64>() / loop0.len() as f64;
                 let u1_mean: f64 = loop1.iter().map(|p| p.uv.x).sum::<f64>() / loop1.len() as f64;
-                if let Some(up) = surface.u_period() {
+                if let Some(up) = lattice.declared_u_period() {
                     let ku = ((u0_mean - u1_mean) / up).round();
                     if ku != 0.0 {
                         for p in &mut loop1 {
@@ -1130,7 +1151,7 @@ impl PolyBoundary {
                 }
                 let v0_mean: f64 = loop0.iter().map(|p| p.uv.y).sum::<f64>() / loop0.len() as f64;
                 let v1_mean: f64 = loop1.iter().map(|p| p.uv.y).sum::<f64>() / loop1.len() as f64;
-                if let Some(vp) = surface.v_period() {
+                if let Some(vp) = lattice.declared_v_period() {
                     let kv = ((v0_mean - v1_mean) / vp).round();
                     if kv != 0.0 {
                         for p in &mut loop1 {
@@ -1144,17 +1165,17 @@ impl PolyBoundary {
                 closed.push(merged);
             }
         } else if let Some(pair) =
-            CollapsedPeriodicBoundaryPair::try_classify(surface, &closed, &open, range)
+            CollapsedPeriodicBoundaryPair::try_classify(surface, &closed, &open, range, lattice)
         {
             let mut loop0 = closed.remove(0);
             if loop0.len() > 1 && loop0[0].uv.distance(loop0.last().unwrap().uv) < 1e-3 {
                 loop0.pop();
             }
-            let is_v = surface.v_period().is_some_and(|p| p > 1e-6);
+            let is_v = lattice.declared_v_period().is_some_and(|p| p > 1e-6);
             let period = if is_v {
-                surface.v_period().unwrap()
+                lattice.declared_v_period().unwrap()
             } else {
-                surface.u_period().unwrap()
+                lattice.declared_u_period().unwrap()
             };
 
             let mut loop0_full = loop0.clone();
@@ -1806,6 +1827,7 @@ fn trimming_tessellation_with_diagnostics<S>(
     surface: &S,
     polyboundary: &PolyBoundary,
     tol: f64,
+    lattice: &CertifiedLattice,
 ) -> TessellationOutcome
 where
     S: PreMeshableSurface,
@@ -1823,6 +1845,7 @@ where
         polyboundary,
         &boundary_map,
         &roles,
+        lattice,
     );
     if std::env::var_os("TRUCK_PROBE_ROLES").is_some() {
         // The population sizes the A1 comparison rests on. `unresolved` is the
@@ -1850,19 +1873,25 @@ fn trimming_tessellation_with_outcome<S>(
     surface: &S,
     polyboundary: &PolyBoundary,
     tol: f64,
+    lattice: &CertifiedLattice,
 ) -> TessellationOutcome
 where
     S: PreMeshableSurface,
 {
-    trimming_tessellation_with_diagnostics(surface, polyboundary, tol)
+    trimming_tessellation_with_diagnostics(surface, polyboundary, tol, lattice)
 }
 
 /// Tessellates one surface trimmed by polyline.
-fn trimming_tessellation<S>(surface: &S, polyboundary: &PolyBoundary, tol: f64) -> PolygonMesh
+fn trimming_tessellation<S>(
+    surface: &S,
+    polyboundary: &PolyBoundary,
+    tol: f64,
+    lattice: &CertifiedLattice,
+) -> PolygonMesh
 where
     S: PreMeshableSurface,
 {
-    match trimming_tessellation_with_diagnostics(surface, polyboundary, tol) {
+    match trimming_tessellation_with_diagnostics(surface, polyboundary, tol, lattice) {
         TessellationOutcome::Mesh(ft) => {
             let mut mesh = ft.mesh;
             mesh.make_face_compatible_to_normal();
@@ -1940,6 +1969,7 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
     _polyline: &PolyBoundary,
     boundary_map: &HashMap<FixedVertexHandle, Point3>,
     roles: &ConstraintRoles,
+    lattice: &CertifiedLattice,
 ) -> TessellationOutcome {
     use std::collections::{HashMap as StdHashMap, VecDeque};
 
@@ -1997,8 +2027,8 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
     let mut normals = Vec::<Vector3>::new();
     let mut vertex_metadata = Vec::<VertexMetadata>::new();
 
-    let u_period = surface.u_period();
-    let v_period = surface.v_period();
+    let u_period = lattice.declared_u_period();
+    let v_period = lattice.declared_v_period();
 
     let vmap: HashMap<_, _> = triangulation
         .vertices()
@@ -2157,9 +2187,16 @@ fn triangulation_into_polymesh<S: ParametricSurface3D>(
     polyline: &PolyBoundary,
     boundary_map: &HashMap<FixedVertexHandle, Point3>,
     roles: &ConstraintRoles,
+    lattice: &CertifiedLattice,
 ) -> PolygonMesh {
-    match triangulation_into_polymesh_outcome(triangulation, surface, polyline, boundary_map, roles)
-    {
+    match triangulation_into_polymesh_outcome(
+        triangulation,
+        surface,
+        polyline,
+        boundary_map,
+        roles,
+        lattice,
+    ) {
         TessellationOutcome::Mesh(ft) => ft.mesh,
         TessellationOutcome::Failed(_) => PolygonMesh::default(),
     }
@@ -2199,13 +2236,14 @@ impl CollapsedPeriodicBoundaryPair {
         closed: &[Vec<SurfacePoint>],
         open: &[Vec<SurfacePoint>],
         _range: (Option<(f64, f64)>, Option<(f64, f64)>),
+        lattice: &CertifiedLattice,
     ) -> Option<Self> {
         // 1. Exactly one regular closed periodic boundary and no open generator/sector curves
         if closed.len() != 1 || !open.is_empty() {
             return None;
         }
 
-        let (period, is_v) = match (surface.v_period(), surface.u_period()) {
+        let (period, is_v) = match (lattice.declared_v_period(), lattice.declared_u_period()) {
             (Some(vp), _) if vp > 1e-6 => (vp, true),
             (_, Some(up)) if up > 1e-6 => (up, false),
             _ => return None,
@@ -2436,7 +2474,7 @@ mod cone_topology_tests {
             })
             .collect();
         let range = (Some((0.0, 1.0)), None);
-        let res = CollapsedPeriodicBoundaryPair::try_classify(&cone, &[loop0], &[], range);
+        let res = CollapsedPeriodicBoundaryPair::try_classify(&cone, &[loop0], &[], range, &unevidenced_lattice(&cone));
         assert!(res.is_some());
         let pair = res.unwrap();
         assert!((pair.apex_u - 0.0).abs() < 1e-6);
@@ -2461,7 +2499,7 @@ mod cone_topology_tests {
             })
             .collect();
         let range = (Some((0.0, 1.0)), None);
-        let res = CollapsedPeriodicBoundaryPair::try_classify(&cone, &[loop0, loop1], &[], range);
+        let res = CollapsedPeriodicBoundaryPair::try_classify(&cone, &[loop0, loop1], &[], range, &unevidenced_lattice(&cone));
         assert!(res.is_none());
     }
 
@@ -2480,7 +2518,7 @@ mod cone_topology_tests {
             (Point2::new(1.0, 0.0), cone.subs(1.0, 0.0)).into(),
         ];
         let range = (Some((0.0, 1.0)), None);
-        let res = CollapsedPeriodicBoundaryPair::try_classify(&cone, &[loop0], &[open_edge], range);
+        let res = CollapsedPeriodicBoundaryPair::try_classify(&cone, &[loop0], &[open_edge], range, &unevidenced_lattice(&cone));
         assert!(res.is_none());
     }
 
@@ -2499,7 +2537,7 @@ mod cone_topology_tests {
             })
             .collect();
         let range = (Some((0.0, 1.0)), None);
-        let res = CollapsedPeriodicBoundaryPair::try_classify(&cylinder, &[loop0], &[], range);
+        let res = CollapsedPeriodicBoundaryPair::try_classify(&cylinder, &[loop0], &[], range, &unevidenced_lattice(&cylinder));
         assert!(res.is_none());
     }
 
@@ -2550,8 +2588,8 @@ mod cone_topology_tests {
             })
             .collect();
         let piece = PolyBoundaryPiece(circle_pts);
-        let boundary = PolyBoundary::new(vec![piece], &cone, tol);
-        let mesh = trimming_tessellation(&cone, &boundary, tol);
+        let boundary = PolyBoundary::new(vec![piece], &cone, tol, &unevidenced_lattice(&cone));
+        let mesh = trimming_tessellation(&cone, &boundary, tol, &unevidenced_lattice(&cone));
         assert!(
             !mesh.faces().is_empty(),
             "Cone C-APEX-DISK face must tessellate to non-empty mesh"
@@ -2570,8 +2608,8 @@ mod cone_topology_tests {
             (Point2::new(0.0, 10.0), Point3::new(0.0, 10.0, 0.0)).into(),
             (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
         ];
-        let boundary = PolyBoundary::new(vec![PolyBoundaryPiece(loop0)], &plane, tol);
-        let mesh = trimming_tessellation(&plane, &boundary, tol);
+        let boundary = PolyBoundary::new(vec![PolyBoundaryPiece(loop0)], &plane, tol, &unevidenced_lattice(&plane));
+        let mesh = trimming_tessellation(&plane, &boundary, tol, &unevidenced_lattice(&plane));
         assert!(!mesh.faces().is_empty());
     }
 
@@ -2594,8 +2632,8 @@ mod cone_topology_tests {
             (Point2::new(3.0, 7.0), Point3::new(3.0, 7.0, 0.0)).into(),
             (Point2::new(3.0, 3.0), Point3::new(3.0, 3.0, 0.0)).into(),
         ];
-        let boundary = PolyBoundary::new(vec![PolyBoundaryPiece(outer), PolyBoundaryPiece(hole)], &plane, tol);
-        let mesh = trimming_tessellation(&plane, &boundary, tol);
+        let boundary = PolyBoundary::new(vec![PolyBoundaryPiece(outer), PolyBoundaryPiece(hole)], &plane, tol, &unevidenced_lattice(&plane));
+        let mesh = trimming_tessellation(&plane, &boundary, tol, &unevidenced_lattice(&plane));
         assert!(!mesh.faces().is_empty());
         // Verify hole centroid (5.0, 5.0) has no triangle containing it
         for tri in mesh.faces().tri_faces() {
@@ -2622,8 +2660,8 @@ mod cone_topology_tests {
             (Point2::new(0.0, 10.0), Point3::new(0.0, 10.0, 0.0)).into(),
             (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
         ];
-        let boundary = PolyBoundary::new(vec![PolyBoundaryPiece(loop0)], &plane, tol);
-        let mesh = trimming_tessellation(&plane, &boundary, tol);
+        let boundary = PolyBoundary::new(vec![PolyBoundaryPiece(loop0)], &plane, tol, &unevidenced_lattice(&plane));
+        let mesh = trimming_tessellation(&plane, &boundary, tol, &unevidenced_lattice(&plane));
         assert!(!mesh.faces().is_empty());
     }
 
@@ -2642,8 +2680,8 @@ mod cone_topology_tests {
             (Point2::new(0.0, 10.0), Point3::new(0.0, 10.0, 0.0)).into(),
             (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
         ];
-        let boundary = PolyBoundary::new(vec![PolyBoundaryPiece(loop0)], &plane, tol);
-        let mesh = trimming_tessellation(&plane, &boundary, tol);
+        let boundary = PolyBoundary::new(vec![PolyBoundaryPiece(loop0)], &plane, tol, &unevidenced_lattice(&plane));
+        let mesh = trimming_tessellation(&plane, &boundary, tol, &unevidenced_lattice(&plane));
         assert!(mesh.faces().is_empty(), "Self-overlapping degenerate loop must fail or produce empty mesh");
     }
 }
@@ -2852,8 +2890,8 @@ mod singular_transition_tests {
 
         // Close the loop and tessellate.
         points.push(sp(uv(0.0, 1.0)));
-        let boundary = PolyBoundary::new(vec![PolyBoundaryPiece(points)], &surface, tolerance);
-        let mesh = trimming_tessellation(&surface, &boundary, tolerance);
+        let boundary = PolyBoundary::new(vec![PolyBoundaryPiece(points)], &surface, tolerance, &unevidenced_lattice(&surface));
+        let mesh = trimming_tessellation(&surface, &boundary, tolerance, &unevidenced_lattice(&surface));
         // (5),(6),(7) at least one triangle, no zero-area, consistent orientation.
         assert_no_zero_area_or_orientation_flip(&mesh);
 

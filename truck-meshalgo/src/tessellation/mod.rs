@@ -262,12 +262,18 @@ impl<C: PolylineableCurve, S: MeshableSurface> MeshableShape for Shell<Point3, C
     fn triangulation(&self, tol: f64) -> Self::MeshedShape {
         nonpositive_tolerance!(tol);
         #[cfg(not(target_arch = "wasm32"))]
-        let res = triangulation::shell_tessellation(self, tol, triangulation::by_search_parameter);
+        let res = triangulation::shell_tessellation(
+            self,
+            tol,
+            triangulation::by_search_parameter,
+            unevidenced_lattice,
+        );
         #[cfg(target_arch = "wasm32")]
         let res = triangulation::shell_tessellation_single_thread(
             self,
             tol,
             triangulation::by_search_parameter,
+            unevidenced_lattice,
         );
         res
     }
@@ -282,12 +288,14 @@ impl<C: PolylineableCurve, S: RobustMeshableSurface> RobustMeshableShape for She
             self,
             tol,
             triangulation::by_search_nearest_parameter,
+            unevidenced_lattice,
         );
         #[cfg(target_arch = "wasm32")]
         let res = triangulation::shell_tessellation_single_thread(
             self,
             tol,
             triangulation::by_search_nearest_parameter,
+            unevidenced_lattice,
         );
         res
     }
@@ -321,7 +329,12 @@ impl<C: PolylineableCurve, S: MeshableSurface> MeshableShape for CompressedShell
     type MeshedShape = CompressedShell<Point3, PolylineCurve, Option<PolygonMesh>>;
     fn triangulation(&self, tol: f64) -> Self::MeshedShape {
         nonpositive_tolerance!(tol);
-        triangulation::cshell_tessellation(self, tol, triangulation::by_search_parameter)
+        triangulation::cshell_tessellation(
+            self,
+            tol,
+            triangulation::by_search_parameter,
+            unevidenced_lattice,
+        )
     }
 }
 
@@ -331,7 +344,50 @@ impl<C: PolylineableCurve, S: RobustMeshableSurface> RobustMeshableShape
     type MeshedShape = CompressedShell<Point3, PolylineCurve, Option<PolygonMesh>>;
     fn robust_triangulation(&self, tol: f64) -> Self::MeshedShape {
         nonpositive_tolerance!(tol);
-        triangulation::cshell_tessellation(self, tol, triangulation::by_search_nearest_parameter)
+        triangulation::cshell_tessellation(
+            self,
+            tol,
+            triangulation::by_search_nearest_parameter,
+            unevidenced_lattice,
+        )
+    }
+}
+
+/// Tessellation with a caller-supplied deck lattice.
+pub trait LatticeMeshableShape<S> {
+    /// The meshed shape.
+    type MeshedShape: MeshedShape;
+    /// As [`RobustMeshableShape::robust_triangulation`], but the caller supplies
+    /// each surface's deck lattice.
+    ///
+    /// A composition layer that can name the concrete surface representation
+    /// can establish periods structurally; the bare accessors cannot, and
+    /// [`unevidenced_lattice`] marks everything they report `Uncertified`.
+    /// The resolver is per surface because a shell holds many, each with its
+    /// own lattice.
+    fn robust_triangulation_with_lattice(
+        &self,
+        tol: f64,
+        lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
+    ) -> Self::MeshedShape;
+}
+
+impl<C: PolylineableCurve, S: RobustMeshableSurface> LatticeMeshableShape<S>
+    for CompressedShell<Point3, C, S>
+{
+    type MeshedShape = CompressedShell<Point3, PolylineCurve, Option<PolygonMesh>>;
+    fn robust_triangulation_with_lattice(
+        &self,
+        tol: f64,
+        lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
+    ) -> Self::MeshedShape {
+        nonpositive_tolerance!(tol);
+        triangulation::cshell_tessellation(
+            self,
+            tol,
+            triangulation::by_search_nearest_parameter,
+            lattice_of,
+        )
     }
 }
 
@@ -363,4 +419,16 @@ impl<C: PolylineableCurve, S: RobustMeshableSurface> RobustMeshableShape
 
 pub mod domain;
 mod triangulation;
+
+use domain::lattice::CertifiedLattice;
+
+/// The lattice a surface reports through its bare accessors, with no evidence.
+///
+/// Every axis it produces is `Uncertified`. This is what the legacy entry
+/// points use, so they behave exactly as before while the absence of evidence
+/// becomes visible in the type. A caller that can name the concrete surface
+/// representation should supply a real descriptor instead.
+pub fn unevidenced_lattice<S: ParametricSurface3D>(surface: &S) -> CertifiedLattice {
+    CertifiedLattice::from_unevidenced_accessors(surface.u_period(), surface.v_period())
+}
 pub use triangulation::print_taxonomy_summary;
