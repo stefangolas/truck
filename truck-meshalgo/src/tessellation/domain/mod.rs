@@ -1,6 +1,7 @@
 //! Parametric Quotient Domain and Atlas Analysis Subsystem.
 
 pub mod adapters;
+pub mod ambient;
 pub mod canonical;
 pub mod deck;
 pub mod evidence;
