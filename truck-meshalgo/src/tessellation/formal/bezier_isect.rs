@@ -139,6 +139,27 @@ fn canonicalize(span: &RationalBezierSpan2) -> CanonicalOperand {
     }
 }
 
+/// The outward-rounded certified source-parameter intervals of a canonical-local
+/// interval `[v_lo, v_hi]`, on the canonical source domain `[a, b]`.
+///
+/// The affine map `t = a + v (b - a)` is evaluated in directed-rounding
+/// interval arithmetic (`b - a` and each product and sum are widened), so the
+/// returned intervals provably contain the exact source parameters. This is
+/// certified evidence wherever it is used.
+fn source_parameter_intervals(
+    op: &CanonicalOperand,
+    v_lo: f64,
+    v_hi: f64,
+) -> (CertifiedInterval, CertifiedInterval) {
+    let (a, b) = op.source_domain;
+    let a_iv = CertifiedInterval::point(a);
+    let span = CertifiedInterval::point(b).sub(&a_iv);
+    (
+        a_iv.add(&CertifiedInterval::point(v_lo).mul(&span)),
+        a_iv.add(&CertifiedInterval::point(v_hi).mul(&span)),
+    )
+}
+
 /// The certified authoritative source-parameter enclosure of a canonical-local
 /// interval `[v_lo, v_hi]`, stored numerically ordered. This is evidence for the
 /// branch record, not the event identity.
@@ -148,19 +169,11 @@ fn canonicalize(span: &RationalBezierSpan2) -> CanonicalOperand {
 /// orientation only sets the direction, never the value. Computing via the
 /// canonical map keeps the evidence bitwise-identical under span reversal.
 fn source_enclosure(op: &CanonicalOperand, v_lo: f64, v_hi: f64) -> ParameterEnclosure {
-    let (a, b) = op.source_domain;
+    let (lo_iv, hi_iv) = source_parameter_intervals(op, v_lo, v_hi);
     ParameterEnclosure {
-        lo: a + v_lo * (b - a),
-        hi: a + v_hi * (b - a),
+        lo: lo_iv.lo,
+        hi: hi_iv.hi,
     }
-}
-
-/// The orientation-normalized authoritative source parameter box of a
-/// canonical-local interval `[v_lo, v_hi]`, on the canonical source domain
-/// `[a, b]`. This is the ordering key for pair-local ordinals.
-fn normalized_source_box(op: &CanonicalOperand, v_lo: f64, v_hi: f64) -> (f64, f64) {
-    let (a, b) = op.source_domain;
-    (a + v_lo * (b - a), a + v_hi * (b - a))
 }
 
 // ---------------------------------------------------------------------------
@@ -740,123 +753,90 @@ fn classify_region(hull: &ParamBox) -> GenericUnresolved {
 
 /// Order the certified roots canonically and assign the pair-local ordinals.
 ///
-/// The operands have already been canonicalized into sorted order (the
-/// canonically-smaller span on the `s` axis), so the ordering key is the
-/// orientation-normalized authoritative source parameter box on the two
-/// participants, compared lexicographically on its interval endpoints (which
-/// agrees with interval separation for disjoint certified boxes). Discovery
-/// order and traversal indices never enter. The ordinal is the immutable root
-/// id of this canonical (unsplit) pair isolation.
-/// The certified source-parameter boxes of a root on both participants.
-fn root_source_boxes(
-    r: &RootRecord,
-    op1: &CanonicalOperand,
-    op2: &CanonicalOperand,
-) -> ((f64, f64), (f64, f64)) {
-    (
-        normalized_source_box(op1, r.image.s_lo, r.image.s_hi),
-        normalized_source_box(op2, r.image.t_lo, r.image.t_hi),
-    )
-}
-
-/// The certificate-driven order of two certified roots.
+/// The operands have already been canonicalized into sorted order, so the
+/// canonically-smaller span occupies the `s` axis and canonical-local `s`
+/// order agrees with authoritative source order on that span. Roots are
+/// ordered **only** by their certified canonical-local `s` isolators. For every
+/// distinct pair, the isolators must be disjoint and ordered:
 ///
-/// Reports `Less`/`Greater` only when the roots' certified source-parameter
-/// enclosures are disjoint and ordered on the first participant, or — when
-/// those overlap — on the second participant. The rounded midpoint,
-/// lower-endpoint tuple order, and discovery order never enter. If neither
-/// participant certifies an order, no certified ordering exists and the
-/// identity would be traversal-dependent, so the comparison fails with
-/// [`GenericUnresolved::UnresolvedIdentityOrdering`].
-fn certified_root_cmp(
-    a: &((f64, f64), (f64, f64)),
-    b: &((f64, f64), (f64, f64)),
-) -> Result<std::cmp::Ordering, GenericUnresolved> {
-    if a.0 .1 < b.0 .0 {
-        return Ok(std::cmp::Ordering::Less);
-    }
-    if b.0 .1 < a.0 .0 {
-        return Ok(std::cmp::Ordering::Greater);
-    }
-    if a.1 .1 < b.1 .0 {
-        return Ok(std::cmp::Ordering::Less);
-    }
-    if b.1 .1 < a.1 .0 {
-        return Ok(std::cmp::Ordering::Greater);
-    }
-    Err(GenericUnresolved::UnresolvedIdentityOrdering)
-}
-
-/// Order the certified roots canonically and assign the pair-local ordinals.
+/// ```text
+/// a.s_hi < b.s_lo  =>  a before b
+/// b.s_hi < a.s_lo  =>  b before a
+/// otherwise         =>  overlap
+/// ```
 ///
-/// The operands have already been canonicalized into sorted order (the
-/// canonically-smaller span on the `s` axis). The order is **certificate
-/// driven**: every distinct pair must certify a strict `Less`/`Greater` by
-/// interval separation ([`certified_root_cmp`]), and the resulting relation
-/// must be a consistent total order (transitivity over all triples). Only then
-/// are ordinals assigned. A pair that cannot certify an order, or whose
-/// certified relations cycle, is typed
-/// [`GenericUnresolved::UnresolvedIdentityOrdering`] — the ordinals must never
-/// depend on traversal or discovery order, on rounded midpoints, or on a
-/// lexicographic tuple sort that disagrees with the certified separation.
-fn assign_ordinals(
-    roots: &mut [RootRecord],
-    op1: &CanonicalOperand,
-    op2: &CanonicalOperand,
-) -> Result<(), GenericUnresolved> {
-    let boxes: Vec<((f64, f64), (f64, f64))> = roots
-        .iter()
-        .map(|r| root_source_boxes(r, op1, op2))
-        .collect();
-    let n = boxes.len();
-
-    // Totality: every distinct pair certifies a strict order.
+/// Overlap of the `s` isolators does **not** certify equality of the `s`
+/// parameters — it only means the order is currently unknown — so there is no
+/// fallback to the `t` coordinate. The two roots' isolators are first refined
+/// (bounded Krawczyk iteration) to tighten them; if a pair still overlaps after
+/// the refinement budget, the pair is typed
+/// [`GenericUnresolved::UnresolvedIdentityOrdering`]: two distinct parameter
+/// roots that cannot be separated on the canonical first span may represent a
+/// self-intersection, a repeated geometric event, or a multi-branch situation
+/// that requires later event aggregation, and must not be independently
+/// numbered as ordinary events. Because separation is decided on a single
+/// fixed scalar coordinate, a separated relation is automatically a total
+/// order and the same identity is stable under later refinement.
+fn assign_ordinals(roots: &mut [RootRecord], sys: &System) -> Result<(), GenericUnresolved> {
+    for r in roots.iter_mut() {
+        r.image = refine_image(sys, &r.image);
+    }
+    let n = roots.len();
     for i in 0..n {
         for j in (i + 1)..n {
-            certified_root_cmp(&boxes[i], &boxes[j])?;
+            certified_primary_cmp(&roots[i], &roots[j])?;
         }
     }
-    // Transitivity: no certified cycle over any triple.
-    for i in 0..n {
-        for j in 0..n {
-            if i == j {
-                continue;
-            }
-            let oij = certified_root_cmp(&boxes[i], &boxes[j])?;
-            if oij == std::cmp::Ordering::Equal {
-                return Err(GenericUnresolved::UnresolvedIdentityOrdering);
-            }
-            for k in 0..n {
-                if k == i || k == j {
-                    continue;
-                }
-                let ojk = certified_root_cmp(&boxes[j], &boxes[k])?;
-                if oij == std::cmp::Ordering::Less && ojk == std::cmp::Ordering::Less {
-                    if certified_root_cmp(&boxes[i], &boxes[k])? != std::cmp::Ordering::Less {
-                        return Err(GenericUnresolved::UnresolvedIdentityOrdering);
-                    }
-                }
-                if oij == std::cmp::Ordering::Greater && ojk == std::cmp::Ordering::Greater {
-                    if certified_root_cmp(&boxes[i], &boxes[k])? != std::cmp::Ordering::Greater {
-                        return Err(GenericUnresolved::UnresolvedIdentityOrdering);
-                    }
-                }
-            }
-        }
-    }
-
-    roots.sort_by(|a, b| {
-        certified_root_cmp(
-            &root_source_boxes(a, op1, op2),
-            &root_source_boxes(b, op1, op2),
-        )
-        .expect("totality verified above")
-    });
+    roots.sort_by(|a, b| certified_primary_cmp(a, b).expect("separation verified above"));
     for (i, r) in roots.iter_mut().enumerate() {
         r.ordinal = i as u32;
     }
     Ok(())
 }
+
+/// The certified order of two roots by their canonical-local `s` isolators.
+///
+/// Reports `Less`/`Greater` only when the isolators are disjoint; any overlap
+/// (which certifies neither equality nor order) fails with
+/// [`GenericUnresolved::UnresolvedIdentityOrdering`].
+fn certified_primary_cmp(
+    a: &RootRecord,
+    b: &RootRecord,
+) -> Result<std::cmp::Ordering, GenericUnresolved> {
+    if a.image.s_hi < b.image.s_lo {
+        Ok(std::cmp::Ordering::Less)
+    } else if b.image.s_hi < a.image.s_lo {
+        Ok(std::cmp::Ordering::Greater)
+    } else {
+        Err(GenericUnresolved::UnresolvedIdentityOrdering)
+    }
+}
+
+/// Tighten a certified root box by bounded Krawczyk iteration.
+///
+/// Each successful certificate gives a box `K(X) ⊂ int(X)` still containing the
+/// root, so iterating shrinks the box while preserving certification. Refining
+/// before the ordinal separation check turns an isolator overlap that a wider
+/// box merely *could not decide* into a certified order, and leaves only
+/// genuine unresolved overlaps (identical or inseparable `s` parameters) to
+/// fail the ordering.
+fn refine_image(sys: &System, image: &ParamBox) -> ParamBox {
+    let mut current = *image;
+    for _ in 0..REFINE_BUDGET {
+        let Some(cert) = try_krawczyk(sys, &current) else {
+            break;
+        };
+        let next = cert.image;
+        if next.s_lo <= current.s_lo || next.s_hi >= current.s_hi {
+            break;
+        }
+        current = next;
+    }
+    current
+}
+
+/// The bounded refinement budget for ordinal separation.
+const REFINE_BUDGET: u32 = 10;
 
 // ---------------------------------------------------------------------------
 // Germs and transverse orientation
@@ -1075,15 +1055,15 @@ fn certify_event(
     let delta = delta_hull(&n1, &n2, s_lo, s_hi, t_lo, t_hi);
     let crossing = CrossingOrientation::from_delta(&delta)?;
 
-    let (first_lo, first_hi) = normalized_source_box(op1, s_lo, s_hi);
-    let (second_lo, second_hi) = normalized_source_box(op2, t_lo, t_hi);
+    let (first_lo, first_hi) = source_parameter_intervals(op1, s_lo, s_hi);
+    let (second_lo, second_hi) = source_parameter_intervals(op2, t_lo, t_hi);
     let first_parameter = ParameterEnclosure {
-        lo: first_lo,
-        hi: first_hi,
+        lo: first_lo.lo,
+        hi: first_hi.hi,
     };
     let second_parameter = ParameterEnclosure {
-        lo: second_lo,
-        hi: second_hi,
+        lo: second_lo.lo,
+        hi: second_hi.hi,
     };
 
     let v_c = (s_lo + s_hi) / 2.0;
@@ -1140,7 +1120,7 @@ fn solve_pair(lhs: &RationalBezierSpan2, rhs: &RationalBezierSpan2) -> PairSolve
         regions.push((hull, classify_region(&hull)));
     }
 
-    if let Err(reason) = assign_ordinals(&mut records, &op1, &op2) {
+    if let Err(reason) = assign_ordinals(&mut records, &sys) {
         regions.push((ROOT_BOX, reason));
     }
 
@@ -1644,19 +1624,10 @@ mod tests {
         assert_eq!(*reason, GenericUnresolved::ClusteredRoots);
     }
 
-    /// A canonical operand over the unit source domain, for comparator tests.
-    fn unit_operand() -> CanonicalOperand {
-        CanonicalOperand {
-            x: Vec::new(),
-            y: Vec::new(),
-            w: Vec::new(),
-            source_domain: (0.0, 1.0),
-            was_reversed: false,
-        }
-    }
-
-    /// A root record with a synthetic box and a placeholder certificate. The
-    /// certificate fields are never read by the comparator tests.
+    /// A root record with a synthetic box and a placeholder certificate.
+    ///
+    /// Test-only: the certificate is never read by the comparator or ordering
+    /// tests and cannot escape this module's `#[cfg(test)]` build.
     fn dummy_record(s_lo: f64, s_hi: f64, t_lo: f64, t_hi: f64) -> RootRecord {
         let b = ParamBox {
             s_lo,
@@ -1672,10 +1643,7 @@ mod tests {
                 domain: b,
                 center: [(s_lo + s_hi) / 2.0, (t_lo + t_hi) / 2.0],
                 preconditioner: [[1.0, 0.0], [0.0, 1.0]],
-                function_at_center: [
-                    CertifiedInterval::point(0.0),
-                    CertifiedInterval::point(0.0),
-                ],
+                function_at_center: [CertifiedInterval::point(0.0), CertifiedInterval::point(0.0)],
                 jacobian_enclosure: [
                     [
                         CertifiedInterval::point(1.0),
@@ -1692,42 +1660,59 @@ mod tests {
     }
 
     #[test]
-    fn certified_root_order_prefers_the_certified_separation_axis() {
-        let op1 = unit_operand();
-        let op2 = unit_operand();
-        // A and B overlap on the first participant; the second participant
-        // certifies B before A — the opposite of A's lower first endpoint. A
-        // lexicographic tuple sort would put A first; the certificate-driven
-        // comparator must report B first.
+    fn certified_primary_cmp_uses_only_the_s_isolator() {
+        // Overlapping s isolators certify neither equality nor order, and the t
+        // coordinate is never used as a fallback — even when the t intervals
+        // are disjoint.
         let a = dummy_record(0.2, 0.3, 0.5, 0.6);
         let b = dummy_record(0.25, 0.35, 0.1, 0.2);
-        let ba = root_source_boxes(&a, &op1, &op2);
-        let bb = root_source_boxes(&b, &op1, &op2);
-        assert_eq!(certified_root_cmp(&ba, &bb).unwrap(), std::cmp::Ordering::Greater);
-        assert_eq!(certified_root_cmp(&bb, &ba).unwrap(), std::cmp::Ordering::Less);
-        // Overlap on both participants: no certified order exists.
-        let c = dummy_record(0.2, 0.4, 0.2, 0.4);
-        let d = dummy_record(0.3, 0.5, 0.3, 0.5);
-        let bc = root_source_boxes(&c, &op1, &op2);
-        let bd = root_source_boxes(&d, &op1, &op2);
         assert_eq!(
-            certified_root_cmp(&bc, &bd).unwrap_err(),
+            certified_primary_cmp(&a, &b).unwrap_err(),
             GenericUnresolved::UnresolvedIdentityOrdering
         );
+        // Disjoint s isolators certify the order regardless of t.
+        let c = dummy_record(0.1, 0.2, 0.0, 1.0);
+        let d = dummy_record(0.3, 0.4, 0.0, 1.0);
+        assert_eq!(certified_primary_cmp(&c, &d).unwrap(), std::cmp::Ordering::Less);
+        assert_eq!(certified_primary_cmp(&d, &c).unwrap(), std::cmp::Ordering::Greater);
     }
 
     #[test]
-    fn assign_ordinals_rejects_a_certified_order_cycle() {
-        let op1 = unit_operand();
-        let op2 = unit_operand();
-        // Pairwise-disjoint 2D boxes whose certified pairwise relations cycle:
-        // A < B (first axis), B < C (second axis), C < A (second axis).
-        let a = dummy_record(0.0, 0.1, 0.5, 0.6);
-        let b = dummy_record(0.2, 0.3, 0.0, 0.1);
-        let c = dummy_record(0.05, 0.25, 0.2, 0.3);
-        let mut roots = vec![a, b, c];
+    fn ordinal_order_is_invariant_under_refinement() {
+        // The certified s-isolator order must not change when the isolators are
+        // refined (bounded Krawczyk iteration inside assign_ordinals).
+        let op1 = canonicalize(&parabola(0));
+        let op2 = canonicalize(&slanted_line(1.0, -0.1, 1));
+        let sys = System::new(&op1, &op2);
+        let (mut records, pending) = isolate(&sys);
+        assert!(pending.is_empty(), "the two roots must be certified, not pending");
+        assign_ordinals(&mut records, &sys).expect("two separated roots order");
+        let first: Vec<u32> = records.iter().map(|r| r.ordinal).collect();
+        // Re-running assignment refines the already-refined isolators and must
+        // not change the order.
+        assign_ordinals(&mut records, &sys).expect("refinement preserves order");
+        let second: Vec<u32> = records.iter().map(|r| r.ordinal).collect();
+        assert_eq!(first, second);
+        // Ordinals are the immutable ids 0 and 1, ordered by the s isolator.
+        assert_eq!(first, vec![0, 1]);
+        assert!(records[0].image.s_hi < records[1].image.s_lo);
+    }
+
+    #[test]
+    fn overlapping_s_isolators_that_cannot_separate_are_unresolved() {
+        // Two records whose certified boxes both contain both of the pair's
+        // roots: no Krawczyk refinement can separate them (a two-root box never
+        // certifies uniqueness), so the overlapping s isolators must be typed
+        // UnresolvedIdentityOrdering, never numbered by another coordinate.
+        let op1 = canonicalize(&parabola(0));
+        let op2 = canonicalize(&slanted_line(1.0, -0.1, 1));
+        let sys = System::new(&op1, &op2);
+        let mut roots = vec![
+            dummy_record(0.1, 0.9, 0.1, 0.9),
+            dummy_record(0.2, 0.8, 0.2, 0.8),
+        ];
         assert_eq!(
-            assign_ordinals(&mut roots, &op1, &op2).unwrap_err(),
+            assign_ordinals(&mut roots, &sys).unwrap_err(),
             GenericUnresolved::UnresolvedIdentityOrdering
         );
         // A failed assignment must not assign ordinals.
