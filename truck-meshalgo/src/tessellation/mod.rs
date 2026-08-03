@@ -410,6 +410,29 @@ pub trait LatticeMeshableShape<S, C> {
         schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
         curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
     ) -> MeshedShellOutcome;
+
+    /// As [`Self::robust_triangulation_with_schema_outcome`], additionally
+    /// supplying the rank-1 cylinder evidence readers (Milestone A /
+    /// FORMAL-013-015): a real cylindrical-surface adapter and the two real
+    /// source-curve classifiers `develop_traversal_from_source` needs.
+    ///
+    /// A fourth entry point rather than widening the existing one, so every
+    /// caller with no cylinder evidence to offer (the STL path; any future
+    /// non-STEP producer) keeps compiling against
+    /// [`Self::robust_triangulation_with_schema_outcome`] unchanged. `look`,
+    /// the composition layer that can name the concrete STEP representation,
+    /// is the only expected caller of this form.
+    #[allow(clippy::too_many_arguments)]
+    fn robust_triangulation_with_cylinder_outcome(
+        &self,
+        tol: f64,
+        lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
+        schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
+        curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
+        cylinder_of: impl Fn(&S) -> Option<formal::CertifiedEmbeddedCylinder> + Parallelizable,
+        cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
+        cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
+    ) -> MeshedShellOutcome;
 }
 
 impl<C: PolylineableCurve, S: RobustMeshableSurface> LatticeMeshableShape<S, C>
@@ -470,6 +493,30 @@ impl<C: PolylineableCurve, S: RobustMeshableSurface> LatticeMeshableShape<S, C>
             lattice_of,
             schema_of,
             curve_schema_of,
+        )
+    }
+
+    fn robust_triangulation_with_cylinder_outcome(
+        &self,
+        tol: f64,
+        lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
+        schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
+        curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
+        cylinder_of: impl Fn(&S) -> Option<formal::CertifiedEmbeddedCylinder> + Parallelizable,
+        cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
+        cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
+    ) -> MeshedShellOutcome {
+        nonpositive_tolerance!(tol);
+        triangulation::cshell_tessellation_with_outcomes_and_cylinder(
+            self,
+            tol,
+            triangulation::by_search_nearest_parameter,
+            lattice_of,
+            schema_of,
+            curve_schema_of,
+            cylinder_of,
+            cylinder_curve_schema_of,
+            cylinder_curve_family_of,
         )
     }
 }

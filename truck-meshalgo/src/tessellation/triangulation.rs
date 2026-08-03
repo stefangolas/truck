@@ -255,6 +255,51 @@ where
     C: PolylineableCurve + 'a,
     S: PreMeshableSurface + 'a,
 {
+    cshell_tessellation_with_outcomes_and_cylinder(
+        shell,
+        tol,
+        sp,
+        lattice_of,
+        schema_of,
+        curve_schema_of,
+        |_: &S| None,
+        |_: &C| formal::CurveSchema::not_structurally_identified(
+            formal::CurveSchemaFailure::NoStructuralReader {
+                representation: "cylinder_evidence_not_provided",
+            },
+        ),
+        |_: &C| None,
+    )
+}
+
+/// [`cshell_tessellation_with_outcomes`], additionally threading the rank-1
+/// cylinder evidence readers (Milestone A / FORMAL-013-015).
+///
+/// The three cylinder closures are `look`'s composition-layer readers —
+/// `step::cylinder::identify_source_cylinder`,
+/// `step::lattice::cylinder_curve_schema_of` and
+/// `step::lattice::cylinder_curve_family_of` — reduced to `Option`/tag-only
+/// return types here so this crate does not depend on `look`'s error types.
+/// Kept as a second entry point, rather than changing
+/// [`cshell_tessellation_with_outcomes`]'s signature, so every existing
+/// caller (and the STL/non-STEP paths, which have no cylinder evidence to
+/// offer) compiles unchanged.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn cshell_tessellation_with_outcomes_and_cylinder<'a, C, S>(
+    shell: &CompressedShell<Point3, C, S>,
+    tol: f64,
+    sp: impl SP<S>,
+    lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
+    schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
+    curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
+    cylinder_of: impl Fn(&S) -> Option<formal::CertifiedEmbeddedCylinder> + Parallelizable,
+    cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
+    cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
+) -> MeshedShellOutcome
+where
+    C: PolylineableCurve + 'a,
+    S: PreMeshableSurface + 'a,
+{
     let vertices = shell.vertices.clone();
     let edge_probe = std::env::var_os("TRUCK_PROBE_EDGE").is_some();
     let evidence_probe = std::env::var_os("TRUCK_PROBE_EVIDENCE").is_some();
@@ -271,6 +316,15 @@ where
     // the holes gate without the base gate does nothing.
     let holes_recovery_gate = recovery_gate
         && std::env::var_os("TRUCK_FORMAL_RECOVERY_HOLES").is_some();
+    // The rank-1 cylinder route, on the identical two-tier pattern as the
+    // holes route above: a stable route tag (`_CYLINDER`) under the same
+    // master `TRUCK_FORMAL_RECOVERY` gate, plus its own shadow probe. Not a
+    // parallel gate — opening `TRUCK_FORMAL_RECOVERY_CYLINDER` without the
+    // master gate does nothing, exactly like `_HOLES`.
+    let cylinder_probe = std::env::var_os("TRUCK_PROBE_CYLINDER").is_some();
+    let cylinder_recovery_gate =
+        recovery_gate && std::env::var_os("TRUCK_FORMAL_RECOVERY_CYLINDER").is_some();
+    let run_cylinder_slice = cylinder_probe || cylinder_recovery_gate;
     let run_slice = slice_probe || recovery_gate;
     // A per-run shell ordinal, so a `FaceKey` is unique across shells:
     // `declared_face_index` is an index *within* a shell and collides between
@@ -595,6 +649,49 @@ where
                     (Some(planar_mesh_to_polygon(formal_mesh)), None)
                 }
                 None => (polygon, failure),
+            }
+        };
+        // The rank-1 cylinder slice, on the identical additive discipline as
+        // the planar slice above: it only ever runs after the planar block
+        // has already had its chance, and it only ever replaces a face the
+        // legacy path *still* has no mesh for — never a face the planar
+        // rank-0 path just recovered, and never a successful legacy mesh.
+        let (polygon, failure) = if !run_cylinder_slice {
+            (polygon, failure)
+        } else {
+            let record = run_cylinder_slice_for_face(
+                declared_face_index,
+                source_face_id,
+                face,
+                &shell.edges,
+                &shell.vertices,
+                &cylinder_of,
+                &cylinder_curve_schema_of,
+                &cylinder_curve_family_of,
+                tol,
+            );
+            if cylinder_probe {
+                emit_cylinder_probe(source_face_id, declared_face_index, shell_ordinal, &record);
+            }
+            let legacy_failed = failure.is_some();
+            match (
+                legacy_failed,
+                cylinder_recovery_gate,
+                record.category == formal::SliceCategory::Resolved,
+                &record.mesh,
+            ) {
+                (true, true, true, Some(mesh)) => {
+                    eprintln!(
+                        "RECOVERED\tsource_face_id={}\t\
+                         declared_face_index={declared_face_index}\ttriangles={}\tpath=cylinder",
+                        source_face_id
+                            .map(|id| id.to_string())
+                            .unwrap_or_else(|| "none".into()),
+                        record.triangles,
+                    );
+                    (Some(mesh.clone()), None)
+                }
+                _ => (polygon, failure),
             }
         };
         let result = CompressedFace {
@@ -1007,6 +1104,368 @@ fn planar_mesh_to_polygon(mesh: &formal::PlanarMesh) -> PolygonMesh {
         },
         Faces::from_tri_and_quad_faces(tri_faces, Vec::new()),
     )
+}
+
+// ---------------------------------------------------------------------------
+// The rank-1 cylinder vertical slice, run beside the legacy tessellator
+// (Milestone A / FORMAL-013-015)
+// ---------------------------------------------------------------------------
+
+/// Diagnostic materialization budget for [`formal::build_working_cover`].
+///
+/// Not a proved bound: a real rank-1 face's angular sweep is bounded by a
+/// handful of source arcs, so a working cover needing thousands of deck
+/// copies is already a sign of a pathological input rather than a face this
+/// budget should quietly widen for. Chosen generously enough that no
+/// legitimate single-face cylinder disk should ever hit it; a face that does
+/// exits `OperationalFailure` rather than materializing unboundedly.
+const CYLINDER_DECK_BUDGET: formal::DeckBudget = formal::DeckBudget {
+    deck_width_cap: 4096,
+};
+
+/// One face's rank-1 cylinder-slice verdict, for the funnel and the recovery
+/// gate.
+#[derive(Debug, Clone)]
+struct CylinderSliceRecord {
+    /// The furthest stage reached: `"surface"`, `"evidence"`, `"traversal"`,
+    /// `"witness"`, `"holonomy"`, `"cover"`, `"arrangement"`, `"mesh"`, or
+    /// `"final_validity"` on success.
+    stage: &'static str,
+    /// The taxonomy category of the outcome. `Resolved` only when a valid
+    /// physical mesh was certified.
+    category: formal::SliceCategory,
+    /// A stable tag naming the specific exit, or `"resolved"`.
+    tag: &'static str,
+    /// How many of the face's edge uses classified as an axial line.
+    line_edge_uses: usize,
+    /// How many classified as a circumferential arc.
+    arc_edge_uses: usize,
+    /// How many classified as neither (unsupported representation, or a
+    /// non-circular affine image).
+    unsupported_edge_uses: usize,
+    /// The certified physical mesh, when fully resolved.
+    mesh: Option<PolygonMesh>,
+    /// Triangle count, when resolved (`0` otherwise), for the probe line.
+    triangles: usize,
+}
+
+impl CylinderSliceRecord {
+    fn exit(
+        stage: &'static str,
+        category: formal::SliceCategory,
+        tag: &'static str,
+        line_edge_uses: usize,
+        arc_edge_uses: usize,
+        unsupported_edge_uses: usize,
+    ) -> Self {
+        Self {
+            stage,
+            category,
+            tag,
+            line_edge_uses,
+            arc_edge_uses,
+            unsupported_edge_uses,
+            mesh: None,
+            triangles: 0,
+        }
+    }
+}
+
+/// Map a certified cylinder mesh's developed triangulation and physical lift
+/// onto the [`PolygonMesh`] the shell holds.
+///
+/// Unlike [`planar_mesh_to_polygon`]'s single chart normal, a cylinder is
+/// curved: each vertex gets its own outward radial normal, `normalize(x -
+/// origin - axial(x) * axis)`, computed directly from the certified schema
+/// rather than approximated from the mesh.
+fn cylinder_mesh_to_polygon(
+    mesh: &formal::CertifiedCylinderMesh,
+    schema: &formal::CylinderSchema,
+) -> PolygonMesh {
+    let positions = mesh.physical_vertices.clone();
+    let normals: Vec<Vector3> = positions
+        .iter()
+        .map(|p| {
+            let r = *p - schema.origin();
+            let radial = r - r.dot(schema.axis()) * schema.axis();
+            let magnitude = radial.magnitude();
+            match magnitude > 0.0 {
+                true => radial / magnitude,
+                false => schema.axis(),
+            }
+        })
+        .collect();
+    let tri_faces: Vec<[StandardVertex; 3]> = mesh
+        .developed
+        .triangles
+        .iter()
+        .map(|indices| {
+            array![i => StandardVertex {
+                pos: indices[i],
+                uv: None,
+                nor: Some(indices[i]),
+            }; 3]
+        })
+        .collect();
+    PolygonMesh::debug_new(
+        StandardAttributes {
+            positions,
+            uv_coords: Vec::new(),
+            normals,
+        },
+        Faces::from_tri_and_quad_faces(tri_faces, Vec::new()),
+    )
+}
+
+/// Run the formal rank-1 cylinder slice for one face, when it is a
+/// candidate: the authoritative surface adapter, real source traversal, real
+/// source curve adapters, then FORMAL-007 through FORMAL-012 unchanged.
+///
+/// Nothing in here reads the legacy result, so a face's formal verdict is
+/// independent of whether the legacy path succeeded on it — the same
+/// discipline [`run_slice_for_face`] follows for the planar rank-0 route.
+#[allow(clippy::too_many_arguments)]
+fn run_cylinder_slice_for_face<S, C>(
+    declared_face_index: usize,
+    source_face_id: Option<u64>,
+    face: &CompressedFace<S>,
+    edges: &[CompressedEdge<C>],
+    vertices: &[Point3],
+    cylinder_of: &impl Fn(&S) -> Option<formal::CertifiedEmbeddedCylinder>,
+    cylinder_curve_schema_of: &impl Fn(&C) -> formal::CurveSchema,
+    cylinder_curve_family_of: &impl Fn(&C) -> Option<formal::SourceCurveFamily>,
+    tol: f64,
+) -> CylinderSliceRecord {
+    let Some(cylinder) = cylinder_of(&face.surface) else {
+        return CylinderSliceRecord::exit(
+            "surface",
+            formal::SliceCategory::Unsupported,
+            "not_cylindrical_surface",
+            0,
+            0,
+            0,
+        );
+    };
+
+    // The curve-family funnel is counted independently of the traversal
+    // gate below, so a face that fails traversal for an unrelated reason
+    // (a second declared outer bound, a broken cyclic join) still reports
+    // what its edges structurally *were*.
+    let (mut line_edge_uses, mut arc_edge_uses, mut unsupported_edge_uses) = (0usize, 0usize, 0usize);
+    for wire in &face.boundaries {
+        for edge_idx in wire {
+            match edges
+                .get(edge_idx.index)
+                .and_then(|edge| cylinder_curve_family_of(&edge.curve))
+            {
+                Some(formal::SourceCurveFamily::Line) => line_edge_uses += 1,
+                Some(formal::SourceCurveFamily::CircularArc { .. }) => arc_edge_uses += 1,
+                None => unsupported_edge_uses += 1,
+            }
+        }
+    }
+
+    let Ok(input) =
+        source_face_input_from_compressed(declared_face_index, source_face_id, face, edges)
+    else {
+        return CylinderSliceRecord::exit(
+            "evidence",
+            formal::SliceCategory::Unresolved,
+            "source_evidence_error",
+            line_edge_uses,
+            arc_edge_uses,
+            unsupported_edge_uses,
+        );
+    };
+
+    let mut curve_of = |edge_index: usize| match edges.get(edge_index) {
+        Some(edge) => cylinder_curve_schema_of(&edge.curve),
+        None => formal::CurveSchema::not_structurally_identified(
+            formal::CurveSchemaFailure::NoStructuralReader {
+                representation: "edge_index_out_of_range",
+            },
+        ),
+    };
+
+    let traversal_record = match formal::build_cylinder_face(
+        source_face_id,
+        cylinder,
+        &input,
+        face.provenance.outer_bound,
+        &mut curve_of,
+    ) {
+        Ok(record) => record,
+        Err(exit) => {
+            return CylinderSliceRecord::exit(
+                "traversal",
+                exit.category(),
+                exit.tag(),
+                line_edge_uses,
+                arc_edge_uses,
+                unsupported_edge_uses,
+            )
+        }
+    };
+
+    let schema = traversal_record.cylinder.schema().clone();
+    let vertex_position = |vertex| match vertex {
+        SourceVertexKey::ShellVertex(index) => vertices.get(index).copied(),
+        _ => None,
+    };
+    // The single production classification route: derives the witness class
+    // and (for an arc) declared sweep from the edge's own source
+    // representation, never from a caller assertion. By construction this
+    // agrees with the gate `curve_of` above already applied — both route
+    // through `cylinder_curve_family_of`/`cylinder_curve_schema_of`'s
+    // identical `decode_transformed_circle` check — so the `Line` fallback
+    // below is defensively unreachable, not a silent misclassification: a
+    // genuinely wrong family here still fails the witness's own on-cylinder
+    // and constant-coordinate checks rather than certifying incorrectly.
+    let family_of = |edge_use: EdgeUseId| {
+        traversal_record
+            .traversal
+            .occurrences
+            .iter()
+            .find(|occurrence| occurrence.edge_use == edge_use)
+            .and_then(|occurrence| edges.get(occurrence.source_edge_index))
+            .and_then(|edge| cylinder_curve_family_of(&edge.curve))
+            .unwrap_or(formal::SourceCurveFamily::Line)
+    };
+
+    let developed = match formal::develop_traversal_from_source(
+        &traversal_record.traversal,
+        &schema,
+        &vertex_position,
+        &family_of,
+    ) {
+        Ok(developed) => developed,
+        Err(exit) => {
+            return CylinderSliceRecord::exit(
+                "witness",
+                exit.category(),
+                exit.tag(),
+                line_edge_uses,
+                arc_edge_uses,
+                unsupported_edge_uses,
+            )
+        }
+    };
+
+    let lift = match formal::propagate_and_classify_holonomy(&developed, schema.deck_generator())
+    {
+        Ok(lift) => lift,
+        Err(exit) => {
+            return CylinderSliceRecord::exit(
+                "holonomy",
+                exit.category(),
+                exit.tag(),
+                line_edge_uses,
+                arc_edge_uses,
+                unsupported_edge_uses,
+            )
+        }
+    };
+
+    let cover = match formal::build_working_cover(
+        &developed.witnesses,
+        &lift.placements,
+        schema.deck_generator(),
+        CYLINDER_DECK_BUDGET,
+    ) {
+        Ok(cover) => cover,
+        Err(exit) => {
+            return CylinderSliceRecord::exit(
+                "cover",
+                exit.category(),
+                exit.tag(),
+                line_edge_uses,
+                arc_edge_uses,
+                unsupported_edge_uses,
+            )
+        }
+    };
+
+    let disk = match formal::certify_cylinder_disk(
+        &developed.edge_uses,
+        &developed.witnesses,
+        &lift.placements,
+        schema.deck_generator(),
+        face.provenance.outer_bound,
+        &cover.materialized_copies,
+    ) {
+        Ok(disk) => disk,
+        Err(exit) => {
+            return CylinderSliceRecord::exit(
+                "arrangement",
+                exit.category(),
+                exit.tag(),
+                line_edge_uses,
+                arc_edge_uses,
+                unsupported_edge_uses,
+            )
+        }
+    };
+
+    let occurrences = formal::placed_occurrences(
+        &developed.edge_uses,
+        &developed.witnesses,
+        &lift.placements,
+        &schema.deck_generator(),
+    );
+    let mesh = match formal::certify_cylinder_mesh(&disk, &occurrences, &schema, tol) {
+        Ok(mesh) => mesh,
+        Err(exit) => {
+            return CylinderSliceRecord::exit(
+                "mesh",
+                exit.category(),
+                exit.tag(),
+                line_edge_uses,
+                arc_edge_uses,
+                unsupported_edge_uses,
+            )
+        }
+    };
+
+    let triangles = mesh.developed.triangles.len();
+    let polygon = cylinder_mesh_to_polygon(&mesh, &schema);
+    CylinderSliceRecord {
+        stage: "final_validity",
+        category: formal::SliceCategory::Resolved,
+        tag: "resolved",
+        line_edge_uses,
+        arc_edge_uses,
+        unsupported_edge_uses,
+        mesh: Some(polygon),
+        triangles,
+    }
+}
+
+/// `CYLINDER\t...` diagnostic probe, one line per candidate face. Emitted
+/// from inside a parallel tessellation, so consumers must parse
+/// order-independently and key on `source_face_id` / `declared_face_index`,
+/// exactly as the `SLICE`/`HOLES` probes already require.
+fn emit_cylinder_probe(
+    source_face_id: Option<u64>,
+    declared_face_index: usize,
+    shell_ordinal: u64,
+    record: &CylinderSliceRecord,
+) {
+    let id = source_face_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    eprintln!(
+        "CYLINDER\tsource_face_id={id}\tdeclared_face_index={declared_face_index}\t\
+         shell_ordinal={shell_ordinal}\tstage={}\tcategory={:?}\texit={}\t\
+         line_edge_uses={}\tarc_edge_uses={}\tunsupported_edge_uses={}\t\
+         triangles={}",
+        record.stage,
+        record.category,
+        record.tag,
+        record.line_edge_uses,
+        record.arc_edge_uses,
+        record.unsupported_edge_uses,
+        record.triangles,
+    );
 }
 
 /// One tab-separated record per candidate face, for the funnel and the
