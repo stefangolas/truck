@@ -57,6 +57,7 @@
 //! certified lattice is [`ambient::resolve_ambient_periods`].
 
 pub mod ambient;
+pub mod cylinder;
 pub mod deck;
 pub mod envelope;
 pub mod evidence;
@@ -81,6 +82,11 @@ pub use ambient::{
     PeriodAxisEvidence, PeriodCertificate, PeriodCertificationAttempt, PeriodCertificationFailure,
     PeriodContradictionWitness, PeriodHintSet, PeriodHintSource, QuotientIdentificationAuthority,
     UncertifiedPeriodValue,
+};
+pub use cylinder::{
+    identify_cylinder, CertifiedEmbeddedCylinder, CylinderIdentification,
+    CylinderIdentificationFailure, CylinderSchema, CylinderValidityCertificate, PeriodicParameter,
+    MINIMUM_CYLINDER_LINE_AXIS_PARALLELISM,
 };
 pub use deck::{
     deck_cover_interval, solve_axis_aligned, CertifiedDeckInterval, DeckBudget,
