@@ -569,7 +569,7 @@ fn line_line(
                 return PairIntersectionResult::Unsupported(PairUnsupported::UnrelatedTangency);
             }
             let (lhs_enc, rhs_enc) =
-                match line_line_parameter_enclosures(lhs, rhs, lhs_loc, rhs_loc) {
+                match line_line_parameter_enclosures(lhs, rhs, lhs_loc, rhs_loc, point) {
                     Some(encs) => encs,
                     None => {
                         return PairIntersectionResult::Unresolved(
@@ -613,21 +613,30 @@ fn line_parameter_location(segment: &LineSegment2, point: Point2) -> ParameterLo
 /// Certified enclosures of both line parameters at a single-point line–line
 /// intersection, over the exact coordinate differences of both segments.
 ///
-/// For `P = a1 + s·d1 = a2 + t·d2` with `d_i = b_i − a_i` (each an exact
-/// `two_sum` expansion), the cross-product identities give
-/// `s = (a2−a1)×d2 / (d1×d2)` and `t = (a2−a1)×d1 / (d1×d2)`, each an exact
-/// expansion ratio widened by directed rounding — never a rounded ratio of the
-/// rounded crossing point. An endpoint location carries the exact parameter
-/// `0`/`1` (the declared endpoint coordinate, decided by exact `f64`
-/// equality); only an interior parameter needs the ratio. Returns `None` when
-/// an interior parameter cannot be certified (a direction-cross enclosure
-/// containing zero), so the caller produces `Unresolved` rather than an
-/// uncertified ordering key.
+/// `point` is the intersection point [`classify_segments`](super::planar_slice::classify_segments)
+/// returned: for an endpoint contact it is an exact declared endpoint
+/// coordinate (on both support lines exactly), for a proper crossing it is a
+/// rounded representative.
+///
+/// - **Both endpoints:** the parameters are exactly `0`/`1` (declared
+///   endpoint coordinates, decided by exact `f64` equality).
+/// - **Endpoint-on-interior:** `point` is the exact shared endpoint, so the
+///   interior segment's parameter is [`certified_line_parameter`] of that
+///   exact point. This stays certified when the supports are collinear
+///   (`d1×d2 = 0`), where the cross-ratio denominator would vanish.
+/// - **Proper crossing (both interior):** the cross-product identities
+///   `s = (a2−a1)×d2 / (d1×d2)` and `t = (a2−a1)×d1 / (d1×d2)` over exact
+///   expansions, widened by directed rounding — never a rounded ratio of the
+///   rounded `point`.
+///
+/// Returns `None` when an interior parameter cannot be certified, so the
+/// caller produces `Unresolved` rather than an uncertified ordering key.
 fn line_line_parameter_enclosures(
     lhs: &XMonotoneLine2,
     rhs: &XMonotoneLine2,
     lhs_loc: ParameterLocation,
     rhs_loc: ParameterLocation,
+    point: Point2,
 ) -> Option<(ParameterEnclosure, ParameterEnclosure)> {
     let exact_endpoint = |loc: ParameterLocation| match loc {
         ParameterLocation::SourceStartEndpoint => Some(ParameterEnclosure::from_f64(0.0)),
@@ -636,29 +645,39 @@ fn line_line_parameter_enclosures(
     };
     let lhs_exact = exact_endpoint(lhs_loc);
     let rhs_exact = exact_endpoint(rhs_loc);
-    if lhs_exact.is_some() && rhs_exact.is_some() {
-        return Some((lhs_exact.unwrap(), rhs_exact.unwrap()));
+    match (lhs_exact, rhs_exact) {
+        (Some(l), Some(r)) => Some((l, r)),
+        (Some(l), None) => {
+            // The shared point is exactly the other segment's endpoint; the
+            // interior parameter is certified over that exact point. Valid
+            // whether or not the supports are collinear.
+            Some((l, certified_line_parameter(&rhs.source, &point)?))
+        }
+        (None, Some(r)) => {
+            Some((certified_line_parameter(&lhs.source, &point)?, r))
+        }
+        (None, None) => {
+            let a1 = lhs.source.start;
+            let b1 = lhs.source.end;
+            let a2 = rhs.source.start;
+            let b2 = rhs.source.end;
+            let (d1x, d1y) = point_diff_exp(b1, a1);
+            let (d2x, d2y) = point_diff_exp(b2, a2);
+            let (wx, wy) = point_diff_exp(a2, a1);
+            let den = cross_exp2(&d1x, &d1y, &d2x, &d2y);
+            let den_iv = CertifiedInterval::from_expansion(&den);
+            let s_num_iv = CertifiedInterval::from_expansion(&cross_exp2(&wx, &wy, &d2x, &d2y));
+            let t_num_iv = CertifiedInterval::from_expansion(&cross_exp2(&wx, &wy, &d1x, &d1y));
+            let s_iv = s_num_iv.div(&den_iv)?;
+            let t_iv = t_num_iv.div(&den_iv)?;
+            if !(s_iv.is_finite() && t_iv.is_finite()) {
+                return None;
+            }
+            let s = ParameterEnclosure { lo: s_iv.lo, hi: s_iv.hi };
+            let t = ParameterEnclosure { lo: t_iv.lo, hi: t_iv.hi };
+            Some((s, t))
+        }
     }
-
-    let a1 = lhs.source.start;
-    let b1 = lhs.source.end;
-    let a2 = rhs.source.start;
-    let b2 = rhs.source.end;
-    let (d1x, d1y) = point_diff_exp(b1, a1);
-    let (d2x, d2y) = point_diff_exp(b2, a2);
-    let (wx, wy) = point_diff_exp(a2, a1);
-    let den = cross_exp2(&d1x, &d1y, &d2x, &d2y);
-    let den_iv = CertifiedInterval::from_expansion(&den);
-    let s_num_iv = CertifiedInterval::from_expansion(&cross_exp2(&wx, &wy, &d2x, &d2y));
-    let t_num_iv = CertifiedInterval::from_expansion(&cross_exp2(&wx, &wy, &d1x, &d1y));
-    let s_iv = s_num_iv.div(&den_iv)?;
-    let t_iv = t_num_iv.div(&den_iv)?;
-    if !(s_iv.is_finite() && t_iv.is_finite()) {
-        return None;
-    }
-    let s = ParameterEnclosure { lo: s_iv.lo, hi: s_iv.hi };
-    let t = ParameterEnclosure { lo: t_iv.lo, hi: t_iv.hi };
-    Some((lhs_exact.unwrap_or(s), rhs_exact.unwrap_or(t)))
 }
 
 /// The endpoint identity of a line-piece location, if it is an endpoint.
@@ -2288,6 +2307,78 @@ mod tests {
         }
     }
 
+    #[test]
+    fn line_endpoint_on_segment_interior_is_a_resolved_contact() {
+        // The mixed contact: a's end (1, 0) lies in the interior of b. The
+        // supports are not collinear, which is the realizable form of this
+        // location pair (two *closed* collinear segments that share an
+        // interior point always overlap in a positive interval, so
+        // classify_segments yields Overlap, never this Point). The result
+        // must be a classified contact — one exact 0/1 parameter, one
+        // certified interior parameter — never Unresolved.
+        let a = line_piece(Point2::new(1.0, 1.0), Point2::new(1.0, 0.0));
+        let b = line_piece(Point2::new(0.0, 0.0), Point2::new(2.0, 0.0));
+        match intersect(&a, &b) {
+            PairIntersectionResult::Intersections(pts) => {
+                assert_eq!(pts.len(), 1);
+                assert_eq!(pts[0].point, Point2::new(1.0, 0.0));
+                assert_eq!(pts[0].lhs_location, ParameterLocation::SourceEndEndpoint);
+                assert_eq!(pts[0].rhs_location, ParameterLocation::PieceInterior);
+                assert_eq!(
+                    pts[0].lhs_parameter,
+                    ParameterEnclosure::from_f64(1.0),
+                    "endpoint parameter is exact 1"
+                );
+                assert!(
+                    pts[0].rhs_parameter.contains(0.5),
+                    "interior parameter certified from the exact endpoint"
+                );
+                assert_eq!(pts[0].contact, ContactKind::Transverse);
+            }
+            PairIntersectionResult::Unresolved(_) => {
+                panic!("endpoint-on-interior contact must resolve, not be Unresolved")
+            }
+            other => panic!("expected a contact, got {:?}", other.tag()),
+        }
+    }
+
+    #[test]
+    fn collinear_endpoint_on_interior_uses_the_exact_endpoint_parameter() {
+        // The denominator-vanishing sub-case: one curve's endpoint lies on the
+        // other curve's interior with *collinear* supports, so d1 × d2 = 0 and
+        // the cross-ratio denominator vanishes. The interior parameter must
+        // come from certified_line_parameter over the known endpoint, not from
+        // the cross ratio. classify_segments can never produce this exact
+        // location pair from two closed segments, so this regression drives
+        // the parameter helper directly with the fabricated pair to pin the
+        // collinear path.
+        let lhs = match line_piece(Point2::new(0.0, 0.0), Point2::new(2.0, 0.0)) {
+            XMonotonePiece2::Line(l) => l,
+            _ => unreachable!("line_piece yields a line"),
+        };
+        let rhs = match line_piece(Point2::new(1.0, 0.0), Point2::new(3.0, 0.0)) {
+            XMonotonePiece2::Line(l) => l,
+            _ => unreachable!("line_piece yields a line"),
+        };
+        let (lhs_enc, rhs_enc) = line_line_parameter_enclosures(
+            &lhs,
+            &rhs,
+            ParameterLocation::SourceEndEndpoint,
+            ParameterLocation::PieceInterior,
+            Point2::new(2.0, 0.0),
+        )
+        .expect("the exact shared endpoint certifies both parameters");
+        assert_eq!(
+            lhs_enc,
+            ParameterEnclosure::from_f64(1.0),
+            "endpoint parameter is exact 1"
+        );
+        assert!(
+            rhs_enc.contains(0.5),
+            "interior parameter computed from the exact endpoint, not the vanishing cross-ratio"
+        );
+    }
+
     // -- line–circle -------------------------------------------------------
 
     #[test]
@@ -2536,26 +2627,31 @@ mod tests {
     // -- exhaustive location: certified exterior is discarded, nothing else --
 
     #[test]
-    fn a_line_start_not_on_the_circle_is_never_admitted_as_start_endpoint() {
+    fn near_start_root_is_represented_or_the_pair_is_unresolved() {
         // A line whose support line crosses the unit circle just after its
         // source start: the near-start root's certified enclosure is within
-        // ulps of s = 0. The line start is NOT exactly on the circle, so the
-        // endpoint is never admitted as `SourceStartEndpoint` — the near-start
-        // root must be recorded interior or unresolved, never dropped, and
-        // never attributed to an endpoint whose declared coordinate is off the
+        // ulps of s = 0. This regression is satisfied only by the *near* root
+        // itself — a far-root-only resolution does not count. Either the near
+        // root is represented (a recorded intersection with line parameter
+        // ~0) or the curve pair returns `Unresolved` for it; it must never be
+        // silently discarded, and it must never be admitted as
+        // `SourceStartEndpoint` because the line start is not exactly on the
         // circle.
         //
         // Construct: unit circle at origin, line from (0, next_down(-1.0)) to
         // (1, 1). `next_down(-1.0)` is the largest f64 strictly below -1, so
         // the line start is certifiably off the circle; an offset below half
         // an ulp of 1.0 would round to exactly -1.0 and silently place the
-        // start on the circle, defeating the test.
+        // start on the circle, defeating the test. The near root sits at
+        // s ~ 0.5 ulp (arc parameter 3π/2, a piece boundary), the far root at
+        // s ~ 0.8 (interior of both pieces).
         let line = line_piece(
             Point2::new(0.0, (-1.0_f64).next_down()),
             Point2::new(1.0, 1.0),
         );
         let arc = arc_pieces(Point2::new(0.0, 0.0), 1.0, 0.0, 2.0 * PI, 0);
-        let mut saw_resolution = false;
+        let mut near_root_represented = false;
+        let mut near_root_unresolved = false;
         for piece in &arc {
             match intersect(&line, piece) {
                 PairIntersectionResult::Intersections(pts) => {
@@ -2566,16 +2662,19 @@ mod tests {
                             "a line start not exactly on the circle is never \
                              admitted as SourceStartEndpoint"
                         );
-                        saw_resolution = true;
+                        if rec.lhs_parameter.lo <= 0.05 {
+                            near_root_represented = true;
+                        }
                     }
                 }
-                PairIntersectionResult::Unresolved(_) => saw_resolution = true,
+                PairIntersectionResult::Unresolved(_) => near_root_unresolved = true,
                 PairIntersectionResult::Disjoint | PairIntersectionResult::Unsupported(_) => {}
             }
         }
         assert!(
-            saw_resolution,
-            "the near-start root must be resolved (interior or unresolved), never silently dropped"
+            near_root_represented || near_root_unresolved,
+            "the near-start root (s ~ 0.5 ulp) must be represented or the curve \
+             pair Unresolved — a far-root-only resolution must not satisfy this"
         );
     }
 }
