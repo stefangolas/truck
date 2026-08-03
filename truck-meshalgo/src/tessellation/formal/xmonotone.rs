@@ -235,13 +235,14 @@ pub struct PieceIdentity {
     /// This piece's position among the occurrence's pieces, in source
     /// traversal order, starting at 0.
     pub source_piece_index: usize,
-    /// The piece's parameter interval. Concatenating all pieces'
-    /// intervals in index order reproduces the occurrence's interval.
-    ///
-    /// For arc pieces that meet at criticals, the parameter at a
-    /// shared critical is the midpoint of its enclosure; both adjacent
-    /// pieces compute the same midpoint, so the chain is bitwise exact.
-    pub source_parameter_interval: ClosedInterval,
+    /// Evaluation-seed parameter interval. NOT a semantic domain
+    /// boundary — the authoritative geometric endpoint is on the
+    /// [`XMonotonePiece2`] struct itself. For arc pieces meeting at
+    /// criticals, the parameter at a shared critical is the midpoint
+    /// of its enclosure; both adjacent pieces compute the same
+    /// midpoint, so the chain is bitwise exact for evaluation
+    /// convenience only.
+    pub parameter_hint_interval: ClosedInterval,
     /// Whether the piece is a whole occurrence or a monotone split.
     pub decomposition_kind: DecompositionKind,
 }
@@ -335,7 +336,7 @@ impl XMonotonePiece2 {
 
     /// The piece's parameter interval.
     pub fn parameter_interval(&self) -> ClosedInterval {
-        self.identity().source_parameter_interval
+        self.identity().parameter_hint_interval
     }
 
     /// The traversal start point.
@@ -504,7 +505,7 @@ fn make_line_x_monotone(
     let identity = PieceIdentity {
         source_occurrence: segment.provenance,
         source_piece_index: 0,
-        source_parameter_interval: ClosedInterval { t0: 0.0, t1: 1.0 },
+        parameter_hint_interval: ClosedInterval { t0: 0.0, t1: 1.0 },
         decomposition_kind: DecompositionKind::WholeOccurrence,
     };
     Ok(vec![XMonotonePiece2::Line(XMonotoneLine2 {
@@ -664,7 +665,7 @@ fn make_arc_x_monotone(
         let identity = PieceIdentity {
             source_occurrence: arc.provenance,
             source_piece_index: 0,
-            source_parameter_interval: occurrence_interval,
+            parameter_hint_interval: occurrence_interval,
             decomposition_kind: DecompositionKind::WholeOccurrence,
         };
         let start_pt = arc.start_point();
@@ -852,7 +853,7 @@ fn make_arc_x_monotone(
             // authoritative t0/t1; for critical endpoints these are
             // evaluation-seed midpoints. The authoritative geometric
             // boundary is the ArcPieceEndpoint on the piece struct.
-            source_parameter_interval: ClosedInterval {
+            parameter_hint_interval: ClosedInterval {
                 t0: t_cur,
                 t1: t_next,
             },
@@ -1847,8 +1848,8 @@ mod tests {
                     "adjacent pieces share the same critical identity"
                 );
                 // The parameter midpoint is an evaluation convenience:
-                let t_join = p0.identity.source_parameter_interval.t1;
-                assert_eq!(t_join, p1.identity.source_parameter_interval.t0,
+                let t_join = p0.identity.parameter_hint_interval.t1;
+                assert_eq!(t_join, p1.identity.parameter_hint_interval.t0,
                     "parameter midpoints match by construction");
                 // But the sweep will deduplicate by identity, not by
                 // coordinate or midpoint proximity.
