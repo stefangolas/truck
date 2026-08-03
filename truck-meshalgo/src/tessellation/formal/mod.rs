@@ -58,6 +58,7 @@
 
 pub mod ambient;
 pub mod cylinder;
+pub mod cylinder_face;
 pub mod deck;
 pub mod envelope;
 pub mod evidence;
@@ -88,6 +89,7 @@ pub use cylinder::{
     CylinderIdentificationFailure, CylinderSchema, CylinderValidityCertificate, PeriodicParameter,
     MINIMUM_CYLINDER_LINE_AXIS_PARALLELISM,
 };
+pub use cylinder_face::{build_cylinder_face, CylinderFaceRecord};
 pub use deck::{
     deck_cover_interval, solve_axis_aligned, CertifiedDeckInterval, DeckBudget,
     DeckConstructorFailure, DeckGenerator, DeckInterval, DeckNumericFailure,
