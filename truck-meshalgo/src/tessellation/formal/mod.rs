@@ -63,6 +63,7 @@ pub mod cylinder_cover;
 pub mod cylinder_face;
 pub mod cylinder_lift;
 pub mod cylinder_mesh;
+pub mod curve2d;
 pub mod curve_witness;
 pub mod deck;
 pub mod envelope;
@@ -72,6 +73,7 @@ pub mod outcome;
 pub mod planar_holes;
 pub mod planar_slice;
 pub mod support;
+pub mod xmonotone;
 
 // The Step 1 surface, re-exported for the probe and for later stages. Types
 // only: every proof-introduction rule stays behind its module's visibility.
@@ -145,4 +147,13 @@ pub use support::{
     identify_line_segment, identify_plane, identify_polyline, CurveSchema, CurveSchemaFailure,
     PlaneGram, PlaneSchema, SchemaIdentificationFailure, SupportSurfaceSchema,
     MINIMUM_NORMALISED_GRAM_DETERMINANT,
+};
+pub use curve2d::{
+    CurveOccurrenceProvenance, DevelopedCurve2D, DirectedCircularArc2, LineSegment2, SourceEdgeId,
+    SourceEntityId, SourceFaceId,
+};
+pub use xmonotone::{
+    make_x_monotone, ClosedInterval, CriticalIdentity, DecompositionKind, MonotoneDecompositionFailure,
+    MonotoneKind, NumericalPolicy, PieceIdentity, XMonotoneCircularArc2, XMonotoneLine2,
+    XMonotonePiece2,
 };
