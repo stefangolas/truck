@@ -95,20 +95,24 @@ impl WitnessFailure {
     /// Which semantic category this failure belongs to, in the taxonomy
     /// `FORMAL_SYSTEM.md` Definition 3 already fixes for the planar slice.
     ///
-    /// A curve whose endpoints do not lie on the certified cylinder, or whose
-    /// declared sweep does not reach its declared endpoint, is a proved
-    /// contradiction in the source evidence; a degenerate or zero-length
-    /// candidate is proved outside the admitted subset; a non-finite input
-    /// coordinate is a statement about the machine.
+    /// The line here is *authority*, not severity: a curve whose endpoints do
+    /// not lie on the certified cylinder, or whose own declared parameter
+    /// interval does not reach its own declared endpoint, contradicts a claim
+    /// the source itself makes — `Inconsistent`. A curve that is simply not
+    /// axial or not at constant axial coordinate is not contradicting
+    /// anything; it is valid geometry the supported subset does not cover —
+    /// `Unsupported`, the same as a degenerate or zero-length candidate. A
+    /// non-finite input coordinate is a statement about the machine.
     pub fn category(self) -> SliceCategory {
         match self {
             Self::NonFiniteInput => SliceCategory::OperationalFailure,
             Self::StartNotOnCylinder
             | Self::EndNotOnCylinder
-            | Self::NotParallelToAxis
-            | Self::NotConstantAxialCoordinate
             | Self::SweepDoesNotReachDeclaredEndpoint => SliceCategory::Inconsistent,
-            Self::DegenerateAxialSegment | Self::ZeroSweep => SliceCategory::Unsupported,
+            Self::NotParallelToAxis
+            | Self::NotConstantAxialCoordinate
+            | Self::DegenerateAxialSegment
+            | Self::ZeroSweep => SliceCategory::Unsupported,
         }
     }
 
@@ -298,6 +302,75 @@ pub fn circumferential_arc_witness(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Source-authoritative classification
+// ---------------------------------------------------------------------------
+
+/// Which curve family a source edge's 3D representation structurally *is* —
+/// the source-authoritative input to [`identify_source_curve_witness`] that
+/// decides witness class and declared sweep.
+///
+/// Deliberately carries no endpoint positions of its own. The canonical
+/// endpoints [`identify_source_curve_witness`] certifies against always come
+/// from the caller's certified vertex positions (the same
+/// `vertex_position(...)` accessor [`super::planar_slice::certified_planar_curves`]
+/// uses), never from a curve's own possibly-independently-rounded copy of a
+/// shared vertex — that discipline is what let two adjacent occurrences join
+/// bit-exactly in Checkpoint 6, and folding a curve's own endpoint back in
+/// here would quietly undo it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SourceCurveFamily {
+    /// A straight segment.
+    Line,
+    /// A circular arc, with the source curve's own trimmed parameter
+    /// interval `(t0, t1)` in the curve's own direction. For a circle
+    /// parameterised as `center + radius (cos(t) radial_x + sin(t)
+    /// radial_y)`, `t1 - t0` is exactly the signed angular sweep.
+    CircularArc {
+        /// The trimmed parameter interval, in the curve's own direction.
+        parameter_interval: (f64, f64),
+    },
+}
+
+/// Step 3's rank-1 route. Classify a source curve, in the selected traversal
+/// direction, into a certified witness — deriving the witness's *class* from
+/// which [`SourceCurveFamily`] variant the source curve structurally is, and
+/// (for an arc) its declared sweep from the curve's own parameter interval —
+/// never from a caller's bare assertion of either.
+///
+/// `start`/`end` are the traversal-order canonical endpoints (see the module
+/// docs); `forward` is Step 2's retained composed sense
+/// ([`super::planar_slice::TraversalOccurrence::forward`]): `true` means the
+/// traversal runs with the curve's own parameter direction (`t0 -> t1`),
+/// `false` means against it (`t1 -> t0`, sweep negated). This is the single
+/// production introduction rule for a rank-1 witness; [`WitnessSpec`] remains
+/// available only for constructing synthetic test fixtures that do not carry
+/// a full source curve representation.
+///
+/// [`WitnessSpec`]: super::cylinder_lift::WitnessSpec
+pub fn identify_source_curve_witness(
+    schema: &CylinderSchema,
+    family: SourceCurveFamily,
+    start: Point3,
+    end: Point3,
+    forward: bool,
+) -> Result<CurveOnCylinderWitness, WitnessFailure> {
+    match family {
+        SourceCurveFamily::Line => axial_line_witness(schema, start, end),
+        SourceCurveFamily::CircularArc {
+            parameter_interval: (t0, t1),
+        } => {
+            FiniteF64::new(t0).map_err(|_| WitnessFailure::NonFiniteInput)?;
+            FiniteF64::new(t1).map_err(|_| WitnessFailure::NonFiniteInput)?;
+            if t0 == t1 {
+                return Err(WitnessFailure::ZeroSweep);
+            }
+            let signed_sweep = if forward { t1 - t0 } else { t0 - t1 };
+            circumferential_arc_witness(schema, start, end, signed_sweep)
+        }
+    }
+}
+
 /// Reduce an angular coordinate into the surface's own principal branch
 /// `(-PI, PI]`, matching `atan2`'s range exactly so a developed value can be
 /// compared against `angular_coordinate`'s output.
@@ -472,5 +545,105 @@ mod tests {
             circumferential_arc_witness(&schema, start, end, 1.2).unwrap_err(),
             WitnessFailure::NotConstantAxialCoordinate
         );
+    }
+
+    // -- category taxonomy --------------------------------------------------
+
+    #[test]
+    fn non_admitted_but_valid_geometry_is_unsupported_not_inconsistent() {
+        assert_eq!(
+            WitnessFailure::NotParallelToAxis.category(),
+            SliceCategory::Unsupported
+        );
+        assert_eq!(
+            WitnessFailure::NotConstantAxialCoordinate.category(),
+            SliceCategory::Unsupported
+        );
+    }
+
+    #[test]
+    fn contradictions_with_authoritative_source_claims_stay_inconsistent() {
+        assert_eq!(
+            WitnessFailure::StartNotOnCylinder.category(),
+            SliceCategory::Inconsistent
+        );
+        assert_eq!(
+            WitnessFailure::EndNotOnCylinder.category(),
+            SliceCategory::Inconsistent
+        );
+        assert_eq!(
+            WitnessFailure::SweepDoesNotReachDeclaredEndpoint.category(),
+            SliceCategory::Inconsistent
+        );
+    }
+
+    // -- source-authoritative classification --------------------------------
+
+    #[test]
+    fn a_source_line_classifies_as_an_axial_witness_in_its_own_direction() {
+        let schema = z_cylinder(2.0, 5.0);
+        let a = on_cylinder(&schema, 0.0, 0.3);
+        let b = on_cylinder(&schema, 3.0, 0.3);
+        let w = identify_source_curve_witness(&schema, SourceCurveFamily::Line, a, b, true)
+            .expect("a source line classifies");
+        assert_eq!(w.class, WitnessClass::AxialLine);
+        assert!(w.displacement().x > 0.0);
+    }
+
+    #[test]
+    fn a_reversed_source_line_swaps_endpoints() {
+        let schema = z_cylinder(2.0, 5.0);
+        let a = on_cylinder(&schema, 0.0, 0.3);
+        let b = on_cylinder(&schema, 3.0, 0.3);
+        // Traversal order is `b -> a`; the family is still `Line`, and only
+        // the caller-supplied endpoint order changes, exactly as
+        // `axial_line_witness` already expects.
+        let w = identify_source_curve_witness(&schema, SourceCurveFamily::Line, b, a, false)
+            .expect("a reversed source line classifies");
+        assert!(w.displacement().x < 0.0);
+    }
+
+    /// The declared sweep is derived from the circle's own parameter
+    /// interval `t1 - t0`, not asserted by the caller.
+    #[test]
+    fn a_source_circular_arc_classifies_with_its_own_declared_sweep() {
+        let schema = z_cylinder(2.0, 5.0);
+        let start = on_cylinder(&schema, 1.0, 0.2);
+        let end = on_cylinder(&schema, 1.0, 1.4);
+        let family = SourceCurveFamily::CircularArc {
+            parameter_interval: (0.2, 1.4),
+        };
+        let w = identify_source_curve_witness(&schema, family, start, end, true)
+            .expect("a source circular arc classifies");
+        assert_eq!(w.class, WitnessClass::CircumferentialArc);
+        assert!((w.displacement().y - 1.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_reversed_source_circular_arc_negates_the_declared_sweep() {
+        let schema = z_cylinder(2.0, 5.0);
+        let start = on_cylinder(&schema, 1.0, 0.2);
+        let end = on_cylinder(&schema, 1.0, 1.4);
+        let family = SourceCurveFamily::CircularArc {
+            parameter_interval: (0.2, 1.4),
+        };
+        let forward = identify_source_curve_witness(&schema, family, start, end, true)
+            .expect("forward");
+        // Traversal order reverses: endpoints swap and the sweep negates.
+        let reversed = identify_source_curve_witness(&schema, family, end, start, false)
+            .expect("reversed");
+        assert!((forward.displacement().y + reversed.displacement().y).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_zero_length_source_parameter_interval_is_refused() {
+        let schema = z_cylinder(2.0, 5.0);
+        let point = on_cylinder(&schema, 1.0, 0.2);
+        let family = SourceCurveFamily::CircularArc {
+            parameter_interval: (0.2, 0.2),
+        };
+        let exit = identify_source_curve_witness(&schema, family, point, point, true).unwrap_err();
+        assert_eq!(exit, WitnessFailure::ZeroSweep);
+        assert_eq!(exit.category(), SliceCategory::Unsupported);
     }
 }

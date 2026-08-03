@@ -23,19 +23,24 @@
 //! information holonomy is: see `FORMAL_SYSTEM.md`'s ban on that shortcut,
 //! repeated in this module's own tests.
 //!
-//! # What is out of scope here
+//! # `WitnessSpec` is a test adapter, not a certificate introduction rule
 //!
-//! Real STEP circular-arc curves have no structural reader yet
-//! ([`super::support`] reads only lines and polylines), so which witness class
-//! an edge use gets is supplied by the caller via [`WitnessSpec`] rather than
-//! inferred from [`super::support::CurveSchema`]. Wiring that inference to the
-//! importer is production-integration work (Checkpoint 10), not this
-//! checkpoint's concern.
+//! [`super::curve_witness::identify_source_curve_witness`] is the
+//! source-authoritative route: it derives the witness class from which
+//! [`super::curve_witness::SourceCurveFamily`] variant the source curve
+//! structurally is, and (for an arc) its declared sweep from the curve's own
+//! parameter interval and Step 2's retained composed sense.
+//! [`develop_traversal_from_source`] is the production entry point built on
+//! it. [`WitnessSpec`] and [`develop_traversal`] exist only for synthetic
+//! test fixtures that construct a witness directly from bare endpoints
+//! without carrying a full source curve representation — `WitnessSpec`
+//! grants no authority and a production caller must not use it as one.
 
 use super::super::source_evidence::{EdgeUseId, SourceVertexKey};
 use super::cylinder::CylinderSchema;
 use super::curve_witness::{
-    axial_line_witness, circumferential_arc_witness, CurveOnCylinderWitness, WitnessFailure,
+    axial_line_witness, circumferential_arc_witness, identify_source_curve_witness,
+    CurveOnCylinderWitness, SourceCurveFamily, WitnessFailure,
 };
 use super::deck::{
     solve_axis_aligned, DeckGenerator, DeckInterval, DeckOperationalFailure, DeckSolveResult,
@@ -46,9 +51,12 @@ use truck_geometry::prelude::Point3;
 
 /// Which curve family one traversal occurrence's edge use presents.
 ///
-/// Supplied by the caller because the structural curve reader for circular
-/// arcs does not exist yet (see the module docs); this type carries exactly
-/// the evidence [`circumferential_arc_witness`] needs beyond the endpoints.
+/// **Test-only.** This type is a caller *assertion*, not a certificate: it
+/// lets a synthetic test build a witness from bare endpoints without
+/// constructing a full [`super::curve_witness::SourceCurveFamily`] source
+/// representation. Production code must use
+/// [`develop_traversal_from_source`], which derives the class and sweep
+/// structurally instead of trusting this enum's caller-chosen variant.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WitnessSpec {
     /// An axial line edge use.
@@ -208,6 +216,61 @@ pub fn develop_traversal(
     })
 }
 
+/// Step 4, production route. Develop every traversal occurrence into a
+/// curve-on-cylinder witness, deriving each occurrence's witness class and
+/// declared sweep from its own source curve family rather than from a
+/// caller assertion.
+///
+/// `family_of` names which [`SourceCurveFamily`] the edge use's own curve
+/// representation structurally is (and, for an arc, its trimmed parameter
+/// interval) — the same kind of structural fact
+/// [`super::support::identify_line_segment`] reads from a representation,
+/// not a classification a caller invents. `occurrence.forward`, already
+/// retained by Step 2 as the composed sense, is passed through unchanged as
+/// [`identify_source_curve_witness`]'s selected orientation.
+pub fn develop_traversal_from_source(
+    traversal: &RegularClosedTraversal,
+    schema: &CylinderSchema,
+    vertex_position: &impl Fn(SourceVertexKey) -> Option<Point3>,
+    family_of: &impl Fn(EdgeUseId) -> SourceCurveFamily,
+) -> Result<DevelopedCylinderBoundary, CylinderLiftExit> {
+    let mut edge_uses = Vec::with_capacity(traversal.occurrences.len());
+    let mut witnesses = Vec::with_capacity(traversal.occurrences.len());
+
+    for occurrence in &traversal.occurrences {
+        let start = vertex_position(occurrence.start_vertex).ok_or(
+            CylinderLiftExit::MissingVertexPosition {
+                edge_use: occurrence.edge_use,
+            },
+        )?;
+        let end = vertex_position(occurrence.end_vertex).ok_or(
+            CylinderLiftExit::MissingVertexPosition {
+                edge_use: occurrence.edge_use,
+            },
+        )?;
+
+        let witness = identify_source_curve_witness(
+            schema,
+            family_of(occurrence.edge_use),
+            start,
+            end,
+            occurrence.forward,
+        )
+        .map_err(|cause| CylinderLiftExit::WitnessConstruction {
+            edge_use: occurrence.edge_use,
+            cause,
+        })?;
+
+        edge_uses.push(occurrence.edge_use);
+        witnesses.push(witness);
+    }
+
+    Ok(DevelopedCylinderBoundary {
+        edge_uses,
+        witnesses,
+    })
+}
+
 /// Step 5's rank-1 product: a certified deck placement for every occurrence,
 /// with terminal holonomy proved structurally zero.
 #[derive(Debug, Clone)]
@@ -219,33 +282,69 @@ pub struct ZeroHolonomyLift {
     pub joins_checked: usize,
 }
 
+/// The number of chained elementary floating-point operations a certified
+/// join tolerance must cover.
+///
+/// A developed coordinate at one end of a join is built from a bounded,
+/// countable chain: a subtraction (`x - origin`), a dot product (two
+/// multiplies and an add) against a recorded basis vector, and — on the
+/// angular axis — an `atan2` evaluation or a `theta_start + declared_sweep`
+/// addition. Each elementary op contributes at most one ULP of *relative*
+/// error to a result of that op's own magnitude (IEEE 754 correct rounding),
+/// and `DeckGenerator`'s own shift arithmetic (`k * period`, folded in by the
+/// placement) adds one more. Eight covers that chain with headroom to spare
+/// without being so wide that a real discrepancy between two *different*
+/// physical vertices could hide inside it — the scale it multiplies, in
+/// [`certified_join_tolerance`], is the local magnitude of the specific pair
+/// of values being compared, per `FORMAL_SYSTEM.md`'s per-primitive
+/// discipline, never a global caller-chosen constant.
+const JOIN_EVALUATION_ULPS: f64 = 8.0;
+
+/// The certified enclosure radius for one developed coordinate's join
+/// discrepancy: [`JOIN_EVALUATION_ULPS`] machine epsilons of the larger
+/// operand magnitude, floored at `scale_floor` so a join whose true value is
+/// near zero still gets a nonzero, scale-appropriate enclosure (the floor for
+/// the angular axis is the deck period itself, since the shift arithmetic's
+/// error scales with the period regardless of how small the residual angle
+/// is).
+fn certified_join_tolerance(b: f64, a: f64, scale_floor: f64) -> f64 {
+    let scale = b.abs().max(a.abs()).max(scale_floor);
+    JOIN_EVALUATION_ULPS * f64::EPSILON * scale
+}
+
 /// Solve one join: the deck integer `k` with `A + k g` compatible with `B`,
 /// where `B` is the unplaced developed end of one occurrence and `A` the
 /// unplaced developed start of the next.
 ///
-/// `tolerance` widens each component into `[value - tolerance, value +
-/// tolerance]` rather than passing a bit-exact point to the deck solver. Both
-/// sides of a join are evaluated through genuinely different code paths for
-/// the same physical vertex — one occurrence's `atan2`-based
-/// `angular_coordinate`, the other's `theta_start + declared_sweep`
-/// arithmetic — so their difference at a true zero-holonomy join is not
-/// exactly `0.0`, only within a few ULPs of it. Without this enclosure the
-/// deck solver would correctly, but uselessly, refuse every join as
-/// `NoCompatibleInteger`: a zero-width interval demands exact equality to an
-/// integer multiple of the period, which floating evaluation of two different
-/// expressions never gives even when the underlying claim is true.
+/// Each component is widened by [`certified_join_tolerance`] into `[value -
+/// tolerance, value + tolerance]` rather than passed to the deck solver as a
+/// bit-exact point. Both sides of a join are evaluated through genuinely
+/// different code paths for the same physical vertex — one occurrence's
+/// `atan2`-based `angular_coordinate`, the other's `theta_start +
+/// declared_sweep` arithmetic — so their difference at a true zero-holonomy
+/// join is not exactly `0.0`, only within a certified number of ULPs of it.
+/// Without this enclosure the deck solver would correctly, but uselessly,
+/// refuse every join as `NoCompatibleInteger`: a zero-width interval demands
+/// exact equality to an integer multiple of the period, which floating
+/// evaluation of two different expressions never gives even when the
+/// underlying claim is true.
 fn solve_join(
     generator: &DeckGenerator,
     b: truck_geometry::prelude::Point2,
     a: truck_geometry::prelude::Point2,
-    tolerance: f64,
 ) -> Result<DeckSolveResult, DeckOperationalFailure> {
     // The developed convention is (axial = First, angular = Second); see
     // `super::cylinder`'s module docs.
-    let axial = DeckInterval::from_f64(b.x - a.x - tolerance, b.x - a.x + tolerance)
+    let axial_tolerance = certified_join_tolerance(b.x, a.x, 1.0);
+    let angular_tolerance =
+        certified_join_tolerance(b.y, a.y, generator.period_magnitude().get());
+    let axial = DeckInterval::from_f64(b.x - a.x - axial_tolerance, b.x - a.x + axial_tolerance)
         .map_err(|_| DeckOperationalFailure::ArithmeticOverflow)?;
-    let angular = DeckInterval::from_f64(b.y - a.y - tolerance, b.y - a.y + tolerance)
-        .map_err(|_| DeckOperationalFailure::ArithmeticOverflow)?;
+    let angular = DeckInterval::from_f64(
+        b.y - a.y - angular_tolerance,
+        b.y - a.y + angular_tolerance,
+    )
+    .map_err(|_| DeckOperationalFailure::ArithmeticOverflow)?;
     let displacement = DevelopedBox {
         first: axial,
         second: angular,
@@ -256,10 +355,12 @@ fn solve_join(
 /// Step 5. Propagate deck placements around the developed boundary from a
 /// fixed initial placement, and classify the terminal holonomy.
 ///
-/// `tolerance` is the certified bound on the evaluation discrepancy between
-/// two independent developed-coordinate computations of one physical vertex
-/// (see [`solve_join`]) — not a geometric approximation of the curve itself,
-/// which the witnesses already represent exactly.
+/// Every join's enclosure is [`certified_join_tolerance`]'s certified bound
+/// on the evaluation discrepancy between two independent developed-coordinate
+/// computations of one physical vertex (see [`solve_join`]) — derived from
+/// the witnesses' own operand magnitudes, never a caller-supplied constant —
+/// and is not a geometric approximation of the curve itself, which the
+/// witnesses already represent exactly.
 ///
 /// Certifies only `h = 0`: a certified nonzero holonomy is reported as
 /// [`CylinderLiftExit::NonzeroHolonomy`] and refused, per the supported
@@ -270,7 +371,6 @@ fn solve_join(
 pub fn propagate_and_classify_holonomy(
     boundary: &DevelopedCylinderBoundary,
     generator: DeckGenerator,
-    tolerance: f64,
 ) -> Result<ZeroHolonomyLift, CylinderLiftExit> {
     let witnesses = &boundary.witnesses;
     let count = witnesses.len();
@@ -309,7 +409,7 @@ pub fn propagate_and_classify_holonomy(
     for i in 0..count.saturating_sub(1) {
         let b = witnesses[i].end;
         let a = witnesses[i + 1].start;
-        let k = classify(i, solve_join(&generator, b, a, tolerance))?;
+        let k = classify(i, solve_join(&generator, b, a))?;
         placements[i + 1] = placements[i] + k;
     }
 
@@ -320,7 +420,7 @@ pub fn propagate_and_classify_holonomy(
     let last = count - 1;
     let b_last = witnesses[last].end;
     let a_first = witnesses[0].start;
-    let k_last = classify(last, solve_join(&generator, b_last, a_first, tolerance))?;
+    let k_last = classify(last, solve_join(&generator, b_last, a_first))?;
     let holonomy = placements[last] + k_last;
 
     if holonomy != 0 {
@@ -465,7 +565,7 @@ mod tests {
                 .expect("every occurrence develops to a witness");
         assert_eq!(boundary.witnesses.len(), 4);
 
-        let lift = propagate_and_classify_holonomy(&boundary, schema.deck_generator(), 1e-9)
+        let lift = propagate_and_classify_holonomy(&boundary, schema.deck_generator())
             .expect("zero holonomy on a non-wrapping quad");
         assert_eq!(lift.placements[0], 0);
         assert_eq!(lift.joins_checked, 4);
@@ -518,7 +618,7 @@ mod tests {
             develop_traversal(&record.traversal, &schema, &vertex_position, &spec_by_use)
                 .expect("every occurrence develops to a witness");
 
-        let lift = propagate_and_classify_holonomy(&boundary, schema.deck_generator(), 1e-9)
+        let lift = propagate_and_classify_holonomy(&boundary, schema.deck_generator())
             .expect("zero holonomy: the seam crossings cancel");
         assert_eq!(lift.placements, vec![0, 1, 1, 0]);
     }
@@ -539,7 +639,7 @@ mod tests {
             witnesses: vec![witness],
         };
 
-        let exit = propagate_and_classify_holonomy(&boundary, schema.deck_generator(), 1e-9)
+        let exit = propagate_and_classify_holonomy(&boundary, schema.deck_generator())
             .expect_err("a full turn must not certify as zero holonomy");
         assert_eq!(exit, CylinderLiftExit::NonzeroHolonomy { holonomy: 1 });
         assert_eq!(exit.category(), SliceCategory::Unsupported);
