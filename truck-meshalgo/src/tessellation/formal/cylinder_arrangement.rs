@@ -27,7 +27,9 @@ use super::planar_slice::{
     bounded_material_region, jordan_arrangement_of, BoundedMaterialRegion, CertificateRoute,
     CertifiedPlanarCurveOccurrence, SimpleJordanArrangement, SliceCategory, SliceExit,
 };
-use super::super::source_evidence::{BoundId, EdgeUseId, SourceVertexKey};
+use super::super::source_evidence::{EdgeUseId, SourceVertexKey};
+#[cfg(test)]
+use super::super::source_evidence::BoundId;
 use truck_geometry::prelude::Point2;
 use truck_topology::compress::OuterBoundStanding;
 
