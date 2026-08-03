@@ -58,6 +58,7 @@
 
 pub mod ambient;
 pub mod cylinder;
+pub mod cylinder_cover;
 pub mod cylinder_face;
 pub mod cylinder_lift;
 pub mod curve_witness;
@@ -91,6 +92,7 @@ pub use cylinder::{
     CylinderIdentificationFailure, CylinderSchema, CylinderValidityCertificate, PeriodicParameter,
     MINIMUM_CYLINDER_LINE_AXIS_PARALLELISM,
 };
+pub use cylinder_cover::{build_working_cover, CylinderCoverExit, WorkingCoverResult};
 pub use cylinder_face::{build_cylinder_face, CylinderFaceRecord};
 pub use curve_witness::{
     axial_line_witness, circumferential_arc_witness, CurveOnCylinderWitness, WitnessClass,
