@@ -777,20 +777,50 @@ fn classify_region(hull: &ParamBox) -> GenericUnresolved {
 /// numbered as ordinary events. Because separation is decided on a single
 /// fixed scalar coordinate, a separated relation is automatically a total
 /// order and the same identity is stable under later refinement.
-fn assign_ordinals(roots: &mut [RootRecord], sys: &System) -> Result<(), GenericUnresolved> {
-    for r in roots.iter_mut() {
-        r.image = refine_image(sys, &r.image);
-    }
-    let n = roots.len();
+/// Order the certified roots canonically and assign the pair-local ordinals.
+///
+/// The operands have already been canonicalized into sorted order, so the
+/// canonically-smaller span occupies the `s` axis and canonical-local `s`
+/// order agrees with authoritative source order on that span. Roots are
+/// ordered **only** by their certified canonical-local `s` isolators. For every
+/// distinct pair, the isolators must be disjoint and ordered:
+///
+/// ```text
+/// a.s_hi < b.s_lo  =>  a before b
+/// b.s_hi < a.s_lo  =>  b before a
+/// otherwise         =>  overlap
+/// ```
+///
+/// Overlap of the `s` isolators does **not** certify equality of the `s`
+/// parameters — it only means the order is currently unknown — so there is no
+/// fallback to the `t` coordinate. The two roots' isolators are first refined
+/// (bounded Krawczyk iteration) to tighten them; if a pair still overlaps after
+/// the refinement budget, the pair is typed
+/// [`GenericUnresolved::UnresolvedIdentityOrdering`]: two distinct parameter
+/// roots that cannot be separated on the canonical first span may represent a
+/// self-intersection, a repeated geometric event, or a multi-branch situation
+/// that requires later event aggregation, and must not be independently
+/// numbered as ordinary events. Because separation is decided on a single
+/// fixed scalar coordinate, a separated relation is automatically a total
+/// order and the same identity is stable under later refinement.
+///
+/// The operation is **transactional**: refinement, separation checks, sorting,
+/// and ordinal assignment happen on a working copy, and the input records are
+/// replaced only on success. A failure leaves the caller's records and their
+/// certificates untouched.
+fn assign_ordinals(roots: &mut Vec<RootRecord>, sys: &System) -> Result<(), GenericUnresolved> {
+    let mut work: Vec<RootRecord> = roots.iter().map(|r| refine_record(sys, r)).collect();
+    let n = work.len();
     for i in 0..n {
         for j in (i + 1)..n {
-            certified_primary_cmp(&roots[i], &roots[j])?;
+            certified_primary_cmp(&work[i], &work[j])?;
         }
     }
-    roots.sort_by(|a, b| certified_primary_cmp(a, b).expect("separation verified above"));
-    for (i, r) in roots.iter_mut().enumerate() {
+    work.sort_by(|a, b| certified_primary_cmp(a, b).expect("separation verified above"));
+    for (i, r) in work.iter_mut().enumerate() {
         r.ordinal = i as u32;
     }
+    *roots = work;
     Ok(())
 }
 
@@ -812,25 +842,44 @@ fn certified_primary_cmp(
     }
 }
 
-/// Tighten a certified root box by bounded Krawczyk iteration.
+/// Tighten a certified root box by bounded Krawczyk iteration, keeping the
+/// stored certificate in lockstep with the stored isolator.
 ///
 /// Each successful certificate gives a box `K(X) ⊂ int(X)` still containing the
-/// root, so iterating shrinks the box while preserving certification. Refining
-/// before the ordinal separation check turns an isolator overlap that a wider
-/// box merely *could not decide* into a certified order, and leaves only
-/// genuine unresolved overlaps (identical or inseparable `s` parameters) to
-/// fail the ordering.
-fn refine_image(sys: &System, image: &ParamBox) -> ParamBox {
-    let mut current = *image;
+/// root; the returned record carries that certificate, so the invariant "the
+/// stored certificate backs the stored isolator" is preserved at every step.
+/// Refining before the ordinal separation check turns an isolator overlap that
+/// a wider box merely *could not decide* into a certified order, and leaves
+/// only genuine unresolved overlaps (identical or inseparable `s` parameters)
+/// to fail the ordering.
+fn refine_record(sys: &System, record: &RootRecord) -> RootRecord {
+    let mut current = record.clone();
     for _ in 0..REFINE_BUDGET {
-        let Some(cert) = try_krawczyk(sys, &current) else {
+        let Some(cert) = try_krawczyk(sys, &current.image) else {
             break;
         };
         let next = cert.image;
-        if next.s_lo <= current.s_lo || next.s_hi >= current.s_hi {
+        // A successful certificate proves next ⊂ int(current); defensively
+        // refuse to continue on a box that is not strictly contained.
+        let contained = next.s_lo > current.image.s_lo
+            && next.s_hi < current.image.s_hi
+            && next.t_lo > current.image.t_lo
+            && next.t_hi < current.image.t_hi;
+        if !contained {
             break;
         }
-        current = next;
+        // Continue while any boundary contracts: contraction in t can enable a
+        // better subsequent s contraction even when an s boundary is pinned at
+        // the working precision.
+        let made_progress = next.s_lo > current.image.s_lo
+            || next.s_hi < current.image.s_hi
+            || next.t_lo > current.image.t_lo
+            || next.t_hi < current.image.t_hi;
+        if !made_progress {
+            break;
+        }
+        current.image = next;
+        current.certificate = cert;
     }
     current
 }
@@ -1123,7 +1172,6 @@ fn solve_pair(lhs: &RationalBezierSpan2, rhs: &RationalBezierSpan2) -> PairSolve
     if let Err(reason) = assign_ordinals(&mut records, &sys) {
         regions.push((ROOT_BOX, reason));
     }
-
     let mut roots = Vec::new();
     for r in records {
         match certify_event(&op1, &op2, first, second, &r) {
@@ -1338,19 +1386,6 @@ mod tests {
         .unwrap()
     }
 
-    fn event_identities(result: &PairContactResult) -> Vec<EventIdentity> {
-        let PairContactResult::Components(comps) = result else {
-            return Vec::new();
-        };
-        comps
-            .iter()
-            .filter_map(|c| match c {
-                ContactComponent2::IsolatedEvent(e) => Some(e.identity.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
     #[test]
     fn transverse_interior_crossing_reaches_isolated_event() {
         // Parabola C(s) = (s, s^2) vs. horizontal line y = 1/5: a single
@@ -1482,43 +1517,68 @@ mod tests {
         assert!(keys[0].participants[0].span_id <= keys[0].participants[1].span_id);
     }
 
-    #[test]
-    fn identity_set_invariant_under_operand_swap_and_reversal() {
-        let parabola = parabola(0);
-        let line = slanted_line(1.0, -0.1, 1);
-        let base = event_identities(&intersect_bezier_pair(&parabola, &line));
-        assert_eq!(base.len(), 2);
-
-        let swapped = event_identities(&intersect_bezier_pair(&line, &parabola));
-        assert_eq!(swapped.len(), 2);
-        assert_eq!(sorted(base.clone()), sorted(swapped));
-
-        // Reversing the first span only: canonical orientation restores the
-        // same roots and the identity is preserved.
-        let reversed_line = line.reverse_occurrence();
-        let rev_one = event_identities(&intersect_bezier_pair(&parabola, &reversed_line));
-        assert_eq!(rev_one.len(), 2);
-        assert_eq!(sorted(base.clone()), sorted(rev_one));
-
-        // Reversing the second span only.
-        let reversed_parabola = parabola.reverse_occurrence();
-        let rev_two = event_identities(&intersect_bezier_pair(&reversed_parabola, &line));
-        assert_eq!(sorted(base.clone()), sorted(rev_two));
-
-        // Reversing both spans.
-        let rev_both = event_identities(&intersect_bezier_pair(&reversed_parabola, &reversed_line));
-        assert_eq!(sorted(base.clone()), sorted(rev_both));
-
-        // Deterministic repetition.
-        let repeat = event_identities(&intersect_bezier_pair(&parabola, &line));
-        assert_eq!(sorted(base.clone()), sorted(repeat));
+    /// The identity of the event whose branch evidence contains the source
+    /// parameter `s`. Identifies a geometric root by certified evidence, so a
+    /// root-by-root comparison across solves is possible rather than comparing
+    /// unordered identity sets.
+    fn identity_containing(result: &PairContactResult, s: f64) -> EventIdentity {
+        let PairContactResult::Components(comps) = result else {
+            panic!("expected components");
+        };
+        for c in comps {
+            if let ContactComponent2::IsolatedEvent(e) = c {
+                if e.branches
+                    .iter()
+                    .any(|b| b.parameter.lo <= s && s <= b.parameter.hi)
+                {
+                    return e.identity.clone();
+                }
+            }
+        }
+        panic!("no event contains source parameter {s}");
     }
 
-    fn sorted(mut ids: Vec<EventIdentity>) -> Vec<EventIdentity> {
-        // EventIdentity is not Ord; sort by debug representation for a stable
-        // set comparison. The identities are small and fully deterministic.
-        ids.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
-        ids
+    #[test]
+    fn identity_is_stable_per_root_under_swap_and_reversal() {
+        let parabola = parabola(0);
+        let line = slanted_line(1.0, -0.1, 1);
+        let s1 = (1.0 - 0.6f64.sqrt()) / 2.0;
+        let s2 = (1.0 + 0.6f64.sqrt()) / 2.0;
+
+        // Identify each geometric root in the base solve by the analytic root
+        // its certified source-parameter evidence contains, and record its
+        // identity.
+        let base = intersect_bezier_pair(&parabola, &line);
+        let id1_base = identity_containing(&base, s1);
+        let id2_base = identity_containing(&base, s2);
+        assert_ne!(id1_base, id2_base, "the two geometric roots are distinct");
+
+        // Operand swap.
+        let swapped = intersect_bezier_pair(&line, &parabola);
+        assert_eq!(identity_containing(&swapped, s1), id1_base);
+        assert_eq!(identity_containing(&swapped, s2), id2_base);
+
+        // Reversal of the first span only.
+        let reversed_line = line.reverse_occurrence();
+        let rev_one = intersect_bezier_pair(&parabola, &reversed_line);
+        assert_eq!(identity_containing(&rev_one, s1), id1_base);
+        assert_eq!(identity_containing(&rev_one, s2), id2_base);
+
+        // Reversal of the second span only.
+        let reversed_parabola = parabola.reverse_occurrence();
+        let rev_two = intersect_bezier_pair(&reversed_parabola, &line);
+        assert_eq!(identity_containing(&rev_two, s1), id1_base);
+        assert_eq!(identity_containing(&rev_two, s2), id2_base);
+
+        // Reversal of both spans.
+        let rev_both = intersect_bezier_pair(&reversed_parabola, &reversed_line);
+        assert_eq!(identity_containing(&rev_both, s1), id1_base);
+        assert_eq!(identity_containing(&rev_both, s2), id2_base);
+
+        // Deterministic repetition.
+        let repeat = intersect_bezier_pair(&parabola, &line);
+        assert_eq!(identity_containing(&repeat, s1), id1_base);
+        assert_eq!(identity_containing(&repeat, s2), id2_base);
     }
 
     #[test]
@@ -1680,22 +1740,59 @@ mod tests {
     #[test]
     fn ordinal_order_is_invariant_under_refinement() {
         // The certified s-isolator order must not change when the isolators are
-        // refined (bounded Krawczyk iteration inside assign_ordinals).
-        let op1 = canonicalize(&parabola(0));
-        let op2 = canonicalize(&slanted_line(1.0, -0.1, 1));
+        // refined (bounded Krawczyk iteration inside assign_ordinals). The
+        // comparison is per geometric root, identified by which analytic root
+        // its enclosure contains, not by vector position or by a re-run of the
+        // whole assignment on an already-sorted vector.
+        let parabola = parabola(0);
+        let line = slanted_line(1.0, -0.1, 1);
+        let s1 = (1.0 - 0.6f64.sqrt()) / 2.0;
+        let s2 = (1.0 + 0.6f64.sqrt()) / 2.0;
+        let op1 = canonicalize(&parabola);
+        let op2 = canonicalize(&line);
         let sys = System::new(&op1, &op2);
         let (mut records, pending) = isolate(&sys);
         assert!(pending.is_empty(), "the two roots must be certified, not pending");
+        let contains_s = |r: &RootRecord, s: f64| r.image.s_lo <= s && s <= r.image.s_hi;
+
         assign_ordinals(&mut records, &sys).expect("two separated roots order");
-        let first: Vec<u32> = records.iter().map(|r| r.ordinal).collect();
-        // Re-running assignment refines the already-refined isolators and must
-        // not change the order.
+        // Each geometric root is identified by the analytic root its enclosure
+        // contains. Record its ordinal before the second (idempotent) pass.
+        let r1 = records
+            .iter()
+            .find(|r| contains_s(r, s1))
+            .expect("the s1 root is present");
+        let r2 = records
+            .iter()
+            .find(|r| contains_s(r, s2))
+            .expect("the s2 root is present");
+        let ord1_first = r1.ordinal;
+        let ord2_first = r2.ordinal;
+        assert_eq!((ord1_first, ord2_first), (0, 1));
+
         assign_ordinals(&mut records, &sys).expect("refinement preserves order");
-        let second: Vec<u32> = records.iter().map(|r| r.ordinal).collect();
-        assert_eq!(first, second);
-        // Ordinals are the immutable ids 0 and 1, ordered by the s isolator.
-        assert_eq!(first, vec![0, 1]);
-        assert!(records[0].image.s_hi < records[1].image.s_lo);
+        let ord1_second = records
+            .iter()
+            .find(|r| contains_s(r, s1))
+            .expect("the s1 root is present")
+            .ordinal;
+        let ord2_second = records
+            .iter()
+            .find(|r| contains_s(r, s2))
+            .expect("the s2 root is present")
+            .ordinal;
+        // The s1 root kept ordinal 0 and the s2 root kept ordinal 1 across
+        // refinement — the ordinals did not swap.
+        assert_eq!(ord1_second, ord1_first);
+        assert_eq!(ord2_second, ord2_first);
+        assert_eq!((ord1_second, ord2_second), (0, 1));
+        // The certified isolators are separated on the canonical s axis.
+        let sorted: Vec<&RootRecord> = {
+            let mut v = records.iter().collect::<Vec<_>>();
+            v.sort_by_key(|r| r.ordinal);
+            v
+        };
+        assert!(sorted[0].image.s_hi < sorted[1].image.s_lo);
     }
 
     #[test]
