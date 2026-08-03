@@ -173,12 +173,16 @@ pub use intersection::{
     PairUnsupported, ParameterEnclosure, ParameterLocation,
 };
 pub use contact::{
-    lift_pair_result, ArcParticipant, BranchIncidence, CommonArc2, CommonArcEnd,
-    CommonSupportBasis, ContactComponent2, CrossingClassification, EventIdentity,
-    GenericUnresolved, IsolatedEvent2, IsolatedRootKey, IsolatedRootParticipant,
-    OrientationAlongSupport, PairContactResult,
+    label_branch_from_placement, lift_pair_result, AggregatedQuotientEventKey, ArcParticipant,
+    BranchIncidence, CommonArc2, CommonArcEnd, CommonSupportBasis, ContactComponent2,
+    CrossingClassification, EventIdentity, GenericUnresolved, IsolatedEvent2, IsolatedRootKey,
+    IsolatedRootParticipant, OrientationAlongSupport, PairContactLiftKey, PairContactResult,
 };
-pub use quotient::{DeckLabel, DeckRank};
+pub use quotient::{
+    adapt_axis_aligned_placement, certify_rank2_placement, AmbientLatticeId, CanonicalBranchSide,
+    CanonicalIncidenceId, CertifiedDeckLabel, DeckContext, DeckLabel, DeckLabelBasis,
+    DeckLabelError, DeckPlacementResult, DeckPlacementUnsupported, DeckRank, DeckSignature,
+};
 pub use bezier::{BezierSpanError, RationalBezierSpan2};
 pub use bezier_isect::intersect_bezier_pair;
 pub use span::{BranchGerm, CurveSpan2, FastPath, SpanId};

@@ -70,6 +70,7 @@ use super::outcome::{
     ProvenanceRecord, ProvenanceSet, ResourceOperation, StageEvaluation, StageOutcome,
     UnresolvedReason, UnresolvedReport, UnsupportedCause, UnsupportedReport,
 };
+use super::quotient::{AmbientLatticeId, DeckContext};
 use super::support::{PlaneSchema, SupportSurfaceSchema};
 
 // ---------------------------------------------------------------------------
@@ -1091,6 +1092,29 @@ impl CertifiedAmbientLattice {
         }
     }
 
+    /// The shared ambient deck context this lattice authorizes.
+    ///
+    /// The event contract (GEN-001D) carries one [`DeckContext`] per event — a
+    /// lattice-bound token, never a duplicated certificate — and every branch
+    /// label must validate against it. The context's [`AmbientLatticeId`] is
+    /// derived from the certified generators, so a label certified against a
+    /// *different* lattice (even of the same rank) is rejected. The rank is the
+    /// certified rank of [`resolve_ambient_periods`].
+    pub fn deck_context(&self) -> DeckContext {
+        let lattice = match self {
+            Self::Rank0(_) => AmbientLatticeId::Rank0,
+            Self::Rank1(rank1) => AmbientLatticeId::Rank1 {
+                periodic_axis: rank1.generator().axis(),
+                signed_period_bits: rank1.generator().magnitude().get().to_bits(),
+            },
+            Self::Rank2(rank2) => AmbientLatticeId::Rank2 {
+                first: translation_bits(rank2.first()),
+                second: translation_bits(rank2.second()),
+            },
+        };
+        DeckContext::from_lattice_id(lattice)
+    }
+
     /// The certified basis of `Λ`, for authoritative deck operations.
     pub fn authoritative_basis(&self) -> CertifiedPeriodBasisRef<'_> {
         match self {
@@ -1141,6 +1165,17 @@ impl CertifiedAmbientLattice {
     pub fn cover_enumeration_authority(&self) -> CoverEnumerationAuthority<'_> {
         CoverEnumerationAuthority { lattice: self }
     }
+}
+
+/// The `(du, dv)` translation of a certified generator, bit-encoded for the
+/// [`AmbientLatticeId`]. Certified generators are finite and nonzero, so the
+/// `f64::to_bits` encoding is a valid equality encoding.
+fn translation_bits(generator: &CertifiedPeriodGenerator) -> [u64; 2] {
+    let translation = generator.translation();
+    [
+        translation.du().get().to_bits(),
+        translation.dv().get().to_bits(),
+    ]
 }
 
 /// A borrowed view of the certified basis, discriminated by rank.

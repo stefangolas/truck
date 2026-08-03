@@ -57,7 +57,7 @@ use super::contact::{
 };
 use super::exact::CertifiedInterval;
 use super::intersection::{ParameterEnclosure, ParameterLocation};
-use super::quotient::DeckLabel;
+use super::quotient::{CanonicalBranchSide, CertifiedDeckLabel, DeckContext};
 use super::span::{BranchGerm, SpanId};
 use truck_geometry::prelude::Point2;
 
@@ -1190,19 +1190,32 @@ fn root_to_event(
     // The record's participants are in sorted order; the branch records map
     // back to the caller's lhs/rhs arguments by span identity so the
     // orientation-dependent occurrence data stays attached to the right span.
+    // The canonical branch side follows the sorted participant pair, so it is
+    // stable under operand swap and reversal.
     let lhs_is_first = lhs_span_id == root.span_first_id;
+    let (lhs_side, rhs_side) = if lhs_is_first {
+        (CanonicalBranchSide::First, CanonicalBranchSide::Second)
+    } else {
+        (CanonicalBranchSide::Second, CanonicalBranchSide::First)
+    };
     let (lhs_parameter, rhs_parameter) = if lhs_is_first {
         (root.first_evidence, root.second_evidence)
     } else {
         (root.second_evidence, root.first_evidence)
     };
+    // The generic Bézier path has no certified ambient context yet, so the
+    // event carries the unique rank-0 context and the branches the validated
+    // rank-0 zero label. GEN-001D binds rank-1/rank-2 labels where a certified
+    // lattice is present.
+    let context = DeckContext::rank0();
     let lhs_branch = BranchIncidence {
         span_id: lhs_span_id,
         provenance: lhs.provenance,
         parameter: lhs_parameter,
         location: ParameterLocation::PieceInterior,
         germ: BranchGerm::Regular,
-        deck: DeckLabel::ZERO,
+        side: lhs_side,
+        deck: CertifiedDeckLabel::zero(context),
         representative: root.representative,
     };
     let rhs_branch = BranchIncidence {
@@ -1211,13 +1224,15 @@ fn root_to_event(
         parameter: rhs_parameter,
         location: ParameterLocation::PieceInterior,
         germ: BranchGerm::Regular,
-        deck: DeckLabel::ZERO,
+        side: rhs_side,
+        deck: CertifiedDeckLabel::zero(context),
         representative: root.representative,
     };
     IsolatedEvent2 {
         identity,
         crossing: CrossingClassification::Transverse,
         branches: vec![lhs_branch, rhs_branch],
+        deck_context: context,
         representative: root.representative,
     }
 }

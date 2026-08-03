@@ -19,6 +19,24 @@
 //! merge is ARR-003's responsibility, and it uses the stable identities
 //! introduced here.
 //!
+//! GEN-001D adds the rank/deck contract to the event layer: each
+//! [`IsolatedEvent2`] carries one shared ambient [`DeckContext`] (bound to one
+//! certified lattice) and each [`BranchIncidence`] carries a validated,
+//! lattice-bound [`CertifiedDeckLabel`]. Event deck identity is canonical and
+//! **relative**: [`IsolatedEvent2::deck_signature`] normalizes the gauge by
+//! ordering the incidences canonically ([`CanonicalIncidenceId`] — source
+//! occurrence + canonical branch side, never parameter-enclosure bits) and
+//! subtracting the canonical anchor label. [`IsolatedEvent2::pair_contact_lift_key`]
+//! pairs that with the pair/lift construction identity; it is explicitly **not**
+//! a final aggregate vertex identity — ARR-003 certifies the complete event
+//! equivalence class and produces an [`AggregatedQuotientEventKey`]. Absolute
+//! lifts are gauge-dependent and never determine event identity; the existing
+//! rank-1 solver's verdicts are adapted by `adapt_axis_aligned_placement` and
+//! attached end to end by [`label_branch_from_placement`] without any
+//! nearest-integer rounding. Rank-2 *labels* are carried and validated; rank-2
+//! geometric *placement* stays a typed [`DeckPlacementResult::Unsupported`] (no
+//! unreviewed closest-vector algorithm is invented).
+//!
 //! # A7 — the chord-side representative is hidden, not yet repaired
 //!
 //! ARR-002's chord-side membership test reads rounded evaluated arc endpoints
@@ -30,11 +48,15 @@
 //! orient test itself is replaced by a germ-based test in GEN-001C.
 
 use super::curve2d::CurveOccurrenceProvenance;
+use super::evidence::NonEmptyVec;
 use super::intersection::{
     CertifiedIntersection2, ContactKind, IntersectionIdentity, PairIntersectionResult,
     PairUnsupported, PairUnresolved, ParameterEnclosure, ParameterLocation,
 };
-use super::quotient::DeckLabel;
+use super::quotient::{
+    CanonicalBranchSide, CanonicalIncidenceId, CertifiedDeckLabel, DeckContext, DeckLabel,
+    DeckLabelError, DeckPlacementResult, DeckSignature,
+};
 use super::span::{BranchGerm, CurveSpan2, SpanId};
 use super::super::source_evidence::{EdgeUseId, SourceVertexKey};
 use truck_geometry::prelude::Point2;
@@ -268,10 +290,10 @@ impl EventIdentity {
 /// One curve's involvement in one contact event.
 ///
 /// The arrangement-facing atom: a span, the certified parameter enclosure at
-/// which it meets the event, its certified local germ, its deck displacement,
-/// and its provenance. The representative point is an evaluation hint, never
-/// identity (A7: ARR-003 consumes the germ and the parameter enclosure, not the
-/// representative coordinate).
+/// which it meets the event, its certified local germ, its canonical branch
+/// side, its validated deck label, and its provenance. The representative point
+/// is an evaluation hint, never identity (A7: ARR-003 consumes the germ and the
+/// parameter enclosure, not the representative coordinate).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BranchIncidence {
     /// The span this branch is a piece of.
@@ -285,9 +307,18 @@ pub struct BranchIncidence {
     pub location: ParameterLocation,
     /// The certified local branch behavior at the meeting parameter.
     pub germ: BranchGerm,
-    /// The deck displacement of this branch's chart copy (rank-0 in GEN-001A;
-    /// GEN-001D carries rank-1/rank-2 labels).
-    pub deck: DeckLabel,
+    /// The canonical participant slot of this branch within its event's root.
+    ///
+    /// Assigned by the producer from the canonical sorted participant pair
+    /// ([`IsolatedRootKey`]), never from insertion order, discovery order or a
+    /// coordinate. It is part of the canonical incidence identity
+    /// ([`CanonicalIncidenceId`]) used for deck gauge anchor selection, so the
+    /// anchor is stable under operand swap, source traversal reversal and
+    /// subdivision. Parameter enclosures are evidence, not the ordering key.
+    pub side: CanonicalBranchSide,
+    /// The validated deck label of this branch's chart copy, bound to the
+    /// event's shared ambient context ([`IsolatedEvent2::deck_context`]).
+    pub deck: CertifiedDeckLabel,
     /// A representative point (evaluation hint), never identity.
     pub representative: Point2,
 }
@@ -304,8 +335,97 @@ pub struct IsolatedEvent2 {
     /// The incident branches. Two for an ARR-002 pairwise lift; ≥3 after
     /// ARR-003 merges by identity.
     pub branches: Vec<BranchIncidence>,
+    /// The shared ambient lattice/rank context for this event's incidences.
+    ///
+    /// Carried once per event, never duplicated per branch (GEN-001D): the
+    /// context is bound to one certified lattice, and every branch label must
+    /// validate against it. A mismatch is a typed [`DeckLabelError`] from
+    /// [`IsolatedEvent2::deck_signature`].
+    pub deck_context: DeckContext,
     /// A representative point (evaluation hint), never identity.
     pub representative: Point2,
+}
+
+impl IsolatedEvent2 {
+    /// The canonical *relative* deck signature of this isolated event.
+    ///
+    /// Gauge normalization (GEN-001D): every branch label is first validated
+    /// against the event's shared ambient context, the incidences are ordered
+    /// canonically by construction-based incidence identity
+    /// ([`CanonicalIncidenceId`]: source occurrence + canonical branch side —
+    /// never parameter-enclosure bits, the representative point, insertion
+    /// order, discovery order or a rounded coordinate), the anchor is the
+    /// canonical minimum, and the anchor label is subtracted from every label.
+    /// The resulting normalized relative labels are returned in canonical
+    /// incidence order as a [`DeckSignature`].
+    ///
+    /// The signature is invariant under input permutation, operand swap, source
+    /// traversal reversal, deterministic repetition, and adding one deck vector
+    /// to every incidence (a common deck translation represents the same
+    /// quotient event). Absolute lifts are gauge-dependent, so they never
+    /// determine event identity — the normalized signature does.
+    pub fn deck_signature(&self) -> Result<DeckSignature, DeckLabelError> {
+        let entries: Vec<(CanonicalIncidenceId, CertifiedDeckLabel)> = self
+            .branches
+            .iter()
+            .map(|branch| {
+                (
+                    CanonicalIncidenceId::new(branch.span_id, branch.side),
+                    branch.deck,
+                )
+            })
+            .collect();
+        DeckSignature::normalize(self.deck_context, &entries)
+    }
+
+    /// The pair/lift-level quotient-event key: the construction identity of the
+    /// pair contact plus the normalized relative deck signature.
+    ///
+    /// **Not a final aggregate vertex identity.** The [`EventIdentity`] is the
+    /// pre-ARR-003 construction identity of one pair contact/root, so at a
+    /// genuine three-way event the three pairwise records have three distinct
+    /// keys even though they belong to one arrangement vertex. ARR-003 certifies
+    /// the complete event equivalence class and produces the
+    /// [`AggregatedQuotientEventKey`]. Raw absolute deck labels never appear in
+    /// either key, because they are gauge-dependent.
+    pub fn pair_contact_lift_key(&self) -> Result<PairContactLiftKey, DeckLabelError> {
+        Ok(PairContactLiftKey {
+            pair_contact: self.identity.clone(),
+            deck_signature: self.deck_signature()?,
+        })
+    }
+}
+
+/// The key of one pair/lift contact record: its construction identity plus its
+/// normalized relative deck signature.
+///
+/// This is what a single pairwise root contributes to the arrangement. It is
+/// deliberately not called the event identity: at an N-way event the pairwise
+/// records carry distinct [`EventIdentity`] values, and only ARR-003's
+/// aggregation produces the vertex-level key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PairContactLiftKey {
+    /// The construction identity of the pair contact.
+    pub pair_contact: EventIdentity,
+    /// The normalized relative deck signature.
+    pub deck_signature: DeckSignature,
+}
+
+/// The canonical quotient-event key of an aggregated arrangement vertex.
+///
+/// Defined in GEN-001D for representability; **populated only by ARR-003**,
+/// after it has certified the complete event equivalence class (all incidences
+/// of a genuine high-multiplicity event under one vertex identity). The
+/// incidences are the canonical incidence identities of every participating
+/// branch, and the relative deck signature is the gauge-normalized label set of
+/// the whole vertex.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AggregatedQuotientEventKey {
+    /// The canonical incidence identities of every branch in the equivalence
+    /// class. Non-empty by construction (ARR-003 aggregates over ≥1 incidence).
+    pub incidences: NonEmptyVec<CanonicalIncidenceId>,
+    /// The gauge-normalized relative deck signature of the whole vertex.
+    pub relative_deck_signature: DeckSignature,
 }
 
 /// The certified basis on which common support is claimed for a common arc.
@@ -408,23 +528,41 @@ impl PairContactResult {
     }
 }
 
+/// The canonical sides of a two-participant pair, from the sorted participant
+/// identity.
+///
+/// Mirrors [`IsolatedRootKey::new`]: the branch whose span is the first sorted
+/// participant is [`CanonicalBranchSide::First`]. Reversal preserves span ids,
+/// so the sides are stable under operand swap and traversal reversal.
+fn canonical_sides(first_span: SpanId, second_span: SpanId) -> (CanonicalBranchSide, CanonicalBranchSide) {
+    if first_span <= second_span {
+        (CanonicalBranchSide::First, CanonicalBranchSide::Second)
+    } else {
+        (CanonicalBranchSide::Second, CanonicalBranchSide::First)
+    }
+}
+
 /// Build the two branch incidences of one ARR-002 pairwise intersection.
 ///
 /// Every analytic branch is certified [`BranchGerm::Regular`]: a line/circle has
 /// a nonzero first derivative everywhere on a nondegenerate piece. The deck
-/// label is rank-0 zero in GEN-001A (GEN-001D carries the real label).
+/// label is the validated rank-0 zero label of the rank-0 context: the analytic
+/// pairwise path has no certified ambient context, and the event carries the
+/// shared rank-0 context ([`IsolatedEvent2::deck_context`]).
 fn branches_from_pair(
     lhs_span: &CurveSpan2,
     rhs_span: &CurveSpan2,
     intersection: &CertifiedIntersection2,
 ) -> [BranchIncidence; 2] {
+    let (lhs_side, rhs_side) = canonical_sides(lhs_span.span_id(), rhs_span.span_id());
     let lhs = BranchIncidence {
         span_id: lhs_span.span_id(),
         provenance: *lhs_span.provenance(),
         parameter: intersection.lhs_parameter,
         location: intersection.lhs_location,
         germ: BranchGerm::Regular,
-        deck: DeckLabel::ZERO,
+        side: lhs_side,
+        deck: CertifiedDeckLabel::zero(DeckContext::rank0()),
         representative: intersection.point,
     };
     let rhs = BranchIncidence {
@@ -433,7 +571,8 @@ fn branches_from_pair(
         parameter: intersection.rhs_parameter,
         location: intersection.rhs_location,
         germ: BranchGerm::Regular,
-        deck: DeckLabel::ZERO,
+        side: rhs_side,
+        deck: CertifiedDeckLabel::zero(DeckContext::rank0()),
         representative: intersection.point,
     };
     [lhs, rhs]
@@ -510,6 +649,7 @@ pub fn lift_pair_result(
                         ),
                         crossing: CrossingClassification::from_pair(intersection.contact),
                         branches: vec![lhs_branch, rhs_branch],
+                        deck_context: DeckContext::rank0(),
                         representative: intersection.point,
                     })
                 })
@@ -523,11 +663,48 @@ pub fn lift_pair_result(
     }
 }
 
+/// Attach a certified deck placement's unique label to one branch of an event.
+///
+/// The end-to-end rank-1 label path: the existing
+/// [`super::deck::solve_axis_aligned`] verdict is adapted by
+/// `adapt_axis_aligned_placement`, the unique label is validated against the
+/// event's shared ambient context, and it is written onto `branch_index`. A
+/// non-unique verdict is returned verbatim as
+/// [`DeckLabelError::NonUniquePlacement`], so `Incompatible`, `Ambiguous`,
+/// `Unresolved`, `Unsupported` and `OperationalFailure` stay distinct and no
+/// near-integer rounding ever mints a label. An out-of-range `branch_index` is
+/// a typed [`DeckLabelError::NoSuchBranch`], never a panic.
+pub fn label_branch_from_placement(
+    event: &mut IsolatedEvent2,
+    branch_index: usize,
+    placement: DeckPlacementResult,
+) -> Result<(), DeckLabelError> {
+    let branch = event
+        .branches
+        .get_mut(branch_index)
+        .ok_or(DeckLabelError::NoSuchBranch { index: branch_index })?;
+    match placement {
+        DeckPlacementResult::Unique(label) => {
+            branch.deck = label.validate_for(event.deck_context)?;
+            Ok(())
+        }
+        other => Err(DeckLabelError::NonUniquePlacement(other)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use super::super::curve2d::{DevelopedCurve2D, LineSegment2, SourceEdgeId, SourceEntityId, SourceFaceId};
+    use super::super::deck::{
+        solve_axis_aligned, DeckGenerator, DevelopedAxis, DevelopedBox, DeckInterval,
+    };
+    use super::super::evidence::ParameterAxis;
     use super::super::intersection::{intersect_x_monotone, IntersectionPolicy};
+    use super::super::numeric::FiniteF64;
+    use super::super::quotient::{
+        adapt_axis_aligned_placement, certify_rank2_placement, AmbientLatticeId, DeckRank,
+    };
     use super::super::xmonotone::{make_x_monotone, NumericalPolicy, XMonotonePiece2};
     use super::super::super::source_evidence::{BoundId, EdgeUseId, SourceVertexKey};
     use truck_geometry::prelude::Point2;
@@ -733,5 +910,605 @@ mod tests {
         // Single crossing: index 0 either way, so the identities are equal.
         // (Multi-root invariance is the GEN-001C test.)
         assert_eq!(id_ab, id_ba, "single-root event identity is invariant under swap");
+    }
+
+    // ----- GEN-001D: canonical deck gauge normalization --------------------
+
+    fn rank1_context() -> DeckContext {
+        DeckContext::from_lattice_id(AmbientLatticeId::Rank1 {
+            periodic_axis: ParameterAxis::V,
+            signed_period_bits: std::f64::consts::TAU.to_bits(),
+        })
+    }
+
+    fn rank2_context() -> DeckContext {
+        DeckContext::from_lattice_id(AmbientLatticeId::Rank2 {
+            first: [1.0_f64.to_bits(), 0.0_f64.to_bits()],
+            second: [0.0_f64.to_bits(), 1.0_f64.to_bits()],
+        })
+    }
+
+    fn placement_label(context: DeckContext, u: i64, v: i64) -> CertifiedDeckLabel {
+        CertifiedDeckLabel::certified_placement(context, DeckLabel { u, v })
+    }
+
+    fn synthetic_branch(
+        edge_index: usize,
+        parameter: (f64, f64),
+        side: CanonicalBranchSide,
+        deck: CertifiedDeckLabel,
+    ) -> BranchIncidence {
+        let provenance = provenance_with(
+            edge_index,
+            SourceVertexKey::ShellVertex(1),
+            SourceVertexKey::ShellVertex(2),
+        );
+        BranchIncidence {
+            span_id: SpanId::from_occurrence(&provenance),
+            provenance,
+            parameter: ParameterEnclosure::from_pair(parameter),
+            location: ParameterLocation::PieceInterior,
+            germ: BranchGerm::Regular,
+            side,
+            deck,
+            representative: Point2::new(0.0, 0.0),
+        }
+    }
+
+    /// A reversal-stable synthetic branch: same span occurrence, swapped
+    /// traversal endpoints, parameter orientation reversed.
+    fn synthetic_branch_reversed(
+        edge_index: usize,
+        parameter: (f64, f64),
+        side: CanonicalBranchSide,
+        deck: CertifiedDeckLabel,
+    ) -> BranchIncidence {
+        let mut branch = synthetic_branch(edge_index, parameter, side, deck);
+        branch.provenance = branch.provenance.reversed();
+        branch
+    }
+
+    fn synthetic_event(
+        identity: EventIdentity,
+        context: DeckContext,
+        branches: Vec<BranchIncidence>,
+    ) -> IsolatedEvent2 {
+        IsolatedEvent2 {
+            identity,
+            crossing: CrossingClassification::Transverse,
+            branches,
+            deck_context: context,
+            representative: Point2::new(0.0, 0.0),
+        }
+    }
+
+    fn isolated_root_identity() -> EventIdentity {
+        EventIdentity::IsolatedRoot(IsolatedRootKey::new(
+            SpanId::from_occurrence(&provenance_with(
+                0,
+                SourceVertexKey::ShellVertex(1),
+                SourceVertexKey::ShellVertex(2),
+            )),
+            SpanId::from_occurrence(&provenance_with(
+                1,
+                SourceVertexKey::ShellVertex(3),
+                SourceVertexKey::ShellVertex(4),
+            )),
+            0,
+        ))
+    }
+
+    #[test]
+    fn rank1_gauge_signature_is_invariant_under_translation_and_permutation() {
+        let context = rank1_context();
+        let identity = isolated_root_identity();
+        let first = CanonicalBranchSide::First;
+        // [3,5,8] -> [0,2,5] anchored at the canonical minimum (span 0).
+        let base = synthetic_event(
+            identity.clone(),
+            context,
+            vec![
+                synthetic_branch(0, (0.1, 0.2), first, placement_label(context, 3, 0)),
+                synthetic_branch(1, (0.5, 0.6), first, placement_label(context, 5, 0)),
+                synthetic_branch(2, (0.8, 0.9), first, placement_label(context, 8, 0)),
+            ],
+        );
+        // [-7,-5,-2] is [3,5,8] translated by -10: same quotient event.
+        let translated = synthetic_event(
+            identity.clone(),
+            context,
+            vec![
+                synthetic_branch(0, (0.1, 0.2), first, placement_label(context, -7, 0)),
+                synthetic_branch(1, (0.5, 0.6), first, placement_label(context, -5, 0)),
+                synthetic_branch(2, (0.8, 0.9), first, placement_label(context, -2, 0)),
+            ],
+        );
+        // Insertion order is irrelevant: the anchor and order are canonical.
+        let permuted = synthetic_event(
+            identity.clone(),
+            context,
+            vec![
+                synthetic_branch(2, (0.8, 0.9), first, placement_label(context, 8, 0)),
+                synthetic_branch(0, (0.1, 0.2), first, placement_label(context, 3, 0)),
+                synthetic_branch(1, (0.5, 0.6), first, placement_label(context, 5, 0)),
+            ],
+        );
+        let signature = base.deck_signature().unwrap();
+        assert_eq!(signature, translated.deck_signature().unwrap());
+        assert_eq!(signature, permuted.deck_signature().unwrap());
+        // Deterministic repetition: recomputing the same event yields the same
+        // signature.
+        assert_eq!(signature, base.deck_signature().unwrap());
+        assert_eq!(
+            signature.relative(),
+            &[DeckLabel::rank1(0), DeckLabel::rank1(2), DeckLabel::rank1(5)]
+        );
+    }
+
+    #[test]
+    fn rank2_gauge_signature_is_invariant_under_translation() {
+        let context = rank2_context();
+        let identity = isolated_root_identity();
+        let first = CanonicalBranchSide::First;
+        // [(2,-1),(5,4)] -> [(0,0),(3,5)].
+        let a = synthetic_event(
+            identity.clone(),
+            context,
+            vec![
+                synthetic_branch(0, (0.1, 0.2), first, placement_label(context, 2, -1)),
+                synthetic_branch(1, (0.5, 0.6), first, placement_label(context, 5, 4)),
+            ],
+        );
+        // [(12,9),(15,14)] is [(2,-1),(5,4)] translated by (10,10).
+        let b = synthetic_event(
+            identity.clone(),
+            context,
+            vec![
+                synthetic_branch(0, (0.1, 0.2), first, placement_label(context, 12, 9)),
+                synthetic_branch(1, (0.5, 0.6), first, placement_label(context, 15, 14)),
+            ],
+        );
+        let signature = a.deck_signature().unwrap();
+        assert_eq!(signature, b.deck_signature().unwrap());
+        assert_eq!(
+            signature.relative(),
+            &[DeckLabel::rank2(0, 0), DeckLabel::rank2(3, 5)]
+        );
+    }
+
+    #[test]
+    fn operand_swap_leaves_the_signature_unchanged() {
+        let context = rank1_context();
+        let identity = isolated_root_identity();
+        // Canonical sides are derived from the sorted span pair, so reversing
+        // the branch list still normalizes to the same anchor and order.
+        let ab = synthetic_event(
+            identity.clone(),
+            context,
+            vec![
+                synthetic_branch(
+                    0,
+                    (0.1, 0.2),
+                    CanonicalBranchSide::First,
+                    placement_label(context, 4, 0),
+                ),
+                synthetic_branch(
+                    1,
+                    (0.5, 0.6),
+                    CanonicalBranchSide::Second,
+                    placement_label(context, 7, 0),
+                ),
+            ],
+        );
+        let ba = synthetic_event(
+            identity.clone(),
+            context,
+            vec![
+                synthetic_branch(
+                    1,
+                    (0.5, 0.6),
+                    CanonicalBranchSide::Second,
+                    placement_label(context, 7, 0),
+                ),
+                synthetic_branch(
+                    0,
+                    (0.1, 0.2),
+                    CanonicalBranchSide::First,
+                    placement_label(context, 4, 0),
+                ),
+            ],
+        );
+        assert_eq!(ab.deck_signature().unwrap(), ba.deck_signature().unwrap());
+        assert_eq!(
+            ab.pair_contact_lift_key().unwrap(),
+            ba.pair_contact_lift_key().unwrap()
+        );
+    }
+
+    #[test]
+    fn source_traversal_reversal_does_not_change_lift_identity() {
+        let context = rank1_context();
+        let identity = isolated_root_identity();
+        let normal = synthetic_event(
+            identity.clone(),
+            context,
+            vec![
+                synthetic_branch(
+                    0,
+                    (0.1, 0.2),
+                    CanonicalBranchSide::First,
+                    placement_label(context, 3, 0),
+                ),
+                synthetic_branch(
+                    1,
+                    (0.5, 0.6),
+                    CanonicalBranchSide::Second,
+                    placement_label(context, 9, 0),
+                ),
+            ],
+        );
+        // Reversal changes traversal roles and parameter orientation, not the
+        // physical lift: same span occurrences, same canonical sides, same
+        // labels, reversed parameter enclosures.
+        let reversed = synthetic_event(
+            identity.clone(),
+            context,
+            vec![
+                synthetic_branch_reversed(
+                    0,
+                    (0.8, 0.9),
+                    CanonicalBranchSide::First,
+                    placement_label(context, 3, 0),
+                ),
+                synthetic_branch_reversed(
+                    1,
+                    (0.4, 0.5),
+                    CanonicalBranchSide::Second,
+                    placement_label(context, 9, 0),
+                ),
+            ],
+        );
+        assert_eq!(
+            normal.deck_signature().unwrap(),
+            reversed.deck_signature().unwrap()
+        );
+    }
+
+    #[test]
+    fn subdivision_inherits_the_parent_lift_context() {
+        let context = rank1_context();
+        let identity = isolated_root_identity();
+        let parent = synthetic_event(
+            identity.clone(),
+            context,
+            vec![
+                synthetic_branch(
+                    0,
+                    (0.1, 0.2),
+                    CanonicalBranchSide::First,
+                    placement_label(context, 3, 0),
+                ),
+                synthetic_branch(
+                    1,
+                    (0.5, 0.6),
+                    CanonicalBranchSide::Second,
+                    placement_label(context, 9, 0),
+                ),
+            ],
+        );
+        // A derived (subdivided) piece inherits its parent occurrence's span
+        // identity, canonical side and deck label, with a narrower certified
+        // parameter enclosure. No fresh label is minted by observing
+        // coordinates, and the narrower enclosure does not move the anchor.
+        let derived = synthetic_event(
+            identity.clone(),
+            context,
+            vec![
+                synthetic_branch(
+                    0,
+                    (0.15, 0.18),
+                    CanonicalBranchSide::First,
+                    placement_label(context, 3, 0).inherited(),
+                ),
+                synthetic_branch(
+                    1,
+                    (0.55, 0.56),
+                    CanonicalBranchSide::Second,
+                    placement_label(context, 9, 0).inherited(),
+                ),
+            ],
+        );
+        assert_eq!(
+            parent.deck_signature().unwrap(),
+            derived.deck_signature().unwrap()
+        );
+    }
+
+    #[test]
+    fn rank_mismatch_fails_clearly() {
+        let identity = isolated_root_identity();
+        // A rank-2 label in a rank-1 event: typed RankMismatch, never a silent
+        // truncation to (1,0).
+        let bad = synthetic_event(
+            identity.clone(),
+            rank1_context(),
+            vec![
+                synthetic_branch(
+                    0,
+                    (0.1, 0.2),
+                    CanonicalBranchSide::First,
+                    placement_label(rank2_context(), 1, 1),
+                ),
+                synthetic_branch(
+                    1,
+                    (0.5, 0.6),
+                    CanonicalBranchSide::Second,
+                    placement_label(rank1_context(), 4, 0),
+                ),
+            ],
+        );
+        assert!(matches!(
+            bad.deck_signature(),
+            Err(DeckLabelError::RankMismatch { .. })
+        ));
+        // A rank-1 label in a rank-2 event: typed RankMismatch.
+        let bad2 = synthetic_event(
+            identity.clone(),
+            rank2_context(),
+            vec![synthetic_branch(
+                0,
+                (0.1, 0.2),
+                CanonicalBranchSide::First,
+                placement_label(rank1_context(), 1, 0),
+            )],
+        );
+        assert!(matches!(
+            bad2.deck_signature(),
+            Err(DeckLabelError::RankMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn lattice_mismatch_fails_clearly() {
+        let identity = isolated_root_identity();
+        // Two different rank-1 lattices: same rank, different generators. A
+        // label bound to the wrong lattice is a typed LatticeMismatch, never a
+        // reinterpretation across generators or orientation conventions.
+        let context_a = rank1_context();
+        let context_b = DeckContext::from_lattice_id(AmbientLatticeId::Rank1 {
+            periodic_axis: ParameterAxis::V,
+            signed_period_bits: 3.14_f64.to_bits(),
+        });
+        let bad = synthetic_event(
+            identity.clone(),
+            context_a,
+            vec![
+                synthetic_branch(
+                    0,
+                    (0.1, 0.2),
+                    CanonicalBranchSide::First,
+                    placement_label(context_a, 0, 0),
+                ),
+                synthetic_branch(
+                    1,
+                    (0.5, 0.6),
+                    CanonicalBranchSide::Second,
+                    placement_label(context_b, 1, 0),
+                ),
+            ],
+        );
+        assert!(matches!(
+            bad.deck_signature(),
+            Err(DeckLabelError::LatticeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn rank0_signature_is_trivial_zero() {
+        let context = DeckContext::rank0();
+        let identity = isolated_root_identity();
+        let event = synthetic_event(
+            identity,
+            context,
+            vec![
+                synthetic_branch(
+                    0,
+                    (0.1, 0.2),
+                    CanonicalBranchSide::First,
+                    CertifiedDeckLabel::zero(context),
+                ),
+                synthetic_branch(
+                    1,
+                    (0.5, 0.6),
+                    CanonicalBranchSide::Second,
+                    CertifiedDeckLabel::zero(context),
+                ),
+            ],
+        );
+        let signature = event.deck_signature().unwrap();
+        assert_eq!(signature.rank(), DeckRank::Rank0);
+        assert!(signature.relative().iter().all(|label| label.is_zero()));
+    }
+
+    #[test]
+    fn pair_contact_key_is_relative_not_absolute() {
+        let context = rank1_context();
+        let identity = isolated_root_identity();
+        // Same identity, same relative signature, different absolute labels:
+        // the same quotient event.
+        let ev_a = synthetic_event(
+            identity.clone(),
+            context,
+            vec![
+                synthetic_branch(
+                    0,
+                    (0.1, 0.2),
+                    CanonicalBranchSide::First,
+                    placement_label(context, 5, 0),
+                ),
+                synthetic_branch(
+                    1,
+                    (0.5, 0.6),
+                    CanonicalBranchSide::Second,
+                    placement_label(context, 8, 0),
+                ),
+            ],
+        );
+        let ev_b = synthetic_event(
+            identity.clone(),
+            context,
+            vec![
+                synthetic_branch(
+                    0,
+                    (0.1, 0.2),
+                    CanonicalBranchSide::First,
+                    placement_label(context, 2, 0),
+                ),
+                synthetic_branch(
+                    1,
+                    (0.5, 0.6),
+                    CanonicalBranchSide::Second,
+                    placement_label(context, 5, 0),
+                ),
+            ],
+        );
+        assert_eq!(
+            ev_a.pair_contact_lift_key().unwrap(),
+            ev_b.pair_contact_lift_key().unwrap()
+        );
+        // A genuinely different relative signature stays distinct even when the
+        // representative coordinates coincide.
+        let ev_c = synthetic_event(
+            identity.clone(),
+            context,
+            vec![
+                synthetic_branch(
+                    0,
+                    (0.1, 0.2),
+                    CanonicalBranchSide::First,
+                    placement_label(context, 5, 0),
+                ),
+                synthetic_branch(
+                    1,
+                    (0.5, 0.6),
+                    CanonicalBranchSide::Second,
+                    placement_label(context, 9, 0),
+                ),
+            ],
+        );
+        assert_ne!(
+            ev_a.pair_contact_lift_key().unwrap(),
+            ev_c.pair_contact_lift_key().unwrap()
+        );
+    }
+
+    #[test]
+    fn rank1_label_path_carries_the_label_end_to_end() {
+        let context = rank1_context();
+        let identity = isolated_root_identity();
+        let mut event = synthetic_event(
+            identity,
+            context,
+            vec![
+                synthetic_branch(
+                    0,
+                    (0.1, 0.2),
+                    CanonicalBranchSide::First,
+                    CertifiedDeckLabel::zero(context),
+                ),
+                synthetic_branch(
+                    1,
+                    (0.5, 0.6),
+                    CanonicalBranchSide::Second,
+                    CertifiedDeckLabel::zero(context),
+                ),
+            ],
+        );
+        let generator =
+            DeckGenerator::new(DevelopedAxis::First, FiniteF64::new(std::f64::consts::TAU).unwrap())
+                .unwrap();
+        // One full period: the certified solver says k = 1, the adapter turns it
+        // into one lattice-bound rank-1 label, and the label is attached to
+        // branch 1.
+        let one_period = DevelopedBox {
+            first: DeckInterval::from_f64(std::f64::consts::TAU, std::f64::consts::TAU).unwrap(),
+            second: DeckInterval::from_f64(0.0, 0.0).unwrap(),
+        };
+        let placement = adapt_axis_aligned_placement(context, solve_axis_aligned(&generator, &one_period));
+        label_branch_from_placement(&mut event, 1, placement).unwrap();
+        assert_eq!(event.branches[1].deck.get(), DeckLabel::rank1(1));
+        assert_eq!(
+            event.deck_signature().unwrap().relative(),
+            &[DeckLabel::rank1(0), DeckLabel::rank1(1)]
+        );
+        // A broad enclosure gives several compatible integers: the attachment is
+        // a typed NonUniquePlacement(Ambiguous) and the branch label is left
+        // untouched — no near-integer rounding and no arbitrary pick.
+        let broad = DevelopedBox {
+            first: DeckInterval::from_f64(0.0, 3.0 * std::f64::consts::TAU).unwrap(),
+            second: DeckInterval::from_f64(0.0, 0.0).unwrap(),
+        };
+        let placement = adapt_axis_aligned_placement(context, solve_axis_aligned(&generator, &broad));
+        assert!(matches!(
+            label_branch_from_placement(&mut event, 1, placement),
+            Err(DeckLabelError::NonUniquePlacement(DeckPlacementResult::Ambiguous))
+        ));
+        assert_eq!(event.branches[1].deck.get(), DeckLabel::rank1(1));
+    }
+
+    #[test]
+    fn label_branch_from_placement_rejects_an_out_of_range_index() {
+        let context = rank1_context();
+        let identity = isolated_root_identity();
+        let mut event = synthetic_event(
+            identity,
+            context,
+            vec![synthetic_branch(
+                0,
+                (0.1, 0.2),
+                CanonicalBranchSide::First,
+                CertifiedDeckLabel::zero(context),
+            )],
+        );
+        let placement = adapt_axis_aligned_placement(context, Ok(super::super::deck::DeckSolveResult::Unique(1)));
+        assert!(matches!(
+            label_branch_from_placement(&mut event, 7, placement),
+            Err(DeckLabelError::NoSuchBranch { index: 7 })
+        ));
+    }
+
+    #[test]
+    fn rank2_geometric_placement_is_typed_unsupported_end_to_end() {
+        let context = rank2_context();
+        let identity = isolated_root_identity();
+        let mut event = synthetic_event(
+            identity,
+            context,
+            vec![
+                synthetic_branch(
+                    0,
+                    (0.1, 0.2),
+                    CanonicalBranchSide::First,
+                    CertifiedDeckLabel::zero(context),
+                ),
+                synthetic_branch(
+                    1,
+                    (0.5, 0.6),
+                    CanonicalBranchSide::Second,
+                    CertifiedDeckLabel::zero(context),
+                ),
+            ],
+        );
+        // There is no certified rank-2 placement solver yet: the adapter returns
+        // typed Unsupported, and label attachment propagates it without
+        // guessing a closest-vector answer.
+        let placement = certify_rank2_placement();
+        assert!(matches!(
+            label_branch_from_placement(&mut event, 1, placement),
+            Err(DeckLabelError::NonUniquePlacement(
+                DeckPlacementResult::Unsupported(_)
+            ))
+        ));
+        assert!(event.branches[1].deck.is_zero());
     }
 }
