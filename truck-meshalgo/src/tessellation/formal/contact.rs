@@ -126,20 +126,25 @@ pub enum EventIdentity {
         /// The split's critical index.
         critical_index: i64,
     },
-    /// One isolated certified root box of a curve pair.
+    /// One isolated certified root of a curve pair.
     ///
-    /// The two edge uses are stored in canonical order (`first <= second` by
-    /// `EdgeUseId`), so the identity is invariant under which curve is passed
-    /// first to the intersection.
+    /// **Provisional identity (GEN-001A), closed in GEN-001C.** Canonicalizing
+    /// the two edge uses does *not* make this identity stable for multi-root
+    /// pairs: `index` is a per-curve traversal order that can change under
+    /// operand swap or traversal reversal. This is acceptable only because
+    /// nothing consumes `EventIdentity` for scheduling or deduplication yet
+    /// (ARR-003 is unopened). Before ARR-003, GEN-001C replaces `index` with
+    /// canonical certified construction data — the two span identities paired
+    /// with their certified parameter boxes, sorted canonically — so each
+    /// geometric root keeps one identity regardless of operand order or
+    /// traversal direction.
     IsolatedRootBox {
         /// The canonically-smaller participating edge use.
         first: EdgeUseId,
         /// The canonically-larger participating edge use.
         second: EdgeUseId,
-        /// Which root (0-based) of the pair. For a single crossing this is
-        /// order-invariant; for a multi-root pair the per-curve index may differ
-        /// by argument order — a residual resolved when roots are keyed by
-        /// certified boxes (GEN-001C / ARR-003).
+        /// Per-curve root index. PROVISIONAL: not invariant under operand swap
+        /// for multi-root pairs; replaced by certified parameter boxes in C.
         index: usize,
     },
     /// A merged high-multiplicity event (≥3 branches), keyed by a stable
@@ -598,9 +603,12 @@ mod tests {
     }
 
     #[test]
-    fn identity_invariant_under_curve_order_swap() {
-        // Lifting (a,b) and (b,a) yields the same event identity: the root box
-        // is unordered in its two edge uses' identity contribution.
+    fn identity_invariant_under_curve_order_swap_single_root() {
+        // SINGLE-ROOT pair only. Canonicalizing the two edge uses makes the
+        // identity invariant here because index 0 is the only root either way.
+        // A two-root operand-swap test -- proving each geometric root keeps its
+        // identity -- is added in GEN-001C, once identities are keyed by
+        // certified parameter boxes rather than a per-curve index.
         let a = line_span_and_piece(
             Point2::new(0.0, 0.5),
             Point2::new(1.0, 0.5),
@@ -629,8 +637,8 @@ mod tests {
             ContactComponent2::IsolatedEvent(e) => e.identity.clone(),
             _ => unreachable!(),
         };
-        // The two edge uses appear symmetrically, so the identities are equal
-        // regardless of argument order.
-        assert_eq!(id_ab, id_ba, "event identity is invariant under swap");
+        // Single crossing: index 0 either way, so the identities are equal.
+        // (Multi-root invariance is the GEN-001C test.)
+        assert_eq!(id_ab, id_ba, "single-root event identity is invariant under swap");
     }
 }
