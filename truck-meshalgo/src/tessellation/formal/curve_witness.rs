@@ -41,6 +41,7 @@
 
 use super::cylinder::CylinderSchema;
 use super::numeric::FiniteF64;
+use super::planar_slice::SliceCategory;
 use std::f64::consts::TAU;
 use truck_geometry::prelude::{InnerSpace, Point2, Point3};
 
@@ -91,6 +92,26 @@ pub enum WitnessFailure {
 }
 
 impl WitnessFailure {
+    /// Which semantic category this failure belongs to, in the taxonomy
+    /// `FORMAL_SYSTEM.md` Definition 3 already fixes for the planar slice.
+    ///
+    /// A curve whose endpoints do not lie on the certified cylinder, or whose
+    /// declared sweep does not reach its declared endpoint, is a proved
+    /// contradiction in the source evidence; a degenerate or zero-length
+    /// candidate is proved outside the admitted subset; a non-finite input
+    /// coordinate is a statement about the machine.
+    pub fn category(self) -> SliceCategory {
+        match self {
+            Self::NonFiniteInput => SliceCategory::OperationalFailure,
+            Self::StartNotOnCylinder
+            | Self::EndNotOnCylinder
+            | Self::NotParallelToAxis
+            | Self::NotConstantAxialCoordinate
+            | Self::SweepDoesNotReachDeclaredEndpoint => SliceCategory::Inconsistent,
+            Self::DegenerateAxialSegment | Self::ZeroSweep => SliceCategory::Unsupported,
+        }
+    }
+
     /// A short stable tag, for probe records.
     pub fn tag(self) -> &'static str {
         match self {
@@ -196,10 +217,16 @@ pub fn axial_line_witness(
         return Err(WitnessFailure::NotParallelToAxis);
     }
 
+    // Each endpoint reports *its own* directly-computed angular coordinate,
+    // not one borrowed from the other end — verified equal within tolerance
+    // above, but reported this way so that an adjacent occurrence sharing
+    // this vertex, which computes the identical coordinate independently
+    // from the identical canonical position, gets a bit-exact match rather
+    // than one perturbed by this witness's internal rounding path.
     Ok(CurveOnCylinderWitness {
         class: WitnessClass::AxialLine,
         start: Point2::new(axial_start, theta_start),
-        end: Point2::new(axial_end, theta_start),
+        end: Point2::new(axial_end, theta_end),
     })
 }
 
@@ -257,10 +284,17 @@ pub fn circumferential_arc_witness(
         return Err(WitnessFailure::SweepDoesNotReachDeclaredEndpoint);
     }
 
+    // The axial coordinate is each endpoint's own directly-computed value —
+    // verified equal to the other end's within tolerance above, but reported
+    // this way so a join against an adjacent occurrence sharing this vertex
+    // matches bit-exactly. The angular coordinate cannot receive the same
+    // treatment: `theta_end_developed` is the unwrapped developed angle a
+    // seam-crossing arc needs, and `schema.angular_coordinate(end)` is the
+    // wrapped principal-branch value confirmed above, not a substitute for it.
     Ok(CurveOnCylinderWitness {
         class: WitnessClass::CircumferentialArc,
         start: Point2::new(axial_start, theta_start),
-        end: Point2::new(axial_start, theta_end_developed),
+        end: Point2::new(axial_end, theta_end_developed),
     })
 }
 

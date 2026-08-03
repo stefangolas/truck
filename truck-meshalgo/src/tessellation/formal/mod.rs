@@ -59,6 +59,7 @@
 pub mod ambient;
 pub mod cylinder;
 pub mod cylinder_face;
+pub mod cylinder_lift;
 pub mod curve_witness;
 pub mod deck;
 pub mod envelope;
@@ -94,6 +95,10 @@ pub use cylinder_face::{build_cylinder_face, CylinderFaceRecord};
 pub use curve_witness::{
     axial_line_witness, circumferential_arc_witness, CurveOnCylinderWitness, WitnessClass,
     WitnessFailure,
+};
+pub use cylinder_lift::{
+    develop_traversal, propagate_and_classify_holonomy, CylinderLiftExit,
+    DevelopedCylinderBoundary, WitnessSpec, ZeroHolonomyLift,
 };
 pub use deck::{
     deck_cover_interval, solve_axis_aligned, CertifiedDeckInterval, DeckBudget,
