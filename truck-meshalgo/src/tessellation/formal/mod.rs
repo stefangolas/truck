@@ -62,6 +62,7 @@ pub mod cylinder_arrangement;
 pub mod cylinder_cover;
 pub mod cylinder_face;
 pub mod cylinder_lift;
+pub mod cylinder_mesh;
 pub mod curve_witness;
 pub mod deck;
 pub mod envelope;
@@ -101,6 +102,9 @@ pub use cylinder_face::{build_cylinder_face, CylinderFaceRecord};
 pub use curve_witness::{
     axial_line_witness, circumferential_arc_witness, CurveOnCylinderWitness, WitnessClass,
     WitnessFailure,
+};
+pub use cylinder_mesh::{
+    certify_cylinder_mesh, certify_cylinder_polygon, lift_to_cylinder, CertifiedCylinderMesh,
 };
 pub use cylinder_lift::{
     develop_traversal, propagate_and_classify_holonomy, CylinderLiftExit,

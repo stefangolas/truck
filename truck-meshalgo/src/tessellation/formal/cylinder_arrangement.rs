@@ -124,7 +124,7 @@ pub struct CertifiedCylinderDisk {
 /// placeholder. `start_vertex`/`end_vertex` are not reused by
 /// [`jordan_arrangement_of`] or [`bounded_material_region`] and are recorded
 /// as [`SourceVertexKey::Absent`] rather than invented.
-fn placed_occurrences(
+pub(super) fn placed_occurrences(
     edge_uses: &[EdgeUseId],
     witnesses: &[CurveOnCylinderWitness],
     placements: &[i64],
