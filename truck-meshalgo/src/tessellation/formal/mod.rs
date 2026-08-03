@@ -67,6 +67,8 @@ pub mod curve2d;
 pub mod curve_witness;
 // GEN-001 generic arrangement substrate.
 pub mod bezier;
+
+pub mod bezier_isect;
 pub mod contact;
 pub mod quotient;
 pub mod span;
@@ -173,8 +175,10 @@ pub use intersection::{
 pub use contact::{
     lift_pair_result, ArcParticipant, BranchIncidence, CommonArc2, CommonArcEnd,
     CommonSupportBasis, ContactComponent2, CrossingClassification, EventIdentity,
-    GenericUnresolved, IsolatedEvent2, OrientationAlongSupport, PairContactResult,
+    GenericUnresolved, IsolatedEvent2, IsolatedRootKey, IsolatedRootParticipant,
+    OrientationAlongSupport, PairContactResult,
 };
 pub use quotient::{DeckLabel, DeckRank};
 pub use bezier::{BezierSpanError, RationalBezierSpan2};
+pub use bezier_isect::intersect_bezier_pair;
 pub use span::{BranchGerm, CurveSpan2, FastPath, SpanId};

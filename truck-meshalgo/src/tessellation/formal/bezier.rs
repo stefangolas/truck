@@ -215,6 +215,29 @@ impl RationalBezierSpan2 {
         }
     }
 
+    /// The same occurrence traversed the other way: control coefficients
+    /// reversed, the ordered domain inverted, and the traversal provenance
+    /// reversed.
+    ///
+    /// Mirrors [`super::curve2d::LineSegment2::reverse_occurrence`] and
+    /// [`super::curve2d::DirectedCircularArc2::reverse_occurrence`]. Because
+    /// [`super::curve2d::CurveOccurrenceProvenance::reversed`] preserves the
+    /// edge-use and source-edge ids, the derived span identity is unchanged:
+    /// reparameterizing the same occurrence keeps the event identity and
+    /// reverses only the branch-incidence orientation. A different twin edge
+    /// use is a distinct B-rep incidence with a distinct span id and is never
+    /// conflated here.
+    pub(crate) fn reverse_occurrence(&self) -> Self {
+        let mut control = self.control.clone();
+        control.reverse();
+        Self {
+            control,
+            degree: self.degree,
+            domain: (self.domain.1, self.domain.0),
+            provenance: self.provenance.reversed(),
+        }
+    }
+
     /// de Casteljau subdivision at `u in (0, 1)` into the left span over
     /// `[0, u]` and the right span over `[u, 1]`.
     ///
@@ -541,6 +564,31 @@ mod tests {
             .unwrap_err(),
             BezierSpanError::DegenerateDomain
         );
+    }
+
+    #[test]
+    fn reverse_occurrence_keeps_geometry_and_identity() {
+        let span = parabola();
+        let rev = span.reverse_occurrence();
+        assert_eq!(rev.domain(), (1.0, 0.0));
+        assert!(rev.w_positive_on_unit());
+        // Reversing twice restores the original coefficients and domain.
+        let back = rev.reverse_occurrence();
+        assert_eq!(back.domain(), span.domain());
+        assert_eq!(back.coeffs_x(), span.coeffs_x());
+        assert_eq!(back.coeffs_y(), span.coeffs_y());
+        // The geometry is unchanged: the reversed span at local u = 0 is the
+        // original at local u = 1.
+        let [lx, ly] = rev.evaluate_enclosure(0.0).unwrap();
+        assert!(encloses(&lx, 1.0) && encloses(&ly, 1.0));
+        let [rx, ry] = rev.evaluate_enclosure(1.0).unwrap();
+        assert!(encloses(&rx, 0.0) && encloses(&ry, 0.0));
+        // Reparameterization reversal preserves the occurrence identity: the
+        // provenance reversal swaps only the traversal vertices.
+        let span_id = super::super::span::SpanId::from_occurrence(&span.provenance);
+        let rev_id = super::super::span::SpanId::from_occurrence(&rev.provenance);
+        assert_eq!(span_id, rev_id);
+        assert_eq!(rev.provenance.start_vertex_id, span.provenance.end_vertex_id);
     }
 
     #[test]
