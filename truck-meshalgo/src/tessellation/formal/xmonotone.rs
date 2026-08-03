@@ -335,7 +335,7 @@ impl XMonotonePiece2 {
     }
 
     /// The piece's parameter interval.
-    pub fn parameter_interval(&self) -> ClosedInterval {
+    pub fn parameter_hint_interval(&self) -> ClosedInterval {
         self.identity().parameter_hint_interval
     }
 
@@ -971,7 +971,7 @@ mod tests {
     fn assert_exact_concatenation(pieces: &[XMonotonePiece2], t0: f64, t1: f64) {
         let mut prev = t0;
         for (index, piece) in pieces.iter().enumerate() {
-            let interval = piece.parameter_interval();
+            let interval = piece.parameter_hint_interval();
             assert_eq!(
                 interval.t0, prev,
                 "piece {index} must start where the previous piece ended"

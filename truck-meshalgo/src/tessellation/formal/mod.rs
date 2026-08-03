@@ -65,8 +65,10 @@ pub mod cylinder_lift;
 pub mod cylinder_mesh;
 pub mod curve2d;
 pub mod curve_witness;
+pub mod intersection;
 pub mod deck;
 pub mod envelope;
+pub mod exact;
 pub mod evidence;
 pub mod numeric;
 pub mod outcome;
@@ -156,4 +158,10 @@ pub use xmonotone::{
     make_x_monotone, ClosedInterval, CriticalIdentity, DecompositionKind, MonotoneDecompositionFailure,
     MonotoneKind, NumericalPolicy, PieceIdentity, XMonotoneCircularArc2, XMonotoneLine2,
     XMonotonePiece2,
+};
+pub use exact::{cross_exp, exact_dot2, CertifiedInterval, CertifiedSign, Expansion};
+pub use intersection::{
+    intersect_x_monotone, CertifiedIntersection2, ContactKind, IntersectionIdentity,
+    IntersectionPolicy, LocationOnPiece, NumericalCause, PairIntersectionResult, PairUnresolved,
+    PairUnsupported, ParameterEnclosure, ParameterLocation,
 };
