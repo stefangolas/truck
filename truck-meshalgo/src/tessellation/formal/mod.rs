@@ -58,6 +58,7 @@
 
 pub mod ambient;
 pub mod cylinder;
+pub mod cylinder_arrangement;
 pub mod cylinder_cover;
 pub mod cylinder_face;
 pub mod cylinder_lift;
@@ -91,6 +92,9 @@ pub use cylinder::{
     identify_cylinder, CertifiedEmbeddedCylinder, CylinderIdentification,
     CylinderIdentificationFailure, CylinderSchema, CylinderValidityCertificate, PeriodicParameter,
     MINIMUM_CYLINDER_LINE_AXIS_PARALLELISM,
+};
+pub use cylinder_arrangement::{
+    certify_cylinder_disk, CertifiedCylinderDisk, CylinderArrangementExit,
 };
 pub use cylinder_cover::{build_working_cover, CylinderCoverExit, WorkingCoverResult};
 pub use cylinder_face::{build_cylinder_face, CylinderFaceRecord};

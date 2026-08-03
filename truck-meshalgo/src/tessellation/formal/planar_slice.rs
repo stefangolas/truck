@@ -549,6 +549,12 @@ pub enum CertificateRoute {
     /// representation. Every source segment maps to exactly one 2D segment and
     /// the represented approximation error is zero.
     AnalyticAffineProjectionOfPolygonalCurve,
+    /// The rank-1 cylinder analog: an axial-line or circumferential-arc
+    /// witness developed via the certified cylinder schema
+    /// ([`super::curve_witness`]). Linear in the developed `(axial, angular)`
+    /// chart by construction, so — as with Route B — the represented
+    /// approximation error is zero.
+    AnalyticCylinderDevelopment,
 }
 
 impl CertificateRoute {
@@ -556,6 +562,7 @@ impl CertificateRoute {
     pub fn tag(self) -> &'static str {
         match self {
             Self::AnalyticAffineProjectionOfPolygonalCurve => "analytic_affine_polygonal",
+            Self::AnalyticCylinderDevelopment => "analytic_cylinder_development",
         }
     }
 }
