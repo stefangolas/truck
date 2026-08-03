@@ -65,6 +65,10 @@ pub mod cylinder_lift;
 pub mod cylinder_mesh;
 pub mod curve2d;
 pub mod curve_witness;
+// GEN-001 generic arrangement substrate.
+pub mod contact;
+pub mod quotient;
+pub mod span;
 pub mod intersection;
 pub mod deck;
 pub mod envelope;
@@ -165,3 +169,10 @@ pub use intersection::{
     IntersectionPolicy, LocationOnPiece, NumericalCause, PairIntersectionResult, PairUnresolved,
     PairUnsupported, ParameterEnclosure, ParameterLocation,
 };
+pub use contact::{
+    lift_pair_result, ArcParticipant, BranchIncidence, CommonArc2, CommonArcEnd,
+    CommonSupportBasis, ContactComponent2, CrossingClassification, EventIdentity,
+    GenericUnresolved, IsolatedEvent2, OrientationAlongSupport, PairContactResult,
+};
+pub use quotient::{DeckLabel, DeckRank};
+pub use span::{BranchGerm, CurveSpan2, FastPath, RationalBezierSpan2, SpanId};
