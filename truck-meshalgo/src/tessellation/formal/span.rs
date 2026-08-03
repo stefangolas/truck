@@ -22,6 +22,7 @@
 //! appear only as representative evaluation hints; identity is the span id and
 //! source occurrence, never a point.
 
+use super::bezier::RationalBezierSpan2;
 use super::curve2d::{CurveOccurrenceProvenance, DirectedCircularArc2, LineSegment2, SourceEdgeId};
 use super::super::source_evidence::EdgeUseId;
 
@@ -115,31 +116,11 @@ impl BranchGerm {
     }
 }
 
-/// A homogeneous rational Bézier span `C(t) = [X(t) : Y(t) : W(t)]` in the
-/// Bernstein basis over an authoritative finite parameter interval.
+/// The rational-Bézier span type and its certified substrate live in
+/// [`super::bezier`] (GEN-001B); the type is re-used here as the third
+/// [`CurveSpan2`] variant. Its Bernstein fields are `pub(crate)`, so the solver
+/// strategy never reaches the arrangement interface.
 ///
-/// **GEN-001B populates this type** with certified evaluation enclosure, de
-/// Casteljau subdivision, convex-hull/AABB enclosure, the derivative numerators
-/// `X'W - XW'`, `Y'W - YW'`, and the certified proof that the weight `W` does
-/// not vanish on the active span. It is declared in GEN-001A only so that
-/// [`CurveSpan2`]'s variant set is frozen before any code depends on it.
-///
-/// The Bernstein representation is an implementation detail of this variant:
-/// every field is `pub(crate)`, so the arrangement interface — which consumes
-/// [`CurveSpan2`]'s methods and the contact records, never this struct's fields
-/// — never learns the solver strategy.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct RationalBezierSpan2 {
-    /// Homogeneous Bernstein control points `(X_i, Y_i, W_i)`. GEN-001B
-    /// certifies `W` does not vanish on the span.
-    pub(crate) control: Vec<(f64, f64, f64)>,
-    /// The authoritative source parameter domain, in source traversal order.
-    pub(crate) domain: (f64, f64),
-    /// The source occurrence this span represents.
-    pub(crate) provenance: CurveOccurrenceProvenance,
-}
-
 /// A developed curve-span family instance, in the plane's native chart.
 ///
 /// The family-independent surface the generic arrangement consumes. Each variant

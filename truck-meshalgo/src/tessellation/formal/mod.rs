@@ -66,6 +66,7 @@ pub mod cylinder_mesh;
 pub mod curve2d;
 pub mod curve_witness;
 // GEN-001 generic arrangement substrate.
+pub mod bezier;
 pub mod contact;
 pub mod quotient;
 pub mod span;
@@ -175,4 +176,5 @@ pub use contact::{
     GenericUnresolved, IsolatedEvent2, OrientationAlongSupport, PairContactResult,
 };
 pub use quotient::{DeckLabel, DeckRank};
-pub use span::{BranchGerm, CurveSpan2, FastPath, RationalBezierSpan2, SpanId};
+pub use bezier::{BezierSpanError, RationalBezierSpan2};
+pub use span::{BranchGerm, CurveSpan2, FastPath, SpanId};
