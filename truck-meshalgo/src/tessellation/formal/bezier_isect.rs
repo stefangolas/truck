@@ -388,7 +388,7 @@ fn range_excludes_zero(r: &CertifiedInterval) -> bool {
 /// directly. The fields beyond `image`/`domain` are retained validation
 /// evidence (the operator inputs and enclosure) per the certificate contract;
 /// they are read by tests and by ARR-003's diagnostics.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[allow(dead_code)] // evidence-retention fields are read by tests and ARR-003
 pub(crate) struct KrawczykCertificate {
     /// The box the certificate applies to (canonical-local `[0, 1]²`).
@@ -592,7 +592,7 @@ fn classify(sys: &System, b: &ParamBox) -> NodeClass {
 
 /// A certified isolated root of the pair: the grid cell it was certified in,
 /// the tighter Krawczyk image, and the certificate itself.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct RootRecord {
     leaf: ParamBox,
     image: ParamBox,
@@ -777,50 +777,33 @@ fn classify_region(hull: &ParamBox) -> GenericUnresolved {
 /// numbered as ordinary events. Because separation is decided on a single
 /// fixed scalar coordinate, a separated relation is automatically a total
 /// order and the same identity is stable under later refinement.
-/// Order the certified roots canonically and assign the pair-local ordinals.
-///
-/// The operands have already been canonicalized into sorted order, so the
-/// canonically-smaller span occupies the `s` axis and canonical-local `s`
-/// order agrees with authoritative source order on that span. Roots are
-/// ordered **only** by their certified canonical-local `s` isolators. For every
-/// distinct pair, the isolators must be disjoint and ordered:
-///
-/// ```text
-/// a.s_hi < b.s_lo  =>  a before b
-/// b.s_hi < a.s_lo  =>  b before a
-/// otherwise         =>  overlap
-/// ```
-///
-/// Overlap of the `s` isolators does **not** certify equality of the `s`
-/// parameters — it only means the order is currently unknown — so there is no
-/// fallback to the `t` coordinate. The two roots' isolators are first refined
-/// (bounded Krawczyk iteration) to tighten them; if a pair still overlaps after
-/// the refinement budget, the pair is typed
-/// [`GenericUnresolved::UnresolvedIdentityOrdering`]: two distinct parameter
-/// roots that cannot be separated on the canonical first span may represent a
-/// self-intersection, a repeated geometric event, or a multi-branch situation
-/// that requires later event aggregation, and must not be independently
-/// numbered as ordinary events. Because separation is decided on a single
-/// fixed scalar coordinate, a separated relation is automatically a total
-/// order and the same identity is stable under later refinement.
 ///
 /// The operation is **transactional**: refinement, separation checks, sorting,
 /// and ordinal assignment happen on a working copy, and the input records are
 /// replaced only on success. A failure leaves the caller's records and their
-/// certificates untouched.
-fn assign_ordinals(roots: &mut Vec<RootRecord>, sys: &System) -> Result<(), GenericUnresolved> {
-    let mut work: Vec<RootRecord> = roots.iter().map(|r| refine_record(sys, r)).collect();
-    let n = work.len();
-    for i in 0..n {
-        for j in (i + 1)..n {
-            certified_primary_cmp(&work[i], &work[j])?;
+/// certificates untouched. Sorting by `s_lo` here only realizes an order
+/// already certified by the pairwise disjointness checks; it is not the proof
+/// of that order.
+fn assign_ordinals(roots: &mut [RootRecord], sys: &System) -> Result<(), GenericUnresolved> {
+    let mut candidate = roots.to_vec();
+    for root in &mut candidate {
+        refine_record(sys, root);
+    }
+    for i in 0..candidate.len() {
+        for j in (i + 1)..candidate.len() {
+            certified_primary_cmp(&candidate[i], &candidate[j])?;
         }
     }
-    work.sort_by(|a, b| certified_primary_cmp(a, b).expect("separation verified above"));
-    for (i, r) in work.iter_mut().enumerate() {
-        r.ordinal = i as u32;
+    candidate.sort_by(|a, b| a.image.s_lo.total_cmp(&b.image.s_lo));
+    for pair in candidate.windows(2) {
+        if certified_primary_cmp(&pair[0], &pair[1])? != std::cmp::Ordering::Less {
+            return Err(GenericUnresolved::UnresolvedIdentityOrdering);
+        }
     }
-    *roots = work;
+    for (ordinal, root) in candidate.iter_mut().enumerate() {
+        root.ordinal = ordinal as u32;
+    }
+    roots.clone_from_slice(&candidate);
     Ok(())
 }
 
@@ -828,7 +811,8 @@ fn assign_ordinals(roots: &mut Vec<RootRecord>, sys: &System) -> Result<(), Gene
 ///
 /// Reports `Less`/`Greater` only when the isolators are disjoint; any overlap
 /// (which certifies neither equality nor order) fails with
-/// [`GenericUnresolved::UnresolvedIdentityOrdering`].
+/// [`GenericUnresolved::UnresolvedIdentityOrdering`]. Distinct roots are never
+/// reported `Equal`.
 fn certified_primary_cmp(
     a: &RootRecord,
     b: &RootRecord,
@@ -846,46 +830,45 @@ fn certified_primary_cmp(
 /// stored certificate in lockstep with the stored isolator.
 ///
 /// Each successful certificate gives a box `K(X) ⊂ int(X)` still containing the
-/// root; the returned record carries that certificate, so the invariant "the
-/// stored certificate backs the stored isolator" is preserved at every step.
+/// root, and it is installed together with the tightened isolator, so the
+/// invariant "the stored certificate backs the stored isolator" is preserved at
+/// every step. Iteration continues while any boundary contracts: contraction in
+/// `t` can tighten the next Jacobian enclosure and permit a later `s`
+/// contraction even when an `s` boundary is pinned at the working precision.
 /// Refining before the ordinal separation check turns an isolator overlap that
 /// a wider box merely *could not decide* into a certified order, and leaves
 /// only genuine unresolved overlaps (identical or inseparable `s` parameters)
 /// to fail the ordering.
-fn refine_record(sys: &System, record: &RootRecord) -> RootRecord {
-    let mut current = record.clone();
+fn refine_record(sys: &System, record: &mut RootRecord) {
     for _ in 0..REFINE_BUDGET {
-        let Some(cert) = try_krawczyk(sys, &current.image) else {
+        let current = record.image;
+        let Some(cert) = try_krawczyk(sys, &current) else {
             break;
         };
         let next = cert.image;
         // A successful certificate proves next ⊂ int(current); defensively
-        // refuse to continue on a box that is not strictly contained.
-        let contained = next.s_lo > current.image.s_lo
-            && next.s_hi < current.image.s_hi
-            && next.t_lo > current.image.t_lo
-            && next.t_hi < current.image.t_hi;
+        // refuse to trust a next box that is not contained.
+        let contained = next.s_lo >= current.s_lo
+            && next.s_hi <= current.s_hi
+            && next.t_lo >= current.t_lo
+            && next.t_hi <= current.t_hi;
         if !contained {
             break;
         }
-        // Continue while any boundary contracts: contraction in t can enable a
-        // better subsequent s contraction even when an s boundary is pinned at
-        // the working precision.
-        let made_progress = next.s_lo > current.image.s_lo
-            || next.s_hi < current.image.s_hi
-            || next.t_lo > current.image.t_lo
-            || next.t_hi < current.image.t_hi;
+        let made_progress = next.s_lo > current.s_lo
+            || next.s_hi < current.s_hi
+            || next.t_lo > current.t_lo
+            || next.t_hi < current.t_hi;
         if !made_progress {
             break;
         }
-        current.image = next;
-        current.certificate = cert;
+        record.image = next;
+        record.certificate = cert;
     }
-    current
 }
 
 /// The bounded refinement budget for ordinal separation.
-const REFINE_BUDGET: u32 = 10;
+const REFINE_BUDGET: usize = 10;
 
 // ---------------------------------------------------------------------------
 // Germs and transverse orientation
@@ -1462,9 +1445,7 @@ mod tests {
         let parabola = parabola(0);
         let tangent = slanted_line(1.0, -0.25, 1);
         let PairSolveResult::Unresolved {
-            certified,
-            regions,
-            ..
+            certified, regions, ..
         } = solve_pair(&parabola, &tangent)
         else {
             panic!("expected Unresolved for an interior tangency");
@@ -1705,14 +1686,8 @@ mod tests {
                 preconditioner: [[1.0, 0.0], [0.0, 1.0]],
                 function_at_center: [CertifiedInterval::point(0.0), CertifiedInterval::point(0.0)],
                 jacobian_enclosure: [
-                    [
-                        CertifiedInterval::point(1.0),
-                        CertifiedInterval::point(0.0),
-                    ],
-                    [
-                        CertifiedInterval::point(0.0),
-                        CertifiedInterval::point(1.0),
-                    ],
+                    [CertifiedInterval::point(1.0), CertifiedInterval::point(0.0)],
+                    [CertifiedInterval::point(0.0), CertifiedInterval::point(1.0)],
                 ],
                 image: b,
             },
@@ -1793,6 +1768,71 @@ mod tests {
             v
         };
         assert!(sorted[0].image.s_hi < sorted[1].image.s_lo);
+    }
+
+    #[test]
+    fn separated_ordering_assigns_lower_s_to_ordinal_zero() {
+        // Two records supplied in reverse vector order (higher s first) must be
+        // ordered so the lower certified s root gets ordinal 0.
+        let op1 = canonicalize(&parabola(0));
+        let op2 = canonicalize(&slanted_line(1.0, -0.1, 1));
+        let sys = System::new(&op1, &op2);
+        let (mut records, pending) = isolate(&sys);
+        assert!(pending.is_empty());
+        // Reverse the vector: the higher-s root now comes first.
+        records.reverse();
+        assign_ordinals(&mut records, &sys).expect("separated roots order");
+        let lower = records
+            .iter()
+            .find(|r| r.image.s_hi < 0.5)
+            .expect("the lower-s root is present");
+        let upper = records
+            .iter()
+            .find(|r| r.image.s_lo > 0.5)
+            .expect("the higher-s root is present");
+        assert_eq!(lower.ordinal, 0);
+        assert_eq!(upper.ordinal, 1);
+        // And the vector is now ordered by the certified s isolator.
+        assert!(records[0].image.s_hi < records[1].image.s_lo);
+    }
+
+    #[test]
+    fn certificate_backs_the_refined_isolator() {
+        // The invariant that the stored certificate backs the stored isolator:
+        // after refinement, record.image equals record.certificate.image.
+        let op1 = canonicalize(&parabola(0));
+        let op2 = canonicalize(&slanted_line(1.0, -0.1, 1));
+        let sys = System::new(&op1, &op2);
+        let (mut records, pending) = isolate(&sys);
+        assert!(pending.is_empty());
+        assign_ordinals(&mut records, &sys).expect("separated roots order");
+        for r in &records {
+            assert_eq!(r.image, r.certificate.image);
+            // The certificate's domain still encloses its image.
+            assert!(r.certificate.image.s_lo > r.certificate.domain.s_lo);
+            assert!(r.certificate.image.s_hi < r.certificate.domain.s_hi);
+            assert!(r.certificate.image.t_lo > r.certificate.domain.t_lo);
+            assert!(r.certificate.image.t_hi < r.certificate.domain.t_hi);
+        }
+    }
+
+    #[test]
+    fn transactional_failure_leaves_records_untouched() {
+        // Two records whose s isolators remain overlapping (each box contains
+        // both roots, so no Krawczyk refinement can separate them). A failed
+        // assignment must leave images, certificates, ordinals, and order
+        // exactly as they were.
+        let op1 = canonicalize(&parabola(0));
+        let op2 = canonicalize(&slanted_line(1.0, -0.1, 1));
+        let sys = System::new(&op1, &op2);
+        let mut roots = vec![
+            dummy_record(0.1, 0.9, 0.1, 0.9),
+            dummy_record(0.2, 0.8, 0.2, 0.8),
+        ];
+        let before = roots.clone();
+        let err = assign_ordinals(&mut roots, &sys).unwrap_err();
+        assert_eq!(err, GenericUnresolved::UnresolvedIdentityOrdering);
+        assert_eq!(roots, before, "a failed assignment must not mutate any record");
     }
 
     #[test]
