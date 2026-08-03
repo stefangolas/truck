@@ -35,6 +35,9 @@
 //! - [`ambient`] — `Λ` of Definition 7: the five distinguishable states of an
 //!   axis's period evidence, and the rank-structured lattice they can resolve
 //!   to.
+//! - [`deck`] — certified integer deck arithmetic for the rank-1
+//!   contractible-disk slice: the four-way deck solver and the outward-rounded
+//!   cover intervals. Self-contained: no STEP parsing.
 //! - [`support`] — structural identification of the support surface and of the
 //!   edge curves, read from the representation *before* the legacy types erase
 //!   it. The only route by which the premise `SupportSurfaceIsAPlane` enters.
@@ -54,6 +57,7 @@
 //! certified lattice is [`ambient::resolve_ambient_periods`].
 
 pub mod ambient;
+pub mod deck;
 pub mod envelope;
 pub mod evidence;
 pub mod numeric;
@@ -77,6 +81,11 @@ pub use ambient::{
     PeriodAxisEvidence, PeriodCertificate, PeriodCertificationAttempt, PeriodCertificationFailure,
     PeriodContradictionWitness, PeriodHintSet, PeriodHintSource, QuotientIdentificationAuthority,
     UncertifiedPeriodValue,
+};
+pub use deck::{
+    deck_cover_interval, solve_axis_aligned, CertifiedDeckInterval, DeckBudget,
+    DeckConstructorFailure, DeckGenerator, DeckInterval, DeckNumericFailure,
+    DeckOperationalFailure, DeckSolveResult, DevelopedAxis, DevelopedBox,
 };
 pub use envelope::{
     BoundObservation, CertifiedLowerBoundCount, ExactCount, ExecutionBudget, FeatureExclusion,
