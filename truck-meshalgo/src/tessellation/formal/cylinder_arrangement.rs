@@ -126,7 +126,16 @@ pub struct CertifiedCylinderDisk {
 /// placeholder. `start_vertex`/`end_vertex` are not reused by
 /// [`jordan_arrangement_of`] or [`bounded_material_region`] and are recorded
 /// as [`SourceVertexKey::Absent`] rather than invented.
-pub(super) fn placed_occurrences(
+///
+/// `pub`, not `pub(super)`: [`certify_cylinder_mesh`]'s production caller
+/// needs the identical occurrence list [`certify_cylinder_disk`] built
+/// internally, and re-deriving a second copy by hand outside `formal` would
+/// risk it silently drifting from the one the disk was actually certified
+/// against. A visibility widening only — the construction itself is
+/// untouched.
+///
+/// [`certify_cylinder_mesh`]: super::cylinder_mesh::certify_cylinder_mesh
+pub fn placed_occurrences(
     edge_uses: &[EdgeUseId],
     witnesses: &[CurveOnCylinderWitness],
     placements: &[i64],

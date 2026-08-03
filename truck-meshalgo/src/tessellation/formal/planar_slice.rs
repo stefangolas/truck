@@ -511,7 +511,21 @@ pub(super) fn traverse_bound(
             return Err(SliceExit::MissingGeometricTraversalOccurrence);
         }
         let curve = curves(edge_use.source_edge_index);
-        if curve.polygonal().is_none() {
+        // Any structurally-identified representation is admitted here, not
+        // only the exactly-polygonal ones: this traversal is shared by the
+        // planar rank-0 path (`regular_traversal`, which only ever sees
+        // `LineSegment`/`Polyline`/`NotStructurallyIdentified` today, so this
+        // widening changes nothing for it) and the rank-1 cylinder path
+        // (`super::cylinder_face::build_cylinder_face`), whose downstream
+        // witness stage (`super::cylinder_lift::develop_traversal_from_source`)
+        // never reads `occurrence.curve` at all — it re-derives the curve
+        // family and sweep from the source representation independently.
+        // `certified_planar_curves` (Step 3, planar-only) still requires
+        // `.polygonal()` and exits `UnsupportedCurveRepresentation` on a
+        // `CircularArc` exactly as it does on `NotStructurallyIdentified`
+        // today, so a `CircularArc` reaching the planar path fails exactly as
+        // safely as before this change, just one stage later.
+        if !curve.is_structurally_identified() {
             return Err(SliceExit::UnsupportedCurveRepresentation);
         }
         occurrences.push(TraversalOccurrence {

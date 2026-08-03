@@ -517,6 +517,18 @@ pub enum CurveSchema {
     LineSegment(PolylineSchema),
     /// A polyline. Every source segment maps exactly to a 2D segment.
     Polyline(PolylineSchema),
+    /// A circular arc, structurally identified but *not* exactly polygonal:
+    /// [`Self::polygonal`] returns `None` for this variant, exactly as it
+    /// does for [`Self::NotStructurallyIdentified`]. Its only purpose is to
+    /// let [`Self::is_structurally_identified`] tell a Step-2 traversal gate
+    /// that a reader *did* read this representation, so a caller whose
+    /// downstream stage understands arcs (the rank-1 cylinder witness route;
+    /// see `super::curve_witness`) can admit it past that gate without
+    /// touching the polygonal-only planar Step 3
+    /// (`super::planar_slice::certified_planar_curves`), which still exits
+    /// `UnsupportedCurveRepresentation` on it exactly as it does for
+    /// `NotStructurallyIdentified` today.
+    CircularArc,
     /// Nothing structural was established. Carries no authority.
     NotStructurallyIdentified(CurveSchemaFailure),
 }
@@ -532,8 +544,17 @@ impl CurveSchema {
     pub fn polygonal(&self) -> Option<&PolylineSchema> {
         match self {
             Self::LineSegment(schema) | Self::Polyline(schema) => Some(schema),
-            Self::NotStructurallyIdentified(_) => None,
+            Self::CircularArc | Self::NotStructurallyIdentified(_) => None,
         }
+    }
+
+    /// Whether *some* structural reader succeeded for this curve, whether or
+    /// not that reader's result is the exact polygonal chain
+    /// [`Self::polygonal`] returns. A Step-2 traversal gate that admits any
+    /// structurally-identified representation (rather than only the
+    /// polygonal ones) reads this instead of [`Self::polygonal`].
+    pub fn is_structurally_identified(&self) -> bool {
+        !matches!(self, Self::NotStructurallyIdentified(_))
     }
 
     /// A short stable tag, for probe records.
@@ -541,6 +562,7 @@ impl CurveSchema {
         match self {
             Self::LineSegment(_) => "line_segment",
             Self::Polyline(_) => "polyline",
+            Self::CircularArc => "circular_arc",
             Self::NotStructurallyIdentified(cause) => cause.tag(),
         }
     }

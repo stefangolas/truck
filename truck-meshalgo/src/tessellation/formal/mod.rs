@@ -95,7 +95,7 @@ pub use cylinder::{
     MINIMUM_CYLINDER_LINE_AXIS_PARALLELISM,
 };
 pub use cylinder_arrangement::{
-    certify_cylinder_disk, CertifiedCylinderDisk, CylinderArrangementExit,
+    certify_cylinder_disk, placed_occurrences, CertifiedCylinderDisk, CylinderArrangementExit,
 };
 pub use cylinder_cover::{build_working_cover, CylinderCoverExit, WorkingCoverResult};
 pub use cylinder_face::{build_cylinder_face, CylinderFaceRecord};
@@ -107,8 +107,8 @@ pub use cylinder_mesh::{
     certify_cylinder_mesh, certify_cylinder_polygon, lift_to_cylinder, CertifiedCylinderMesh,
 };
 pub use cylinder_lift::{
-    develop_traversal, propagate_and_classify_holonomy, CylinderLiftExit,
-    DevelopedCylinderBoundary, WitnessSpec, ZeroHolonomyLift,
+    develop_traversal, develop_traversal_from_source, propagate_and_classify_holonomy,
+    CylinderLiftExit, DevelopedCylinderBoundary, WitnessSpec, ZeroHolonomyLift,
 };
 pub use deck::{
     deck_cover_interval, solve_axis_aligned, CertifiedDeckInterval, DeckBudget,
