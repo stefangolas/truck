@@ -56,6 +56,26 @@ pub enum GenericUnresolved {
     UnsupportedSingularBranch,
     /// A positive-dimensional common component beyond the minimal supported cases.
     GeneralCommonComponent,
+    /// A Bézier root lying exactly on a parameter-domain boundary, where no
+    /// endpoint certificate has been implemented yet (GEN-001C endpoint policy).
+    UnresolvedBoundaryRoot,
+    /// A certified root whose tangent-numerator enclosure could not certify a
+    /// nonzero first derivative: a stationary (derivative-zero) candidate.
+    /// Uncertainty here is never promoted to an ordinary tangent.
+    UnresolvedStationaryBranch,
+    /// A certified root whose transverse determinant could not be certified
+    /// nonzero: a possible tangency or singularity, not a regular crossing.
+    UnresolvedTangencyOrSingularity,
+    /// The pair-local root ordinals could not be backed by a certified total
+    /// order: two certified roots have overlapping source-parameter enclosures
+    /// on both participants, so no interval-separation order exists. The roots
+    /// are never ordered by traversal or discovery order.
+    UnresolvedIdentityOrdering,
+    /// A derived (subdivided) piece's root could not be matched to exactly one
+    /// root of the parent (unsplit) pair isolation. A sub-span cannot acquire a
+    /// geometric intersection its parent lacks, so an unmatched or ambiguous
+    /// match is `Unresolved`, never a new root identity.
+    UnresolvedIdentityReferBack,
     /// A reused ARR-002 pairwise cause.
     Pair(PairUnresolved),
 }
@@ -69,6 +89,11 @@ impl GenericUnresolved {
             Self::SingularJacobian => "unresolved_singular_jacobian",
             Self::UnsupportedSingularBranch => "unresolved_unsupported_singular_branch",
             Self::GeneralCommonComponent => "unresolved_general_common_component",
+            Self::UnresolvedBoundaryRoot => "unresolved_boundary_root",
+            Self::UnresolvedStationaryBranch => "unresolved_stationary_branch",
+            Self::UnresolvedTangencyOrSingularity => "unresolved_tangency_or_singularity",
+            Self::UnresolvedIdentityOrdering => "unresolved_identity_ordering",
+            Self::UnresolvedIdentityReferBack => "unresolved_identity_refer_back",
             Self::Pair(_) => "unresolved_pair",
         }
     }
@@ -108,6 +133,48 @@ pub enum CommonArcEnd {
     End,
 }
 
+/// One participant's occurrence identity within an isolated-root key.
+///
+/// Reversal-stable: [`CurveOccurrenceProvenance::reversed`] swaps only the
+/// traversal start/end vertices and preserves the edge-use and source-edge ids,
+/// so reparameterizing the same occurrence keeps this identity while reversing
+/// only the branch-incidence orientation. A different twin edge use is a
+/// distinct B-rep incidence with a distinct span id and is never conflated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct IsolatedRootParticipant {
+    /// The stable span/occurrence identity.
+    pub span_id: SpanId,
+}
+
+/// The canonical identity of one isolated root of a curve pair.
+///
+/// Construction- and provenance-based, never coordinate proximity: the two
+/// participant occurrences (sorted) plus a deterministic pair-local root
+/// ordinal. See [`EventIdentity::IsolatedRoot`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IsolatedRootKey {
+    /// The two participant occurrences, sorted canonically.
+    pub participants: [IsolatedRootParticipant; 2],
+    /// The deterministic pair-local root ordinal.
+    pub ordinal: u32,
+}
+
+impl IsolatedRootKey {
+    /// The canonical key for the given pair of span occurrences and ordinal.
+    ///
+    /// The participants are sorted, so an operand swap re-sorts to the same
+    /// pair. Reversal does not change the span ids ([`CurveOccurrenceProvenance::reversed`]
+    /// preserves them), so reparameterization reversal keeps the same pair.
+    pub fn new(first_span_id: SpanId, second_span_id: SpanId, ordinal: u32) -> Self {
+        let mut participants = [
+            IsolatedRootParticipant { span_id: first_span_id },
+            IsolatedRootParticipant { span_id: second_span_id },
+        ];
+        participants.sort();
+        IsolatedRootKey { participants, ordinal }
+    }
+}
+
 /// The stable identity of one arrangement event, for deduplication and merging.
 ///
 /// Based on construction and provenance, never on coordinate proximity. Two
@@ -128,25 +195,16 @@ pub enum EventIdentity {
     },
     /// One isolated certified root of a curve pair.
     ///
-    /// **Provisional identity (GEN-001A), closed in GEN-001C.** Canonicalizing
-    /// the two edge uses does *not* make this identity stable for multi-root
-    /// pairs: `index` is a per-curve traversal order that can change under
-    /// operand swap or traversal reversal. This is acceptable only because
-    /// nothing consumes `EventIdentity` for scheduling or deduplication yet
-    /// (ARR-003 is unopened). Before ARR-003, GEN-001C replaces `index` with
-    /// canonical certified construction data — the two span identities paired
-    /// with their certified parameter boxes, sorted canonically — so each
-    /// geometric root keeps one identity regardless of operand order or
-    /// traversal direction.
-    IsolatedRootBox {
-        /// The canonically-smaller participating edge use.
-        first: EdgeUseId,
-        /// The canonically-larger participating edge use.
-        second: EdgeUseId,
-        /// Per-curve root index. PROVISIONAL: not invariant under operand swap
-        /// for multi-root pairs; replaced by certified parameter boxes in C.
-        index: usize,
-    },
+    /// **Canonical (GEN-001C).** The key is construction data, never
+    /// coordinates: the two participant occurrences sorted canonically plus a
+    /// deterministic pair-local root ordinal. The ordinal is assigned by one
+    /// canonical isolation run, ordering the pair's certified roots by interval
+    /// separation of their orientation-normalized authoritative source
+    /// parameter boxes. It is stable under operand swap, reversal of either
+    /// span, reversal of both spans, and deterministic repetition. Certified
+    /// parameter boxes are evidence carried on the incident branches, never part
+    /// of this identity.
+    IsolatedRoot(IsolatedRootKey),
     /// A merged high-multiplicity event (≥3 branches), keyed by a stable
     /// construction id assigned by ARR-003 when it merges.
     MergedHighMultiplicity {
@@ -180,8 +238,17 @@ impl EventIdentity {
     ///
     /// Two pairwise intersections sharing a source vertex map to the same
     /// [`EventIdentity::SharedSourceVertex`]; that is the handle ARR-003 merges
-    /// on.
-    pub fn from_pair(identity: &IntersectionIdentity) -> Self {
+    /// on. An isolated curve-curve intersection maps to the canonical
+    /// [`EventIdentity::IsolatedRoot`] keyed by the two span occurrences and
+    /// the pair-local ordinal assigned by the caller (see [`lift_pair_result`]:
+    /// the pair's roots are ordered by interval separation of their certified
+    /// source-parameter boxes, never by discovery order or a per-curve index).
+    pub fn from_pair(
+        identity: &IntersectionIdentity,
+        lhs_span_id: SpanId,
+        rhs_span_id: SpanId,
+        ordinal: u32,
+    ) -> Self {
         match identity {
             IntersectionIdentity::SourceVertex(vertex) => Self::SharedSourceVertex(*vertex),
             IntersectionIdentity::ArtificialMonotoneSplit {
@@ -191,21 +258,8 @@ impl EventIdentity {
                 edge_use_id: *edge_use_id,
                 critical_index: *critical_index,
             },
-            IntersectionIdentity::CurveIntersection {
-                lhs_edge_use,
-                rhs_edge_use,
-                intersection_index,
-            } => {
-                let (first, second) = if lhs_edge_use <= rhs_edge_use {
-                    (*lhs_edge_use, *rhs_edge_use)
-                } else {
-                    (*rhs_edge_use, *lhs_edge_use)
-                };
-                Self::IsolatedRootBox {
-                    first,
-                    second,
-                    index: *intersection_index,
-                }
+            IntersectionIdentity::CurveIntersection { .. } => {
+                Self::IsolatedRoot(IsolatedRootKey::new(lhs_span_id, rhs_span_id, ordinal))
             }
         }
     }
@@ -385,14 +439,42 @@ fn branches_from_pair(
     [lhs, rhs]
 }
 
+/// Order a pair's intersections canonically for ordinal assignment.
+///
+/// The pair-local ordinal must be stable under operand swap and must not depend
+/// on discovery order. Order by interval separation of the certified
+/// source-parameter enclosures (lexicographic on the interval endpoints, which
+/// agrees with separation order for disjoint certified roots). The rounded
+/// midpoint is never used as an ordering key.
+fn sort_intersections_canonically(intersections: &mut [CertifiedIntersection2]) {
+    intersections.sort_by(|a, b| {
+        let ka = (
+            a.lhs_parameter.lo,
+            a.lhs_parameter.hi,
+            a.rhs_parameter.lo,
+            a.rhs_parameter.hi,
+        );
+        let kb = (
+            b.lhs_parameter.lo,
+            b.lhs_parameter.hi,
+            b.rhs_parameter.lo,
+            b.rhs_parameter.hi,
+        );
+        ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
 /// Lift an ARR-002 pairwise result into the generic contact contracts.
 ///
 /// Faithful: each isolated intersection becomes one [`IsolatedEvent2`] with two
 /// [`BranchIncidence`] under the [`EventIdentity`] mapped from its
-/// [`IntersectionIdentity`]. `Disjoint`, `Unsupported` and `Unresolved` pass
-/// through (the last wrapped in [`GenericUnresolved::Pair`]). This does not
-/// merge pairwise results into shared multi-branch events — that is ARR-003's
-/// job, using the stable identities introduced here.
+/// [`IntersectionIdentity`]. The pair's intersections are ordered canonically
+/// before ordinals are assigned, so the identity of each isolated root is
+/// stable under operand swap and does not depend on discovery order. `Disjoint`,
+/// `Unsupported` and `Unresolved` pass through (the last wrapped in
+/// [`GenericUnresolved::Pair`]). This does not merge pairwise results into
+/// shared multi-branch events — that is ARR-003's job, using the stable
+/// identities introduced here.
 ///
 /// The germ — not the representative point — is what ARR-003 reads, so the A7
 /// representative-endpoint issue is hidden beneath the generic contract here and
@@ -409,13 +491,23 @@ pub fn lift_pair_result(
             PairContactResult::Unresolved(GenericUnresolved::Pair(*cause))
         }
         PairIntersectionResult::Intersections(intersections) => {
+            let mut intersections = intersections.clone();
+            sort_intersections_canonically(&mut intersections);
+            let lhs_span_id = lhs_span.span_id();
+            let rhs_span_id = rhs_span.span_id();
             let components: Vec<ContactComponent2> = intersections
                 .iter()
-                .map(|intersection| {
+                .enumerate()
+                .map(|(ordinal, intersection)| {
                     let [lhs_branch, rhs_branch] =
                         branches_from_pair(lhs_span, rhs_span, intersection);
                     ContactComponent2::IsolatedEvent(IsolatedEvent2 {
-                        identity: EventIdentity::from_pair(&intersection.identity),
+                        identity: EventIdentity::from_pair(
+                            &intersection.identity,
+                            lhs_span_id,
+                            rhs_span_id,
+                            ordinal as u32,
+                        ),
                         crossing: CrossingClassification::from_pair(intersection.contact),
                         branches: vec![lhs_branch, rhs_branch],
                         representative: intersection.point,
@@ -543,10 +635,11 @@ mod tests {
             .branches
             .iter()
             .all(|br| br.location == ParameterLocation::PieceInterior));
-        // Identity is a root box (no shared source vertex here), never a point.
+        // Identity is a canonical isolated root (no shared source vertex here),
+        // never a point.
         assert!(matches!(
             event.identity,
-            EventIdentity::IsolatedRootBox { .. }
+            EventIdentity::IsolatedRoot(_)
         ));
     }
 
@@ -604,11 +697,11 @@ mod tests {
 
     #[test]
     fn identity_invariant_under_curve_order_swap_single_root() {
-        // SINGLE-ROOT pair only. Canonicalizing the two edge uses makes the
-        // identity invariant here because index 0 is the only root either way.
-        // A two-root operand-swap test -- proving each geometric root keeps its
-        // identity -- is added in GEN-001C, once identities are keyed by
-        // certified parameter boxes rather than a per-curve index.
+        // SINGLE-ROOT pair only. The canonical participants and ordinal 0 are
+        // the same either way. A two-root operand-swap test -- proving each
+        // geometric root keeps its identity -- is exercised in GEN-001C on the
+        // generic Bézier path, where identities are keyed by canonical pair
+        // ordinals rather than a per-curve index.
         let a = line_span_and_piece(
             Point2::new(0.0, 0.5),
             Point2::new(1.0, 0.5),

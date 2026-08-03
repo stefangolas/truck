@@ -32,7 +32,7 @@ use super::super::source_evidence::EdgeUseId;
 /// what distinguishes them is their parameter interval (carried on
 /// [`super::contact::BranchIncidence`]), not the span. Built from the source
 /// occurrence's edge-use and edge identities, never from coordinates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SpanId {
     /// The source edge use this span belongs to.
     pub edge_use_id: EdgeUseId,
