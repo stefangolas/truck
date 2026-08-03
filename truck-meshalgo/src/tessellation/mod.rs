@@ -429,7 +429,7 @@ pub trait LatticeMeshableShape<S, C> {
         lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
         schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
         curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
-        cylinder_of: impl Fn(&S) -> Option<formal::CertifiedEmbeddedCylinder> + Parallelizable,
+        cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str> + Parallelizable,
         cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
         cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
     ) -> MeshedShellOutcome;
@@ -502,7 +502,7 @@ impl<C: PolylineableCurve, S: RobustMeshableSurface> LatticeMeshableShape<S, C>
         lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
         schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
         curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
-        cylinder_of: impl Fn(&S) -> Option<formal::CertifiedEmbeddedCylinder> + Parallelizable,
+        cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str> + Parallelizable,
         cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
         cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
     ) -> MeshedShellOutcome {

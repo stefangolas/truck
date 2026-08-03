@@ -262,7 +262,9 @@ where
         lattice_of,
         schema_of,
         curve_schema_of,
-        |_: &S| None,
+        |_: &S| -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str> {
+            Err("cylinder_evidence_not_provided")
+        },
         |_: &C| formal::CurveSchema::not_structurally_identified(
             formal::CurveSchemaFailure::NoStructuralReader {
                 representation: "cylinder_evidence_not_provided",
@@ -292,7 +294,7 @@ pub(super) fn cshell_tessellation_with_outcomes_and_cylinder<'a, C, S>(
     lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
     schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
     curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
-    cylinder_of: impl Fn(&S) -> Option<formal::CertifiedEmbeddedCylinder> + Parallelizable,
+    cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str> + Parallelizable,
     cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
     cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
 ) -> MeshedShellOutcome
@@ -1231,20 +1233,30 @@ fn run_cylinder_slice_for_face<S, C>(
     face: &CompressedFace<S>,
     edges: &[CompressedEdge<C>],
     vertices: &[Point3],
-    cylinder_of: &impl Fn(&S) -> Option<formal::CertifiedEmbeddedCylinder>,
+    cylinder_of: &impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str>,
     cylinder_curve_schema_of: &impl Fn(&C) -> formal::CurveSchema,
     cylinder_curve_family_of: &impl Fn(&C) -> Option<formal::SourceCurveFamily>,
     tol: f64,
 ) -> CylinderSliceRecord {
-    let Some(cylinder) = cylinder_of(&face.surface) else {
-        return CylinderSliceRecord::exit(
-            "surface",
-            formal::SliceCategory::Unsupported,
-            "not_cylindrical_surface",
-            0,
-            0,
-            0,
-        );
+    let cylinder = match cylinder_of(&face.surface) {
+        Ok(cylinder) => cylinder,
+        // `tag` distinguishes "not a `CylindricalSurface` representation at
+        // all" from "a `CylindricalSurface` representation that
+        // `identify_cylinder` itself refused" (a cone smuggled in by a
+        // degenerate transform, a zero radius, an unverified angular
+        // period) — see `look::step::cylinder::CylinderSurfaceAdapterFailure`,
+        // whose `.tag()` this closure forwards without `truck-meshalgo`
+        // depending on that type.
+        Err(tag) => {
+            return CylinderSliceRecord::exit(
+                "surface",
+                formal::SliceCategory::Unsupported,
+                tag,
+                0,
+                0,
+                0,
+            )
+        }
     };
 
     // The curve-family funnel is counted independently of the traversal
