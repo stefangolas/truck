@@ -352,8 +352,31 @@ fn solve_join(
     solve_axis_aligned(generator, &displacement)
 }
 
-/// Step 5. Propagate deck placements around the developed boundary from a
-/// fixed initial placement, and classify the terminal holonomy.
+/// Step 5's raw product, before any verdict is taken on the holonomy: a
+/// certified deck placement for every occurrence, and the certified terminal
+/// holonomy itself.
+///
+/// [`propagate_and_classify_holonomy`] is this walk plus the contractible
+/// subset's `h = 0` requirement. A consumer that admits an *essential*
+/// boundary — [`super::cylinder_band`], for which `h = ±1` is precisely the
+/// admission criterion rather than a failure — reads the holonomy from here
+/// rather than recovering it from an error variant.
+#[derive(Debug, Clone)]
+pub struct DeckPlacementWalk {
+    /// The certified deck integer for each occurrence, in traversal order,
+    /// with `placements[0] == 0` by the walk's fixed starting placement.
+    pub placements: Vec<i64>,
+    /// The certified terminal holonomy, in units of the deck generator: the
+    /// deck integer the closing join implies for occurrence `0`, read against
+    /// the fixed `n_0 = 0`.
+    pub holonomy: i64,
+    /// How many joins were checked, including the final-to-initial wrap.
+    pub joins_checked: usize,
+}
+
+/// Step 5's walk. Propagate deck placements around the developed boundary
+/// from a fixed initial placement and report the terminal holonomy, taking no
+/// verdict on its value.
 ///
 /// Every join's enclosure is [`certified_join_tolerance`]'s certified bound
 /// on the evaluation discrepancy between two independent developed-coordinate
@@ -362,16 +385,16 @@ fn solve_join(
 /// and is not a geometric approximation of the curve itself, which the
 /// witnesses already represent exactly.
 ///
-/// Certifies only `h = 0`: a certified nonzero holonomy is reported as
-/// [`CylinderLiftExit::NonzeroHolonomy`] and refused, per the supported
-/// subset. Every join is classified before any placement past it is used, so
-/// a join that does not resolve uniquely stops the walk with the specific
+/// Every join is classified before any placement past it is used, so a join
+/// that does not resolve uniquely stops the walk with the specific
 /// [`CylinderLiftExit`] naming it — this function never guesses a placement
-/// to keep going.
-pub fn propagate_and_classify_holonomy(
+/// to keep going. Summing the individual developed displacements around the
+/// loop instead would silently discard exactly the information the holonomy
+/// *is*; see the module docs.
+pub fn propagate_placements(
     boundary: &DevelopedCylinderBoundary,
     generator: DeckGenerator,
-) -> Result<ZeroHolonomyLift, CylinderLiftExit> {
+) -> Result<DeckPlacementWalk, CylinderLiftExit> {
     let witnesses = &boundary.witnesses;
     let count = witnesses.len();
     // A degenerate (empty or single-occurrence) boundary has no closed walk
@@ -423,13 +446,33 @@ pub fn propagate_and_classify_holonomy(
     let k_last = classify(last, solve_join(&generator, b_last, a_first))?;
     let holonomy = placements[last] + k_last;
 
-    if holonomy != 0 {
-        return Err(CylinderLiftExit::NonzeroHolonomy { holonomy });
-    }
-
-    Ok(ZeroHolonomyLift {
+    Ok(DeckPlacementWalk {
         placements,
+        holonomy,
         joins_checked: count,
+    })
+}
+
+/// Step 5. Propagate deck placements around the developed boundary and
+/// certify the terminal holonomy structurally zero.
+///
+/// [`propagate_placements`] does the walk; this function adds the one fact
+/// the contractible-disk subset needs on top of it. A certified nonzero
+/// holonomy is reported as [`CylinderLiftExit::NonzeroHolonomy`] and refused
+/// rather than silently reduced to zero.
+pub fn propagate_and_classify_holonomy(
+    boundary: &DevelopedCylinderBoundary,
+    generator: DeckGenerator,
+) -> Result<ZeroHolonomyLift, CylinderLiftExit> {
+    let walk = propagate_placements(boundary, generator)?;
+    if walk.holonomy != 0 {
+        return Err(CylinderLiftExit::NonzeroHolonomy {
+            holonomy: walk.holonomy,
+        });
+    }
+    Ok(ZeroHolonomyLift {
+        placements: walk.placements,
+        joins_checked: walk.joins_checked,
     })
 }
 

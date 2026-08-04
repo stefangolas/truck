@@ -66,6 +66,7 @@
 pub mod ambient;
 pub mod cylinder;
 pub mod cylinder_arrangement;
+pub mod cylinder_band;
 pub mod cylinder_cover;
 pub mod cylinder_face;
 pub mod cylinder_lift;
