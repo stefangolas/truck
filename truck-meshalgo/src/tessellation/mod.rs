@@ -555,7 +555,7 @@ mod triangulation;
 
 use domain::lattice::CertifiedLattice;
 pub use triangulation::{
-    ConstraintRole, MeshedShellOutcome, SegmentOrigin, TessellationFailure,
+    ConstraintRole, CylinderBandAttempt, MeshedShellOutcome, SegmentOrigin, TessellationFailure,
     TessellationFailureReason,
 };
 

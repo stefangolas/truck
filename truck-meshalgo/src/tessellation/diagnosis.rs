@@ -464,13 +464,39 @@ pub fn compute_deck_status(chart_rank: u8) -> ObservedDeckStatus {
 // Diagnostic sink (thread-local)
 // ---------------------------------------------------------------------------
 
+/// Whether the formal cylinder-band fallback is active.
+///
+/// Off by default, so production output is unchanged by construction — the
+/// same discipline as every other formal route.
+///
+/// **Not nested under `TRUCK_FORMAL_RECOVERY`**, unlike `_HOLES` and
+/// `_CYLINDER`, and the reason is measurement rather than taste. The master
+/// gate independently opens the planar rank-0 route, which recovers faces of
+/// its own (2, on `00009190`). A band run held under it would therefore report
+/// a face total containing both routes' recoveries, and the band's own
+/// contribution could not be read off it — which is the single number this
+/// gate exists to obtain. Standing alone, the delta between a run with it and a
+/// run without it *is* the band's recovery count.
+///
+/// It lives in this module, rather than beside the other gates, because
+/// [`diag_enabled`] has to agree with it — see there.
+pub fn cylinder_band_recovery_enabled() -> bool {
+    std::env::var_os("TRUCK_FORMAL_RECOVERY_BAND").is_some()
+}
+
 /// Whether diagnostic capture is enabled.
 ///
 /// Gated behind the `TRUCK_FACE_DIAG_JSONL` environment variable. When unset,
 /// no diagnostic code paths are entered and production behaviour is identical
 /// to before.
+///
+/// The cylinder-band fallback turns it on too, and not as a convenience: that
+/// route's admitted population is the `SyntheticSyntheticCrossing` bucket, and
+/// the bucket is *derived from these witnesses*. With the gate open the sink is
+/// an input to a production decision rather than only a report, so it must be
+/// filled whether or not anyone asked for the JSONL.
 pub fn diag_enabled() -> bool {
-    std::env::var_os("TRUCK_FACE_DIAG_JSONL").is_some()
+    std::env::var_os("TRUCK_FACE_DIAG_JSONL").is_some() || cylinder_band_recovery_enabled()
 }
 
 /// The thread-local diagnostic sink.
@@ -600,6 +626,25 @@ pub(crate) fn set_vertex_insertion_failed() {
 #[cfg(test)]
 pub(crate) fn realized_chain_snapshot() -> Vec<RealizedConstraintMetadata> {
     FACE_DIAGNOSIS_SINK.with(|sink| sink.borrow().realized_chain.clone())
+}
+
+/// The loss bucket the sink's current evidence derives, without consuming it.
+///
+/// [`build_face_diagnosis`] takes the witnesses and clears the sink, which is
+/// correct for a record built once at the end of a face. A consumer that has to
+/// *classify the legacy failure while the face is still being worked on* — the
+/// cylinder-band fallback — needs the same derivation earlier and must leave
+/// the sink intact for the record that still follows. Same
+/// [`derive_loss_bucket`], same inputs; only the borrow differs.
+pub(crate) fn derived_bucket(terminal_reason: TessellationFailureReason) -> LossBucket {
+    FACE_DIAGNOSIS_SINK.with(|sink| {
+        let sink = sink.borrow();
+        derive_loss_bucket(
+            terminal_reason,
+            &sink.witnesses,
+            sink.vertex_insertion_failed,
+        )
+    })
 }
 
 /// Build the per-face diagnosis from the sink.

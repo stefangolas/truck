@@ -211,6 +211,30 @@ pub struct MeshedShellOutcome {
     /// aligned with `shell.faces`. Populated only when `TRUCK_FACE_DIAG_JSONL`
     /// is set; all `None` otherwise.
     pub face_diagnoses: Vec<Option<diagnosis::FailedFaceDiagnosis>>,
+    /// DIAG-001: what the formal cylinder-band fallback did on each face,
+    /// positionally aligned with `shell.faces`. `None` for every face the
+    /// fallback was not eligible for, which includes every face when the gate
+    /// is closed.
+    pub band_attempts: Vec<Option<CylinderBandAttempt>>,
+}
+
+/// What the cylinder-band fallback did on one eligible face.
+///
+/// Deliberately not a new taxonomy: the unrecovered arm carries
+/// [`formal::cylinder_band::BandExit`] unchanged, which already names the stage
+/// the attempt left from. "Attempted" is `Some(_)`; "recovered" is the first
+/// variant.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CylinderBandAttempt {
+    /// `run_cylinder_band` returned a validated annular mesh, and that mesh
+    /// replaced the preserved legacy failure.
+    Recovered {
+        /// Triangles in the validated annulus.
+        triangles: usize,
+    },
+    /// `run_cylinder_band` returned a typed exit, and the original legacy
+    /// failure was preserved unchanged.
+    Refused(formal::cylinder_band::BandExit),
 }
 
 /// Tessellates faces, discarding why any of them failed.
@@ -335,6 +359,11 @@ where
         recovery_gate && std::env::var_os("TRUCK_FORMAL_RECOVERY_CYLINDER").is_some();
     let run_cylinder_slice = cylinder_probe || cylinder_recovery_gate;
     let run_slice = slice_probe || recovery_gate;
+    // The rank-1 cylinder *band* route: the two-bound annulus. Same two-tier
+    // pattern again, and it carries no shadow probe of its own — the attempt
+    // is reported through `MeshedShellOutcome::band_attempts`, which is typed
+    // and needs no parsing, rather than through another stderr channel.
+    let band_recovery_gate = diagnosis::cylinder_band_recovery_enabled();
     // A per-run shell ordinal, so a `FaceKey` is unique across shells:
     // `declared_face_index` is an index *within* a shell and collides between
     // them. Assigned once per shell here, before the parallel face loop, so
@@ -563,6 +592,16 @@ where
                 }
             }
         };
+        // The legacy verdict, classified here and not later: the cylinder-band
+        // fallback admits one loss bucket, the bucket is derived from conflict
+        // witnesses the sink holds, and `build_face_diagnosis` below consumes
+        // them. Reading it at the seam where the legacy path finished also
+        // makes it unambiguously a statement about *that* result, and not
+        // about whatever a formal route replaced it with.
+        let legacy_bucket = match (band_recovery_gate, &failure) {
+            (true, Some(failure)) => Some(diagnosis::derived_bucket(failure.reason)),
+            _ => None,
+        };
         // The planar vertical slice, run beside the legacy result. Its input
         // is Step 0's source evidence, Step 1's certified lattice and the
         // structural schemas; it reads nothing the legacy path produced, so a
@@ -712,6 +751,55 @@ where
                 _ => (polygon, failure),
             }
         };
+        // The formal cylinder-band fallback. The exact production rule:
+        //
+        //   legacy success                     -> the legacy mesh, unchanged
+        //   legacy SyntheticSyntheticCrossing
+        //     + certified cylinder support
+        //     + exactly two authoritative bounds
+        //                                      -> attempt `run_cylinder_band`
+        //       validated mesh                 -> the formal mesh
+        //       typed exit                     -> the legacy failure, preserved
+        //   any other legacy failure           -> the legacy failure, preserved
+        //
+        // `failure.is_some()` is the "legacy success" arm: a face that has a
+        // mesh at this point — because the legacy path meshed it, or because a
+        // formal route above already recovered it — is never attempted. The
+        // bucket, the cylinder certificate and the bound count are the other
+        // three conjuncts, each checked explicitly and none of them repaired.
+        let (polygon, failure, band_attempt) = match (
+            band_recovery_gate,
+            failure.is_some(),
+            legacy_bucket == Some(diagnosis::LossBucket::SyntheticSyntheticCrossing),
+        ) {
+            (true, true, true) => {
+                match run_cylinder_band_for_face(
+                    declared_face_index,
+                    source_face_id,
+                    face,
+                    &shell.edges,
+                    &shell.vertices,
+                    &cylinder_of,
+                    &cylinder_curve_schema_of,
+                    &cylinder_curve_family_of,
+                    tol,
+                ) {
+                    None => (polygon, failure, None),
+                    Some(Ok(mesh)) => {
+                        let triangles = mesh.tri_faces().len();
+                        (
+                            Some(mesh),
+                            None,
+                            Some(CylinderBandAttempt::Recovered { triangles }),
+                        )
+                    }
+                    Some(Err(exit)) => {
+                        (polygon, failure, Some(CylinderBandAttempt::Refused(exit)))
+                    }
+                }
+            }
+            _ => (polygon, failure, None),
+        };
         let result = CompressedFace {
             boundaries,
             orientation: face.orientation,
@@ -749,7 +837,7 @@ where
         } else {
             None
         };
-        (result, failure, face_diagnosis)
+        (result, failure, face_diagnosis, band_attempt)
     };
     #[cfg(not(target_arch = "wasm32"))]
     let results: Vec<_> = shell
@@ -768,10 +856,12 @@ where
     let mut faces = Vec::with_capacity(results.len());
     let mut face_failures = Vec::with_capacity(results.len());
     let mut face_diagnoses = Vec::with_capacity(results.len());
-    for (f, ff, fd) in results {
+    let mut band_attempts = Vec::with_capacity(results.len());
+    for (f, ff, fd, ba) in results {
         faces.push(f);
         face_failures.push(ff);
         face_diagnoses.push(fd);
+        band_attempts.push(ba);
     }
     MeshedShellOutcome {
         shell: MeshedCShell {
@@ -781,6 +871,7 @@ where
         },
         face_failures,
         face_diagnoses,
+        band_attempts,
     }
 }
 
@@ -1239,7 +1330,20 @@ fn cylinder_mesh_to_polygon(
     mesh: &formal::CertifiedCylinderMesh,
     schema: &formal::CylinderSchema,
 ) -> PolygonMesh {
-    let positions = mesh.physical_vertices.clone();
+    cylinder_polygon_from_lifted(&mesh.physical_vertices, &mesh.developed.triangles, schema)
+}
+
+/// A `PolygonMesh` from vertices already lifted onto a certified cylinder.
+///
+/// Shared by the disk and band routes because the step is the same one: the
+/// lift is done, the triangles index it, and the outward normal at a point of
+/// a cylinder is its own radial direction. Nothing here re-derives geometry.
+fn cylinder_polygon_from_lifted(
+    positions: &[Point3],
+    triangles: &[[usize; 3]],
+    schema: &formal::CylinderSchema,
+) -> PolygonMesh {
+    let positions = positions.to_vec();
     let normals: Vec<Vector3> = positions
         .iter()
         .map(|p| {
@@ -1252,9 +1356,7 @@ fn cylinder_mesh_to_polygon(
             }
         })
         .collect();
-    let tri_faces: Vec<[StandardVertex; 3]> = mesh
-        .developed
-        .triangles
+    let tri_faces: Vec<[StandardVertex; 3]> = triangles
         .iter()
         .map(|indices| {
             array![i => StandardVertex {
@@ -1505,6 +1607,106 @@ fn run_cylinder_slice_for_face<S, C>(
         mesh: Some(polygon),
         triangles,
     }
+}
+
+/// Run the formal cylinder-band path for one face, when it is eligible.
+///
+/// `None` is "not eligible, nothing was attempted": no certified cylinder
+/// support, no source evidence, or a bound count other than two authoritative
+/// bounds. `Some` means `run_cylinder_band` was actually called and the value
+/// is its verdict.
+///
+/// This is an adapter and nothing more. Every input it hands the band path is
+/// one production already produces:
+///
+/// - the **cylinder** comes from `cylinder_of`, the same authoritative surface
+///   adapter the rank-1 disk route uses, so "certified cylinder support" is
+///   that certificate and not a surface-kind string match;
+/// - the **face** comes from [`source_face_input_from_compressed`], the same
+///   Step-0 evidence seam the disk route reads;
+/// - the **curve schema** and **curve family** come from the same two
+///   structural readers the disk route passes;
+/// - the **vertex positions** are the shell's own vertex table, keyed by
+///   [`SourceVertexKey::ShellVertex`];
+/// - the **outer bound** is the face's declared standing, unchanged.
+///
+/// The one thing built here is `family_of`, and it is built from *identity*:
+/// [`EdgeUseId`] selects the source edge use, the use names its
+/// `source_edge_index`, and that indexes the shell's edge table. No tessellated
+/// coordinate is consulted to decide what a curve is. (The disk route resolves
+/// the same map through its traversal record; there is no traversal record here
+/// because the band path runs one traversal per bound *inside*
+/// `certify_cylinder_band`, so the map is resolved through the evidence the
+/// traversal is itself built from.)
+#[allow(clippy::too_many_arguments)]
+fn run_cylinder_band_for_face<S, C>(
+    declared_face_index: usize,
+    source_face_id: Option<u64>,
+    face: &CompressedFace<S>,
+    edges: &[CompressedEdge<C>],
+    vertices: &[Point3],
+    cylinder_of: &impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str>,
+    cylinder_curve_schema_of: &impl Fn(&C) -> formal::CurveSchema,
+    cylinder_curve_family_of: &impl Fn(&C) -> Option<formal::SourceCurveFamily>,
+    tol: f64,
+) -> Option<std::result::Result<PolygonMesh, formal::cylinder_band::BandExit>> {
+    let Ok(cylinder) = cylinder_of(&face.surface) else {
+        return None;
+    };
+    let Ok(input) =
+        source_face_input_from_compressed(declared_face_index, source_face_id, face, edges)
+    else {
+        return None;
+    };
+    // Exactly two bounds, and both of them authoritative. A face with a
+    // degenerate-evidence bound is not a two-bound face with one bound missing;
+    // it is a face this route has no evidence for, and it is left alone rather
+    // than attempted and refused.
+    if input.bounds.len() != 2 || input.regular_bound_count() != 2 {
+        return None;
+    }
+
+    let schema = cylinder.schema().clone();
+    let mut curve_of = |edge_index: usize| match edges.get(edge_index) {
+        Some(edge) => cylinder_curve_schema_of(&edge.curve),
+        None => formal::CurveSchema::not_structurally_identified(
+            formal::CurveSchemaFailure::NoStructuralReader {
+                representation: "edge_index_out_of_range",
+            },
+        ),
+    };
+    let vertex_position = |vertex| match vertex {
+        SourceVertexKey::ShellVertex(index) => vertices.get(index).copied(),
+        _ => None,
+    };
+    // The same defensive `Line` fallback the disk route carries, for the same
+    // reason: an edge use whose family cannot be read is not silently
+    // misclassified, because a wrong family still fails the witness's own
+    // on-cylinder and constant-coordinate checks rather than certifying.
+    let family_of = |edge_use: EdgeUseId| {
+        input
+            .edge_uses()
+            .find(|use_| use_.id == edge_use)
+            .and_then(|use_| edges.get(use_.source_edge_index))
+            .and_then(|edge| cylinder_curve_family_of(&edge.curve))
+            .unwrap_or(formal::SourceCurveFamily::Line)
+    };
+
+    Some(
+        formal::cylinder_band::run_cylinder_band(
+            source_face_id,
+            cylinder,
+            &input,
+            face.provenance.outer_bound,
+            &mut curve_of,
+            &vertex_position,
+            &family_of,
+            tol,
+        )
+        .map(|(_, mesh)| {
+            cylinder_polygon_from_lifted(&mesh.physical_vertices, &mesh.developed.triangles, &schema)
+        }),
+    )
 }
 
 /// `CYLINDER\t...` diagnostic probe, one line per candidate face. Emitted
