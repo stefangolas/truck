@@ -744,6 +744,43 @@ fn circle(
     exec_circle(org_coord, dir_array, ref_dir_array, radius)
 }
 
+/// The source conic family survives import.
+///
+/// `circle` and `ellipse` realize to the same geometry — a unit circle under
+/// an affine transform — so before this distinction existed both landed in
+/// `Conic3D::Ellipse` and every consumer had to re-prove circularity from a
+/// transform built out of the file's finite-precision direction cosines. That
+/// transform is a similarity in exact arithmetic and not after rounding, so an
+/// exact predicate refuses a perfectly ordinary `circle`. Keeping the family
+/// is what lets a consumer ask the right question.
+///
+/// The direction cosines below are deliberately neither axis-aligned nor
+/// exactly representable, so the derived basis is orthonormal only to rounding.
+#[test]
+fn the_source_conic_family_survives_import() {
+    let placement = "#2 = AXIS2_PLACEMENT_3D('', #3, #4, #5);         #3 = CARTESIAN_POINT('', (0.0, 0.0, 0.0));         #4 = DIRECTION('', (0.3, 0.5, 0.81));         #5 = DIRECTION('', (0.77, -0.13, 0.62));";
+
+    let circle = step_to_entity::<ConicHolder>(&format!(
+        "DATA; #1 = CIRCLE('', #2, 3.7); {placement} ENDSEC;"
+    ));
+    let conic: step_geometry::Conic3D = (&circle).try_into().unwrap();
+    assert!(
+        matches!(conic, step_geometry::Conic3D::Circle(_)),
+        "a source CIRCLE must import as Conic3D::Circle, got {conic:?}"
+    );
+
+    let ellipse = step_to_entity::<ConicHolder>(&format!(
+        "DATA; #1 = ELLIPSE('', #2, 3.7, 3.7); {placement} ENDSEC;"
+    ));
+    let conic: step_geometry::Conic3D = (&ellipse).try_into().unwrap();
+    // Equal semi-axes: geometrically a circle, and still an `ellipse`. The
+    // family is what the source said, never what the numbers look like.
+    assert!(
+        matches!(conic, step_geometry::Conic3D::Ellipse(_)),
+        "a source ELLIPSE must stay Conic3D::Ellipse, got {conic:?}"
+    );
+}
+
 fn exec_ellipse(
     org_coord: [f64; 3],
     dir_array: [f64; 2],

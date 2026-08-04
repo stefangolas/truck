@@ -45,6 +45,9 @@ impl ToSameGeometry<Curve3D> for BSplineCurve<Point3> {
 impl Conic3D {
     pub fn posture(&self) -> Matrix4 {
         match self {
+            // Same payload, same posture. The variants differ in what the
+            // source declared, not in the geometry.
+            Conic3D::Circle(processor) => *processor.transform(),
             Conic3D::Ellipse(processor) => *processor.transform(),
             Conic3D::Hyperbola(processor) => *processor.transform(),
             Conic3D::Parabola(processor) => *processor.transform(),

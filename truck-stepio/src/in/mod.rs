@@ -1771,7 +1771,9 @@ impl TryFrom<&Conic> for Conic2D {
     #[inline(always)]
     fn try_from(value: &Conic) -> Result<Self, Self::Error> {
         Ok(match value {
-            Conic::Circle(value) => Conic2D::Ellipse(value.try_into()?),
+            // The source said `circle`. Keeping that is the whole point:
+            // see `Conic3D::Circle`.
+            Conic::Circle(value) => Conic2D::Circle(value.try_into()?),
             Conic::Ellipse(value) => Conic2D::Ellipse(value.try_into()?),
             Conic::Hyperbola(value) => Conic2D::Hyperbola(value.try_into()?),
             Conic::Parabola(value) => Conic2D::Parabola(value.try_into()?),
@@ -1784,7 +1786,7 @@ impl TryFrom<&Conic> for Conic3D {
     #[inline(always)]
     fn try_from(value: &Conic) -> Result<Self, Self::Error> {
         Ok(match value {
-            Conic::Circle(value) => Conic3D::Ellipse(value.try_into()?),
+            Conic::Circle(value) => Conic3D::Circle(value.try_into()?),
             Conic::Ellipse(value) => Conic3D::Ellipse(value.try_into()?),
             Conic::Hyperbola(value) => Conic3D::Hyperbola(value.try_into()?),
             Conic::Parabola(value) => Conic3D::Parabola(value.try_into()?),
@@ -2853,7 +2855,12 @@ impl EdgeCurve {
                     let circle = TrimmedCurve::new(UnitCircle::<Point3>::new(), (u, v));
                     let mut ellipse = Processor::new(circle);
                     ellipse.transform_by(mat);
-                    Curve3D::Conic(Conic3D::Ellipse(ellipse))
+                    // Source family retained here too. This is the path an
+                    // `edge_curve` takes when its trim is recovered from the
+                    // two vertex points, so it is the one nearly every real
+                    // bound curve goes through -- routing only the plain
+                    // `TryFrom` would have left the corpus unchanged.
+                    Curve3D::Conic(Conic3D::Circle(ellipse))
                 }
                 Conic::Ellipse(ellipse) => {
                     let mat = Matrix4::try_from(&ellipse.position)?

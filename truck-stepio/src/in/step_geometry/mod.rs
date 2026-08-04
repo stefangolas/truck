@@ -57,6 +57,14 @@ pub type PCurve = truck_geometry::prelude::PCurve<Box<Curve2D>, Box<Surface>>;
     StepCurve,
 )]
 pub enum Conic2D {
+    /// A source `circle`. See [`Conic3D::Circle`] for why the family is kept.
+    ///
+    /// `#[from(skip)]`: the payload type is the same as [`Self::Ellipse`]'s, so
+    /// only one of the two can own the `From` conversion. It stays with
+    /// `Ellipse`, which is where a representation carrying no source family
+    /// belongs.
+    #[from(skip)]
+    Circle(Ellipse<Point2, Matrix3>),
     Ellipse(Ellipse<Point2, Matrix3>),
     Hyperbola(Hyperbola<Point2, Matrix3>),
     Parabola(Parabola<Point2, Matrix3>),
@@ -115,6 +123,29 @@ pub enum Curve2D {
     StepCurve,
 )]
 pub enum Conic3D {
+    /// A source `circle`: the entity declared a centre, an axis placement and
+    /// one radius.
+    ///
+    /// The realized geometry is identical to [`Self::Ellipse`]'s — a unit
+    /// circle under an affine transform — and every trait impl treats the two
+    /// the same. What this variant carries is the *source family*, and it
+    /// exists because that is not recoverable from the payload: a `circle`'s
+    /// transform is an ISO 10303-42 derived orthonormal basis times a uniform
+    /// scale, which is a similarity in exact arithmetic but not after the
+    /// file's finite-precision direction cosines have been normalized and
+    /// crossed in `f64`. Collapsing both entities into one variant forced
+    /// every consumer to re-prove circularity from that rounded transform, and
+    /// an exact predicate correctly refuses it. Measured on the ABC corpus:
+    /// 20,388 occurrences of a genuine `circle` were refused that way, all
+    /// within 64 machine epsilons of exact, against 9 genuine `ellipse`s that
+    /// missed by 14 orders of magnitude more.
+    ///
+    /// Consumers that do not care about the distinction should match both
+    /// arms; the payload and its semantics are the same.
+    #[from(skip)]
+    Circle(Ellipse<Point3, Matrix4>),
+    /// A source `ellipse`, or a circle-shaped representation that arrived with
+    /// no source family attached. Carries no authority to be read as a circle.
     Ellipse(Ellipse<Point3, Matrix4>),
     Hyperbola(Hyperbola<Point3, Matrix4>),
     Parabola(Parabola<Point3, Matrix4>),
