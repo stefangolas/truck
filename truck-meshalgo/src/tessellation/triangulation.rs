@@ -1428,7 +1428,12 @@ fn run_cylinder_slice_for_face<S, C>(
                 .and_then(|edge| cylinder_curve_family_of(&edge.curve))
             {
                 Some(formal::SourceCurveFamily::Line) => line_edge_uses += 1,
-                Some(formal::SourceCurveFamily::CircularArc { .. }) => arc_edge_uses += 1,
+                // A complete circle counts in the same arc column: the funnel
+                // reports which structural family an edge use presented, and
+                // a closed circle is a circular arc that covers its whole
+                // period rather than a separate family.
+                Some(formal::SourceCurveFamily::CircularArc { .. })
+                | Some(formal::SourceCurveFamily::CompleteCircle { .. }) => arc_edge_uses += 1,
                 None => unsupported_edge_uses += 1,
             }
         }

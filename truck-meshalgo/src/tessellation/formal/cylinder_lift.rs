@@ -142,7 +142,14 @@ impl CylinderLiftExit {
     pub fn tag(self) -> &'static str {
         match self {
             Self::MissingVertexPosition { .. } => "lift_missing_vertex_position",
-            Self::WitnessConstruction { .. } => "lift_witness_construction_failed",
+            // The nested `WitnessFailure` already names *which* constructor
+            // condition refused the occurrence, and it already carries its own
+            // stable tag. Forwarding it is a rendering of information this
+            // variant has always held, not a second taxonomy: without it every
+            // one of the eight distinguishable refusals collapses into a single
+            // `lift_witness_construction_failed` bucket that cannot select a
+            // correction.
+            Self::WitnessConstruction { cause, .. } => cause.tag(),
             Self::JoinNoCompatibleInteger { .. } => "lift_join_no_compatible_integer",
             Self::JoinMultipleCompatibleIntegers { .. } => "lift_join_multiple_compatible_integers",
             Self::JoinIndeterminate { .. } => "lift_join_indeterminate",
@@ -249,12 +256,20 @@ pub fn develop_traversal_from_source(
             },
         )?;
 
+        let family = family_of(occurrence.edge_use);
+        // Whether this occurrence closes on itself, by source vertex identity
+        // and nothing else — the fact a complete circle needs and its
+        // collapsed trim interval no longer carries. Read from the same
+        // traversal record Step 2 already proved cyclically continuous, so it
+        // costs no new evidence.
+        let closed_occurrence = occurrence.start_vertex == occurrence.end_vertex;
         let witness = identify_source_curve_witness(
             schema,
-            family_of(occurrence.edge_use),
+            family,
             start,
             end,
             occurrence.forward,
+            closed_occurrence,
         )
         .map_err(|cause| CylinderLiftExit::WitnessConstruction {
             edge_use: occurrence.edge_use,

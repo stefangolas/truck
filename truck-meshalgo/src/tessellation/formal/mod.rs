@@ -120,8 +120,9 @@ pub use cylinder_arrangement::{
 pub use cylinder_cover::{build_working_cover, CylinderCoverExit, WorkingCoverResult};
 pub use cylinder_face::{build_cylinder_face, CylinderFaceRecord};
 pub use curve_witness::{
-    axial_line_witness, circumferential_arc_witness, identify_source_curve_witness,
-    CurveOnCylinderWitness, SourceCurveFamily, WitnessClass, WitnessFailure,
+    axial_line_witness, circumferential_arc_witness, complete_circle_witness,
+    identify_source_curve_witness, CompleteCirclePlacement, CurveOnCylinderWitness,
+    SourceCurveFamily, WitnessClass, WitnessFailure,
 };
 pub use cylinder_mesh::{
     certify_cylinder_mesh, certify_cylinder_polygon, lift_to_cylinder, CertifiedCylinderMesh,

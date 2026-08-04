@@ -31,6 +31,35 @@
 //! `identify_cylinder`'s `verify_angular_convention` already applies to the
 //! `2π` period itself.
 //!
+//! # The closed-edge rule: a closed circular edge is one full traversal
+//!
+//! The source-semantic rule this module relies on, stated once because
+//! [`complete_circle_witness`] is built on it and nothing else in the subtree
+//! can derive it:
+//!
+//! > An `edge_curve` whose two ends are the *same* source vertex, carried on a
+//! > circle, represents exactly one complete traversal of that circle — one
+//! > full period, once, in the curve's own parameter direction.
+//!
+//! It is not a fact about coordinates and it is not recoverable from the
+//! trimmed parameter interval. An importer recovers an edge's trim by solving
+//! each of its two vertex points onto the curve; when the edge is closed those
+//! two solves are the *same* solve, so the interval degenerates to `(u, u)`
+//! and the extent the source did declare is gone — not because the source
+//! declared a zero sweep, but because coincident endpoints cannot carry an
+//! extent. The rule above is what supplies the missing extent, and it is the
+//! reason a full turn may be certified here without an endpoint confirming it.
+//!
+//! Two things bound it, and both are enforced rather than assumed:
+//!
+//! - *Once*, not `k` times. The rule licenses exactly one period. A multiply
+//!   wound occurrence would need its own authoritative turn count, which no
+//!   closed `edge_curve` carries, and this module never invents one.
+//! - *Closed by identity*, not by coincidence. Two distinct source vertices at
+//!   one point are a zero-length edge, not a closed one, and
+//!   [`identify_source_curve_witness`] refuses the complete-circle reading for
+//!   them ([`WitnessFailure::OccurrenceNotClosed`]) rather than welding them.
+//!
 //! # Why this does not touch `cylinder.rs`
 //!
 //! [`super::cylinder::CylinderSchema`] already exposes everything a witness
@@ -43,7 +72,7 @@ use super::cylinder::CylinderSchema;
 use super::numeric::FiniteF64;
 use super::planar_slice::SliceCategory;
 use std::f64::consts::TAU;
-use truck_geometry::prelude::{InnerSpace, Point2, Point3};
+use truck_geometry::prelude::{InnerSpace, Point2, Point3, Vector3};
 
 /// Which curve family a witness represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +118,15 @@ pub enum WitnessFailure {
     /// The declared sweep, developed from the start angle, does not land on
     /// the declared end point.
     SweepDoesNotReachDeclaredEndpoint,
+    /// A complete-circle candidate's own certified placement is not the
+    /// cylinder parallel through its endpoint: its plane is not perpendicular
+    /// to the axis, its center is not on the axis, or its radius is not the
+    /// cylinder's.
+    CircleNotACylinderParallel,
+    /// A complete-circle candidate was presented on an occurrence whose start
+    /// and end are *different* source vertices, so no authoritative fact says
+    /// the occurrence covers the circle's whole period.
+    OccurrenceNotClosed,
 }
 
 impl WitnessFailure {
@@ -112,7 +150,13 @@ impl WitnessFailure {
             Self::NotParallelToAxis
             | Self::NotConstantAxialCoordinate
             | Self::DegenerateAxialSegment
-            | Self::ZeroSweep => SliceCategory::Unsupported,
+            | Self::ZeroSweep
+            | Self::CircleNotACylinderParallel => SliceCategory::Unsupported,
+            // Not a contradiction and not a proved fact about the face: the
+            // source presented a curve whose own trim carries no extent on an
+            // occurrence whose source topology does not supply one either, so
+            // nothing establishes what the occurrence covers.
+            Self::OccurrenceNotClosed => SliceCategory::Unresolved,
         }
     }
 
@@ -127,6 +171,8 @@ impl WitnessFailure {
             Self::NotConstantAxialCoordinate => "witness_not_constant_axial_coordinate",
             Self::ZeroSweep => "witness_zero_sweep",
             Self::SweepDoesNotReachDeclaredEndpoint => "witness_sweep_does_not_reach_endpoint",
+            Self::CircleNotACylinderParallel => "witness_circle_not_a_cylinder_parallel",
+            Self::OccurrenceNotClosed => "witness_occurrence_not_closed",
         }
     }
 }
@@ -302,6 +348,122 @@ pub fn circumferential_arc_witness(
     })
 }
 
+/// A source circle's own certified placement, as the occurrence's own curve
+/// domain presents it.
+///
+/// `sweep_axis` is the unit vector about which *this occurrence's own curve
+/// parameter* advances right-handedly — the circle's own
+/// `basis_cos x basis_sin` normal with the converted curve's parameter sense
+/// already folded in exactly once, the same fold
+/// [`SourceCurveFamily::CircularArc`]'s `parameter_interval` already carries.
+/// It is the fact a *complete* circle needs and its collapsed trim interval no
+/// longer holds: which way around the cylinder the occurrence runs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompleteCirclePlacement {
+    /// The circle's center.
+    pub center: Point3,
+    /// See the type docs.
+    pub sweep_axis: Vector3,
+    /// The circle's certified radius.
+    pub radius: f64,
+}
+
+/// Certify a complete-circle witness: one occurrence that traverses an entire
+/// cylinder parallel exactly once.
+///
+/// This is the case a trimmed parameter interval cannot express. A source
+/// `edge_curve` on a full circle has one vertex used for both of its ends, so
+/// an importer that recovers the trim by solving each end onto the curve gets
+/// the *same* parameter twice and hands downstream a degenerate interval
+/// `(u, u)` — not because the source declared a zero sweep, but because two
+/// coincident endpoints carry no extent. The extent is instead the circle's
+/// own complete period, and the direction is the occurrence's own parameter
+/// sense (`placement.sweep_axis`), neither of which is guessed from the
+/// coincident endpoints.
+///
+/// The endpoint therefore cannot confirm anything here the way
+/// [`circumferential_arc_witness`]'s does — `theta_start ± period` reduces to
+/// `theta_start` for *any* circle. So the obligation the endpoint carries in
+/// the arc case is discharged structurally instead: the circle's own certified
+/// placement must *be* the cylinder parallel through that endpoint — plane
+/// perpendicular to the axis, center on the axis, radius the cylinder's — and
+/// the sweep is the surface's own certified period, never a full turn assumed
+/// from coincident endpoints.
+pub fn complete_circle_witness(
+    schema: &CylinderSchema,
+    placement: CompleteCirclePlacement,
+    start: Point3,
+    forward: bool,
+) -> Result<CurveOnCylinderWitness, WitnessFailure> {
+    let start = finite_point(start)?;
+    let center = finite_point(placement.center)?;
+    for coordinate in [
+        placement.sweep_axis.x,
+        placement.sweep_axis.y,
+        placement.sweep_axis.z,
+        placement.radius,
+    ] {
+        FiniteF64::new(coordinate).map_err(|_| WitnessFailure::NonFiniteInput)?;
+    }
+    let tolerance = scaled_tolerance(schema);
+
+    if radial_gap(schema, start) > tolerance {
+        return Err(WitnessFailure::StartNotOnCylinder);
+    }
+
+    // The circle is the cylinder parallel through `start`, structurally. Every
+    // obligation is read from the source circle's own certified placement;
+    // none of them is recovered from a sample.
+    //
+    // Unit length and parallelism are separate obligations, checked
+    // separately. `sweep_axis`'s magnitude is a claim about the *caller* —
+    // that it handed over a direction and not an unnormalized cross product —
+    // and its alignment with the axis is a claim about the *face*. Folding
+    // both into one `|dot| == 1` test would let the two errors alias: a
+    // non-unit vector at an oblique angle can land on `|dot| == 1`, and the
+    // sign taken from it below would then be read off geometry that was never
+    // certified perpendicular to the axis at all.
+    let sweep_axis_length = placement.sweep_axis.magnitude();
+    if (sweep_axis_length - 1.0).abs() > RELATIVE_TOLERANCE {
+        return Err(WitnessFailure::CircleNotACylinderParallel);
+    }
+    let axis_alignment = placement.sweep_axis.dot(schema.axis());
+    if (axis_alignment.abs() - 1.0).abs() > RELATIVE_TOLERANCE {
+        return Err(WitnessFailure::CircleNotACylinderParallel);
+    }
+    let center_offset = center - schema.origin();
+    let center_radial = center_offset - center_offset.dot(schema.axis()) * schema.axis();
+    if center_radial.magnitude() > tolerance {
+        return Err(WitnessFailure::CircleNotACylinderParallel);
+    }
+    if (placement.radius - schema.radius().get()).abs() > tolerance {
+        return Err(WitnessFailure::CircleNotACylinderParallel);
+    }
+
+    // The sweep: the surface's *own* certified angular period, signed by the
+    // occurrence's own parameter sense against the surface's own angular
+    // sense, then composed with the selected edge-use direction exactly once.
+    // `angular_coordinate` runs right-handedly about `axis` (its frame is
+    // `radial_y == axis x radial_x`), so an occurrence whose parameter
+    // advances right-handedly about `+axis` advances the angular coordinate,
+    // and one about `-axis` retreats it.
+    let period = schema.deck_generator().signed_period().get();
+    let parameter_sense = if axis_alignment > 0.0 { 1.0 } else { -1.0 };
+    let selected_sense = if forward { 1.0 } else { -1.0 };
+    let sweep = period * parameter_sense * selected_sense;
+
+    // Both developed ends report the *same* axial coordinate value, bit for
+    // bit: the occurrence begins and ends at one source vertex, whose single
+    // canonical position is the only thing either end is computed from.
+    let axial = schema.axial_coordinate(start);
+    let theta_start = schema.angular_coordinate(start);
+    Ok(CurveOnCylinderWitness {
+        class: WitnessClass::CircumferentialArc,
+        start: Point2::new(axial, theta_start),
+        end: Point2::new(axial, theta_start + sweep),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Source-authoritative classification
 // ---------------------------------------------------------------------------
@@ -330,6 +492,16 @@ pub enum SourceCurveFamily {
         /// The trimmed parameter interval, in the curve's own direction.
         parameter_interval: (f64, f64),
     },
+    /// A *complete* circle: a circular source curve whose trimmed parameter
+    /// interval carries no extent, because the source edge closes on one
+    /// vertex and both of its ends solve to the same curve parameter. See
+    /// [`complete_circle_witness`], which is the only thing that certifies
+    /// one, and which requires the occurrence's source topology to close as
+    /// well before it accepts the circle's period as the extent.
+    CompleteCircle {
+        /// The circle's own certified placement and parameter sense.
+        placement: CompleteCirclePlacement,
+    },
 }
 
 /// Step 3's rank-1 route. Classify a source curve, in the selected traversal
@@ -342,7 +514,13 @@ pub enum SourceCurveFamily {
 /// docs); `forward` is Step 2's retained composed sense
 /// ([`super::planar_slice::TraversalOccurrence::forward`]): `true` means the
 /// traversal runs with the curve's own parameter direction (`t0 -> t1`),
-/// `false` means against it (`t1 -> t0`, sweep negated). This is the single
+/// `false` means against it (`t1 -> t0`, sweep negated). `closed_occurrence`
+/// is the other source-identity fact Step 2 retained: whether this
+/// occurrence's start and end are the *same* source vertex. Only
+/// [`SourceCurveFamily::CompleteCircle`] consults it, and it is passed in
+/// rather than inferred here for the same reason `forward` is — it is a fact
+/// about source topology, and nothing in a pair of coordinates can stand in
+/// for it. This is the single
 /// production introduction rule for a rank-1 witness; [`WitnessSpec`] remains
 /// available only for constructing synthetic test fixtures that do not carry
 /// a full source curve representation.
@@ -354,9 +532,22 @@ pub fn identify_source_curve_witness(
     start: Point3,
     end: Point3,
     forward: bool,
+    closed_occurrence: bool,
 ) -> Result<CurveOnCylinderWitness, WitnessFailure> {
     match family {
         SourceCurveFamily::Line => axial_line_witness(schema, start, end),
+        // A complete circle's extent is its own period, and only an
+        // occurrence that Step 2 already joined *to itself* — same source
+        // vertex at both ends, by identity — presents one. Coincident
+        // coordinates are never accepted in place of that fact: two distinct
+        // source vertices that happen to sit at one point would be a
+        // zero-length edge, not a full turn.
+        SourceCurveFamily::CompleteCircle { placement } => {
+            if !closed_occurrence {
+                return Err(WitnessFailure::OccurrenceNotClosed);
+            }
+            complete_circle_witness(schema, placement, start, forward)
+        }
         SourceCurveFamily::CircularArc {
             parameter_interval: (t0, t1),
         } => {
@@ -584,7 +775,7 @@ mod tests {
         let schema = z_cylinder(2.0, 5.0);
         let a = on_cylinder(&schema, 0.0, 0.3);
         let b = on_cylinder(&schema, 3.0, 0.3);
-        let w = identify_source_curve_witness(&schema, SourceCurveFamily::Line, a, b, true)
+        let w = identify_source_curve_witness(&schema, SourceCurveFamily::Line, a, b, true, false)
             .expect("a source line classifies");
         assert_eq!(w.class, WitnessClass::AxialLine);
         assert!(w.displacement().x > 0.0);
@@ -598,7 +789,7 @@ mod tests {
         // Traversal order is `b -> a`; the family is still `Line`, and only
         // the caller-supplied endpoint order changes, exactly as
         // `axial_line_witness` already expects.
-        let w = identify_source_curve_witness(&schema, SourceCurveFamily::Line, b, a, false)
+        let w = identify_source_curve_witness(&schema, SourceCurveFamily::Line, b, a, false, false)
             .expect("a reversed source line classifies");
         assert!(w.displacement().x < 0.0);
     }
@@ -613,7 +804,7 @@ mod tests {
         let family = SourceCurveFamily::CircularArc {
             parameter_interval: (0.2, 1.4),
         };
-        let w = identify_source_curve_witness(&schema, family, start, end, true)
+        let w = identify_source_curve_witness(&schema, family, start, end, true, false)
             .expect("a source circular arc classifies");
         assert_eq!(w.class, WitnessClass::CircumferentialArc);
         assert!((w.displacement().y - 1.2).abs() < 1e-9);
@@ -627,12 +818,160 @@ mod tests {
         let family = SourceCurveFamily::CircularArc {
             parameter_interval: (0.2, 1.4),
         };
-        let forward = identify_source_curve_witness(&schema, family, start, end, true)
+        let forward = identify_source_curve_witness(&schema, family, start, end, true, false)
             .expect("forward");
         // Traversal order reverses: endpoints swap and the sweep negates.
-        let reversed = identify_source_curve_witness(&schema, family, end, start, false)
+        let reversed = identify_source_curve_witness(&schema, family, end, start, false, false)
             .expect("reversed");
         assert!((forward.displacement().y + reversed.displacement().y).abs() < 1e-9);
+    }
+
+    // -- complete circles ---------------------------------------------------
+
+    /// The corpus shape, in the small: a closed circular `edge_curve` whose
+    /// trim collapsed to a point still develops to a full turn of the
+    /// surface's own certified period — taken from the circle's placement and
+    /// the closed-edge rule, never from the coincident endpoints.
+    #[test]
+    fn a_complete_circle_sweeps_the_surfaces_own_certified_period() {
+        let schema = z_cylinder(2.0, 5.0);
+        let point = on_cylinder(&schema, 1.0, 0.4);
+        let placement = CompleteCirclePlacement {
+            center: schema.origin() + 1.0 * schema.axis(),
+            sweep_axis: schema.axis(),
+            radius: schema.radius().get(),
+        };
+        let w = complete_circle_witness(&schema, placement, point, true)
+            .expect("a closed circular edge on the parallel is a complete-circle witness");
+        assert_eq!(w.class, WitnessClass::CircumferentialArc);
+        let period = schema.deck_generator().signed_period().get();
+        assert!((w.displacement().y - period).abs() < 1e-12);
+        assert_eq!(
+            w.start.x, w.end.x,
+            "both ends report one source vertex's single axial coordinate, bit for bit"
+        );
+    }
+
+    /// Orientation sign, from the circle's own parameter sense. A circle whose
+    /// parameter advances right-handedly about `-axis` runs the *other* way
+    /// round the cylinder, and nothing about its coincident endpoints says so.
+    #[test]
+    fn a_reversed_sweep_axis_reverses_the_complete_circles_direction() {
+        let schema = z_cylinder(2.0, 5.0);
+        let point = on_cylinder(&schema, 1.0, 0.4);
+        let center = schema.origin() + 1.0 * schema.axis();
+        let radius = schema.radius().get();
+        let forward_axis = CompleteCirclePlacement {
+            center,
+            sweep_axis: schema.axis(),
+            radius,
+        };
+        let reversed_axis = CompleteCirclePlacement {
+            center,
+            sweep_axis: -schema.axis(),
+            radius,
+        };
+        let a = complete_circle_witness(&schema, forward_axis, point, true).expect("witness");
+        let b = complete_circle_witness(&schema, reversed_axis, point, true).expect("witness");
+        assert!(
+            (a.displacement().y + b.displacement().y).abs() < 1e-12,
+            "the two parameter senses develop to opposite full turns"
+        );
+        assert!(a.displacement().y > 0.0 && b.displacement().y < 0.0);
+    }
+
+    /// The selected edge-use direction composes on top of the parameter sense,
+    /// exactly once — the same discipline the arc witness follows.
+    #[test]
+    fn a_reversed_edge_use_reverses_the_complete_circles_direction_again() {
+        let schema = z_cylinder(2.0, 5.0);
+        let point = on_cylinder(&schema, 1.0, 0.4);
+        let placement = CompleteCirclePlacement {
+            center: schema.origin() + 1.0 * schema.axis(),
+            sweep_axis: -schema.axis(),
+            radius: schema.radius().get(),
+        };
+        let forward = complete_circle_witness(&schema, placement, point, true).expect("witness");
+        let reversed = complete_circle_witness(&schema, placement, point, false).expect("witness");
+        assert!((forward.displacement().y + reversed.displacement().y).abs() < 1e-12);
+        // Reversed edge use over a `-axis` circle is the same traversal as a
+        // forward edge use over a `+axis` one: the two folds compose, and
+        // neither is applied twice.
+        let plus = CompleteCirclePlacement {
+            sweep_axis: schema.axis(),
+            ..placement
+        };
+        let plus_forward = complete_circle_witness(&schema, plus, point, true).expect("witness");
+        assert!((reversed.displacement().y - plus_forward.displacement().y).abs() < 1e-12);
+    }
+
+    /// The closed-edge rule is about vertex *identity*. An occurrence whose
+    /// two ends are different source vertices does not get the full-turn
+    /// reading even when those vertices sit at the same point — that is a
+    /// zero-length edge, and the refusal says the extent is unestablished
+    /// rather than claiming a fact about the face.
+    #[test]
+    fn a_complete_circle_on_an_occurrence_with_distinct_vertices_is_refused() {
+        let schema = z_cylinder(2.0, 5.0);
+        let point = on_cylinder(&schema, 1.0, 0.4);
+        let family = SourceCurveFamily::CompleteCircle {
+            placement: CompleteCirclePlacement {
+                center: schema.origin() + 1.0 * schema.axis(),
+                sweep_axis: schema.axis(),
+                radius: schema.radius().get(),
+            },
+        };
+        let closed = identify_source_curve_witness(&schema, family, point, point, true, true)
+            .expect("a closed occurrence certifies");
+        assert!(closed.displacement().y.abs() > 0.0);
+
+        let open = identify_source_curve_witness(&schema, family, point, point, true, false)
+            .expect_err("two distinct vertices at one point are not a closed edge");
+        assert_eq!(open, WitnessFailure::OccurrenceNotClosed);
+        assert_eq!(open.category(), SliceCategory::Unresolved);
+    }
+
+    /// The obligation the coincident endpoints cannot discharge is discharged
+    /// on the circle's own placement instead: a circle that is not *the*
+    /// cylinder parallel through its endpoint is refused, whichever of the
+    /// three ways it misses.
+    #[test]
+    fn a_circle_that_is_not_the_cylinder_parallel_is_refused() {
+        let schema = z_cylinder(2.0, 5.0);
+        let point = on_cylinder(&schema, 1.0, 0.4);
+        let center = schema.origin() + 1.0 * schema.axis();
+        let radius = schema.radius().get();
+        let refuse = |placement| {
+            assert_eq!(
+                complete_circle_witness(&schema, placement, point, true).unwrap_err(),
+                WitnessFailure::CircleNotACylinderParallel
+            );
+        };
+        // Plane not perpendicular to the axis.
+        refuse(CompleteCirclePlacement {
+            center,
+            sweep_axis: schema.radial_x(),
+            radius,
+        });
+        // Center off the axis.
+        refuse(CompleteCirclePlacement {
+            center: center + 0.5 * schema.radial_x(),
+            sweep_axis: schema.axis(),
+            radius,
+        });
+        // Not the cylinder's radius.
+        refuse(CompleteCirclePlacement {
+            center,
+            sweep_axis: schema.axis(),
+            radius: radius * 0.5,
+        });
+        // An unnormalized sweep axis is a caller defect, and it is refused on
+        // its own length rather than aliasing into the parallelism test.
+        refuse(CompleteCirclePlacement {
+            center,
+            sweep_axis: 2.0 * schema.axis(),
+            radius,
+        });
     }
 
     #[test]
@@ -642,7 +981,7 @@ mod tests {
         let family = SourceCurveFamily::CircularArc {
             parameter_interval: (0.2, 0.2),
         };
-        let exit = identify_source_curve_witness(&schema, family, point, point, true).unwrap_err();
+        let exit = identify_source_curve_witness(&schema, family, point, point, true, true).unwrap_err();
         assert_eq!(exit, WitnessFailure::ZeroSweep);
         assert_eq!(exit.category(), SliceCategory::Unsupported);
     }

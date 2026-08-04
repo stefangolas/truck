@@ -9,6 +9,7 @@ use crate::tessellation::source_evidence::{
     ErasedOrientationMechanism, OrientationEvidence, OrientationOrigin, SourceEdgeOrientationEvidence,
     SourceEdgeUseInput, SourceFaceOrientationEvidence,
 };
+use crate::tessellation::formal::curve_witness::CompleteCirclePlacement;
 use crate::tessellation::formal::support::identify_line_segment;
 use truck_geometry::prelude::{InnerSpace, Line, RevolutedCurve, Vector3};
 
@@ -294,6 +295,110 @@ fn two_distinct_essential_circles_recover_an_annular_mesh() {
     }
     assert!(at_lower >= 3 && at_upper >= 3);
     assert_eq!(at_lower + at_upper, mesh.developed.vertices.len());
+}
+
+/// The corpus's own band representation: each bound is *one* closed circular
+/// `edge_curve`, whose importer-recovered trim collapsed to a point because
+/// both of its ends are the same source vertex. This is the representation ABC
+/// `00009190`'s eligible cylinder bands actually carry, and the shape that
+/// reached `WitnessConstruction` before the closed-edge rule was applied.
+///
+/// The obligation here is the one the packet names: the authoritative
+/// representation constructs the expected occurrence and reaches the next
+/// certified band stage. It does — each bound develops into a complete simple
+/// parallel with primitive, opposite homology, which is exactly the input the
+/// carrier and cut-open stages consume.
+#[test]
+fn two_bounds_of_one_closed_circular_edge_each_develop_into_opposite_parallels() {
+    let cylinder = z_cylinder(2.0, 5.0);
+    let schema = cylinder.schema().clone();
+    let levels = [0.0f64, 3.0f64];
+    // One vertex per bound: the closed edge starts and ends there.
+    let vertices: Vec<Point3> = levels
+        .iter()
+        .map(|level| on_cylinder(&schema, *level, 0.0))
+        .collect();
+    // The two circles run opposite ways round the cylinder, which is what
+    // makes them a band's two induced boundaries rather than two copies of
+    // one orientation. Neither direction is recoverable from the collapsed
+    // trim interval; both come from the circles' own parameter senses.
+    let sweep_axes = [schema.axis(), -schema.axis()];
+    let bounds: Vec<SourceBoundInput> = (0..2)
+        .map(|index| SourceBoundInput::EdgeUses {
+            id: BoundId(index),
+            edge_uses: vec![edge_use(BoundId(index), 0, index, index, index)],
+        })
+        .collect();
+    let input = SourceFaceInput {
+        source_face_id: Some(27122),
+        declared_face_index: 0,
+        bounds,
+        orientation: SourceFaceOrientationEvidence {
+            face_use_orientation: OrientationEvidence::Missing,
+            face_surface_same_sense: OrientationEvidence::Missing,
+        },
+    };
+    let vertex_position = |key: SourceVertexKey| match key {
+        SourceVertexKey::ShellVertex(index) => vertices.get(index).copied(),
+        SourceVertexKey::Absent => None,
+    };
+    let family_of = |edge_use: EdgeUseId| SourceCurveFamily::CompleteCircle {
+        placement: CompleteCirclePlacement {
+            center: schema.origin() + levels[edge_use.bound.0] * schema.axis(),
+            sweep_axis: sweep_axes[edge_use.bound.0],
+            radius: schema.radius().get(),
+        },
+    };
+
+    let mut developed = Vec::new();
+    for bound in &input.bounds {
+        developed.push(
+            develop_complete_parallel(
+                bound,
+                &schema,
+                &mut |_| curve_schema(),
+                &vertex_position,
+                &family_of,
+            )
+            .expect("a closed circular edge develops into a complete simple parallel"),
+        );
+    }
+
+    // One occurrence, closing on its own single source vertex, one full turn.
+    for (parallel, level) in developed.iter().zip(levels) {
+        assert_eq!(parallel.edge_uses.len(), 1);
+        assert_eq!(parallel.homology.abs(), 1, "a primitive single turn");
+        assert!((parallel.starts[0].x - level).abs() < 1.0e-12);
+        assert!((parallel.terminal.x - level).abs() < 1.0e-12);
+        let period = schema.deck_generator().signed_period().get();
+        assert!(
+            (parallel.terminal.y - parallel.starts[0].y).abs() - period.abs() < 1.0e-9,
+            "the developed chain closes exactly one period away"
+        );
+    }
+    assert_eq!(
+        developed[0].homology + developed[1].homology,
+        0,
+        "the two circles' own parameter senses induce opposite boundary homologies"
+    );
+
+    // The next certified stage consumes them: two distinct, strictly ordered
+    // carriers, which is precisely what the band admission asks of this input.
+    let carriers = (
+        carrier_of(&developed[0], &schema),
+        carrier_of(&developed[1], &schema),
+    );
+    assert!(
+        matches!(
+            classify_carriers(&carriers.0, &carriers.1),
+            CarrierRelation::DistinctCarrier {
+                first_is_lower: true,
+                separation
+            } if separation > 0.0
+        ),
+        "two closed circular edges at different levels are two distinct, \
+         strictly ordered circles"
+    );
 }
 
 /// Two complete coincident cylinder circles are the same carrier, and the
