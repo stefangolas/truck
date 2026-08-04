@@ -44,11 +44,13 @@
 //!   against `[0, 1]`, with exact endpoint identity admissions (a root at
 //!   `0` or `1` is admitted only when the line's own endpoint is exactly on
 //!   the support circle, decided by the exact on-circle predicate);
-//! - a circular-arc piece by the exact sign of `orient(S, E, I)` over the
-//!   root's certified enclosure, compared against the parity-certified
-//!   expected sign.
+//! - a circular-arc piece by **certified parameter membership** (the A7
+//!   repair, GEN-001E): the root's certified arc-parameter enclosure is
+//!   compared against the piece's authoritative endpoint parameters (the
+//!   source's declared trim values or the certified critical enclosures).
+//!   No rounded evaluated endpoint coordinate decides membership.
 //!
-//! # Endpoint identity and the chord-side precondition
+//! # Endpoint identity and the parameter-membership precondition
 //!
 //! An arc endpoint is admitted as the location of a root only on a
 //! certificate, never from enclosure overlap alone, and never from an exact
@@ -71,17 +73,18 @@
 //!    This identifies *the* root at the endpoint without trusting a rounded
 //!    evaluated point.
 //!
-//! The chord-side orientation test rests on a precondition that
-//! x-monotone decomposition guarantees: **a nondegenerate x-monotone circle
-//! piece has distinct semantic endpoints and an absolute parameter sweep no
-//! greater than `π`** (its endpoints lie between consecutive x-extrema,
-//! which are `π` apart in parameter). Under that precondition, for three
-//! points on a circle `orient(S, E, I) < 0` iff `I` lies on the arc from
-//! `S` to `E`, so the chord-side sign is an exact membership test — the
-//! complement arc of the same chord would require a sweep `> π`. The piece
-//! preserves the source traversal direction, so the arc direction is the
-//! authoritative sign of `source.t1 − source.t0`, never rederived from
-//! critical parameter enclosures.
+//! The membership test rests on the x-monotone decomposition's guarantee: a
+//! nondegenerate x-monotone circle piece covers exactly the certified
+//! parameter range between its authoritative endpoints (the source's
+//! unwrapped interval split at the certified x-critical enclosures). A root's
+//! certified parameter enclosure is therefore compared against that range
+//! ([`arc_parameter_membership`]) — Interior only when strictly between the
+//! two endpoint parameters, Exterior only when certifiably outside, and
+//! Boundary when it touches a piece boundary. This replaces the A7
+//! chord-side orient test, which read rounded evaluated arc endpoints
+//! (`arc.start.point()` / `arc.end.point()`); the conservative outcomes are
+//! unchanged (a straddle goes to endpoint admission or `Undecidable`, never
+//! an invented membership).
 //!
 //! No tolerance establishes topology. [`LocationOnPiece`] is exhaustive:
 //! only a certified [`LocationOnPiece::Exterior`] is silently discarded. An
@@ -107,7 +110,7 @@
 //! - triple intersections (handled by the sweep, ARR-003)
 
 use super::curve2d::{DirectedCircularArc2, LineSegment2};
-use super::exact::{cross_exp, exact_dot2, exact_sq_dist, CertifiedInterval, Expansion};
+use super::exact::{exact_dot2, exact_sq_dist, CertifiedInterval, Expansion};
 use super::planar_slice::{classify_segments, SegmentIntersection};
 use super::super::source_evidence::{EdgeUseId, SourceVertexKey};
 use super::xmonotone::{ArcPieceEndpoint, XMonotoneCircularArc2, XMonotoneLine2, XMonotonePiece2};
@@ -427,6 +430,11 @@ fn dot_diff_exp(a: Point2, b: Point2, v: Vector2) -> Expansion {
 ///
 /// The `±a.x·a.y` terms cancel exactly (f64 multiplication is commutative),
 /// so the six-term expansion is exact over the coordinates.
+///
+/// `#[cfg(test)]`: the production membership path (A7, GEN-001E) decides arc
+/// membership by certified parameter evidence, so this exact orient helper
+/// survives only as a test oracle.
+#[cfg(test)]
 fn orient_exp(a: Point2, b: Point2, c: Point2) -> Expansion {
     let mut acc = Expansion::from_product(b.x, c.y);
     acc = acc.merge(&Expansion::from_product(b.x, a.y).negate());
@@ -461,16 +469,6 @@ fn cross_exp2(ux: &Expansion, uy: &Expansion, vx: &Expansion, vy: &Expansion) ->
 /// Exact `u · v = ux·vx + uy·vy` over two exact coordinate-difference pairs.
 fn dot_exp2(ux: &Expansion, uy: &Expansion, vx: &Expansion, vy: &Expansion) -> Expansion {
     ux.mul_expansion(vx).merge(&uy.mul_expansion(vy))
-}
-
-/// Exact `(b − a) × v` where `v` is an exact coordinate-difference pair.
-///
-/// The `(b − a)` difference is itself expanded exactly, so the result is the
-/// exact cross product over the declared coordinates.
-fn cross_ab_v_exp2(a: Point2, b: Point2, vx: &Expansion, vy: &Expansion) -> Expansion {
-    let dx = Expansion::from_sum(b.x, -a.x);
-    let dy = Expansion::from_sum(b.y, -a.y);
-    dx.mul_expansion(vy).merge(&dy.mul_expansion(vx).negate())
 }
 
 /// Exact `d · v` where `d` is an exact coordinate-difference pair and `v` is a
@@ -866,82 +864,15 @@ fn arc_arc_source_join(
 }
 
 // ---------------------------------------------------------------------------
-// Exact arc membership: the orient test
+// Exact arc membership: the certified parameter test (A7, GEN-001E)
 // ---------------------------------------------------------------------------
 
-/// The three decisive outcomes of the exact orient test over an enclosure.
+/// The three decisive outcomes of the membership test over an enclosure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OrientLocation {
     Interior,
     Exterior,
     Boundary,
-}
-
-/// The sign the chord-side orientation must have for a point to lie on the
-/// arc piece.
-///
-/// # The chord-side membership precondition
-///
-/// A nondegenerate x-monotone circle piece has **distinct semantic endpoints
-/// and an absolute parameter sweep no greater than `π`** (its endpoints lie
-/// between consecutive x-extrema, which are `π` apart in parameter). For
-/// three distinct points on a circle, `orient(S, E, I) < 0` iff `I` lies on
-/// the counterclockwise arc from `S` to `E`; under the `≤ π` span the
-/// chord-side sign is an exact membership test on that arc — the complement
-/// arc of the same chord would require a sweep `> π`. This is the certificate
-/// [`orient_location`] decides against.
-///
-/// # Direction is source-authoritative
-///
-/// Each monotone piece preserves the source traversal order, so the arc
-/// direction is the authoritative sign of `source.t1 − source.t0`; it is not
-/// rederived by comparing critical parameter enclosures. The handedness of
-/// the parameterization is the exact sign of `cross(cos_basis, sin_basis)`,
-/// an expansion sign rather than a raw `f64` determinant.
-fn expected_orient_sign(arc: &XMonotoneCircularArc2) -> Option<i64> {
-    let handedness = match cross_exp(
-        [arc.source.cos_basis.x, arc.source.cos_basis.y],
-        [arc.source.sin_basis.x, arc.source.sin_basis.y],
-    )
-    .sign()
-    {
-        CertifiedSign::Positive => 1,
-        CertifiedSign::Negative => -1,
-        CertifiedSign::Zero => return None,
-    };
-    if arc.source.t1 > arc.source.t0 {
-        Some(-handedness)
-    } else if arc.source.t1 < arc.source.t0 {
-        Some(handedness)
-    } else {
-        None
-    }
-}
-
-/// Locate the exact orient value over the root's enclosure against the
-/// expected sign.
-fn orient_location(orient: &CertifiedInterval, expected: i64) -> OrientLocation {
-    let all_positive = orient.lo > 0.0;
-    let all_negative = orient.hi < 0.0;
-    match expected {
-        e if e > 0 => {
-            if all_positive {
-                OrientLocation::Interior
-            } else if all_negative {
-                OrientLocation::Exterior
-            } else {
-                OrientLocation::Boundary
-            }
-        }
-        _ => {
-            if all_negative {
-                OrientLocation::Interior
-            } else if all_positive {
-                OrientLocation::Exterior
-            } else {
-                OrientLocation::Boundary
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1113,8 +1044,15 @@ fn arc_endpoint_identity_for_line(
     // endpoint parameter. The endpoint's rounded evaluated point is never
     // consulted; the root's certified arc parameter decides.
     let t_end = arc_endpoint_parameter(arc, role, endpoint);
-    let t_root = arc_parameter_for_line(arc, seg.start, dx, dy, s_iv)?;
-    let t_other = other_root.and_then(|o| arc_parameter_for_line(arc, seg.start, dx, dy, o));
+    let t_root = match arc_parameter_for_line(arc, seg.start, dx, dy, s_iv) {
+        Ok(ArcParameterLift::OnPiece(t)) => t,
+        // Unresolved lift or certifiably off the piece: no endpoint admission.
+        _ => return None,
+    };
+    let t_other = other_root.and_then(|o| match arc_parameter_for_line(arc, seg.start, dx, dy, o) {
+        Ok(ArcParameterLift::OnPiece(t)) => Some(t),
+        _ => None,
+    });
     if attributed_to_this_arc_root(&t_root, t_other.as_ref(), &t_end) {
         Some(admission_from_endpoint(arc, role, endpoint))
     } else {
@@ -1159,9 +1097,15 @@ fn arc_endpoint_identity_for_circle(
     let t_other = if side == 0 {
         None
     } else {
-        arc_parameter_for_circle(arc, c1, dcx, dcy, dist_iv, a_iv, h_iv, -side)
+        match arc_parameter_for_circle(arc, c1, dcx, dcy, dist_iv, a_iv, h_iv, -side) {
+            Ok(ArcParameterLift::OnPiece(t)) => Some(t),
+            _ => None,
+        }
     };
-    let t_root = arc_parameter_for_circle(arc, c1, dcx, dcy, dist_iv, a_iv, h_iv, side)?;
+    let t_root = match arc_parameter_for_circle(arc, c1, dcx, dcy, dist_iv, a_iv, h_iv, side) {
+        Ok(ArcParameterLift::OnPiece(t)) => t,
+        _ => return None,
+    };
     if !attributed_to_this_arc_root(&t_root, t_other.as_ref(), &t_end) {
         return None;
     }
@@ -1249,19 +1193,18 @@ fn attributed_to_this_arc_root(
 // Arc parameter enclosures
 // ---------------------------------------------------------------------------
 
-/// A conservative reference window for the arc piece, used only to choose
-/// which `2π` copy of a parameter angle to record. Membership is decided by
-/// the exact orient test; this is a reporting choice.
-fn arc_span_reference(arc: &XMonotoneCircularArc2) -> (f64, f64) {
-    let start = match &arc.start {
-        ArcPieceEndpoint::SourceVertex { .. } => arc.source.t0,
-        ArcPieceEndpoint::Critical(c) => (c.parameter_enclosure.0 + c.parameter_enclosure.1) * 0.5,
-    };
-    let end = match &arc.end {
-        ArcPieceEndpoint::SourceVertex { .. } => arc.source.t1,
-        ArcPieceEndpoint::Critical(c) => (c.parameter_enclosure.0 + c.parameter_enclosure.1) * 0.5,
-    };
-    (start.min(end), start.max(end))
+/// The certified parameter span of an x-monotone arc piece, on the source's
+/// authoritative unwrapped axis.
+///
+/// The hull of the two authoritative endpoint parameters ([`arc_endpoint_parameter`]:
+/// the source's declared trim values or the certified critical enclosures).
+/// This is a *superset* of the piece's true parameter range and is the same
+/// interval the membership test compares a lifted root against, so a lift
+/// selected against it is on the same axis as the piece endpoints.
+fn arc_piece_span(arc: &XMonotoneCircularArc2) -> (f64, f64) {
+    let start = arc_endpoint_parameter(arc, EndpointRole::Start, &arc.start);
+    let end = arc_endpoint_parameter(arc, EndpointRole::End, &arc.end);
+    (start.lo.min(end.lo), start.hi.max(end.hi))
 }
 
 /// The certified angular range of a box `(u, v) = (cos t, sin t)`, in a
@@ -1296,30 +1239,104 @@ fn interval_atan2(v: CertifiedInterval, u: CertifiedInterval) -> Option<(f64, f6
     Some((lo.next_down(), hi.next_up()))
 }
 
-/// Wrap an angular enclosure into the arc piece's unwrapped parameter window.
-fn arc_parameter_from_uv(
+/// The certified lift of a root's angle box onto the piece's unwrapped axis.
+///
+/// Either the root is certifiably off the piece, or its parameter is certified
+/// on exactly one `2π` copy of the piece's authoritative axis.
+#[derive(Debug, Clone, PartialEq)]
+enum ArcParameterLift {
+    /// Certifiably off the piece: no `2π` copy of the principal angle
+    /// enclosure intersects the piece's certified parameter span.
+    OffPiece,
+    /// The uniquely-certified lifted parameter enclosure on the piece's axis.
+    OnPiece(ParameterEnclosure),
+}
+
+/// The maximum number of `2π`-copy candidates inspected before a lift is
+/// declared indeterminate. An x-monotone piece has span `< π`, so a sound
+/// candidate range holds at most two integers; the padded enumeration below
+/// is always small.
+const MAX_LIFT_CANDIDATES: i64 = 8;
+
+/// Lift a root's certified principal angle enclosure `Θ = [a_lo, a_hi]`
+/// (mod `2π`, from [`interval_atan2`]) onto the piece's authoritative
+/// unwrapped axis.
+///
+/// **Certified branch selection (GEN-001E, A7 closure).** The previous lift
+/// picked the `2π` copy nearest the *midpoint* of a reference window — a
+/// representative round that could select a copy off the piece and, once that
+/// lifted parameter fed the membership decision, could create topology. The
+/// selection here is an **enumeration of every integer `k` such that
+/// `Θ + 2πk` may intersect the piece's certified parameter span `[lo, hi]`**
+/// ([`arc_piece_span`], the same axis as the piece endpoints):
+///
+/// ```text
+/// zero compatible copies    -> OffPiece   (certifiably exterior)
+/// exactly one compatible k  -> OnPiece(Θ + 2πk)   (uniquely certified lift)
+/// two or more compatible k  -> Unresolved (ambiguous copy)
+/// non-finite / unbounded    -> Unresolved (indeterminate arithmetic)
+/// ```
+///
+/// A midpoint may seed nothing here: the final lift is chosen only by the
+/// certified compatibility count. Soundness: the true parameter of a root on
+/// the piece satisfies `a_true + 2π·k_true ∈ [L, H] ⊆ [lo, hi]` with
+/// `a_true ∈ Θ`, so `k_true` is among the enumerated candidates and is the
+/// only compatible copy whenever the root's copy is unique.
+fn lift_arc_parameter(
     arc: &XMonotoneCircularArc2,
     u: CertifiedInterval,
     v: CertifiedInterval,
-) -> Option<ParameterEnclosure> {
-    let (a_lo, a_hi) = interval_atan2(v, u)?;
-    let span = arc_span_reference(arc);
-    let center = (span.0 + span.1) * 0.5;
-    let k = ((center - a_lo) / TAU).round();
-    let shift = k * TAU;
-    let shift_iv = CertifiedInterval {
-        lo: shift.next_down(),
-        hi: shift.next_up(),
-    };
-    let t = CertifiedInterval { lo: a_lo, hi: a_hi }.add(&shift_iv);
-    if !t.is_finite() {
-        return None;
+) -> Result<ArcParameterLift, PairUnresolved> {
+    let (a_lo, a_hi) = interval_atan2(v, u).ok_or(PairUnresolved::ParameterLocationUndecided)?;
+    if !a_lo.is_finite() || !a_hi.is_finite() {
+        return Err(PairUnresolved::NonFiniteComputedValue);
     }
-    Some(ParameterEnclosure { lo: t.lo, hi: t.hi })
+    let (lo, hi) = arc_piece_span(arc);
+    // Padded candidate range: rounding in the f64 bounds must never drop a
+    // compatible copy, so pad by one integer on each side and test each one.
+    let k_min = ((lo - a_hi) / TAU).floor() as i64 - 1;
+    let k_max = ((hi - a_lo) / TAU).ceil() as i64 + 1;
+    if k_max - k_min > MAX_LIFT_CANDIDATES {
+        return Err(PairUnresolved::ParameterLocationUndecided);
+    }
+    let mut compatible: Vec<i64> = Vec::new();
+    for k in k_min..=k_max {
+        let shift = TAU * k as f64;
+        let shift_lo = (a_lo + shift).next_down();
+        let shift_hi = (a_hi + shift).next_up();
+        if !shift_lo.is_finite() || !shift_hi.is_finite() {
+            return Err(PairUnresolved::NonFiniteComputedValue);
+        }
+        if shift_lo <= hi && lo <= shift_hi {
+            compatible.push(k);
+        }
+    }
+    match compatible.len() {
+        0 => Ok(ArcParameterLift::OffPiece),
+        1 => {
+            let k = compatible[0];
+            let shift = TAU * k as f64;
+            let lift_lo = (a_lo + shift).next_down();
+            let lift_hi = (a_hi + shift).next_up();
+            if !lift_lo.is_finite() || !lift_hi.is_finite() {
+                return Err(PairUnresolved::NonFiniteComputedValue);
+            }
+            Ok(ArcParameterLift::OnPiece(ParameterEnclosure {
+                lo: lift_lo,
+                hi: lift_hi,
+            }))
+        }
+        _ => Err(PairUnresolved::ParameterLocationUndecided),
+    }
 }
 
-/// The arc parameter enclosure of a line–circle root, via the certified
-/// `(cos t, sin t)` intervals, over the exact line direction.
+/// The certified lift of a line–circle root onto the arc piece's unwrapped
+/// axis, via the certified `(cos t, sin t)` intervals over the exact line
+/// direction.
+///
+/// The returned [`ArcParameterLift`] is on the same authoritative unwrapped
+/// axis as the piece endpoints: the `2π` copy is selected by the certified
+/// enumeration in [`lift_arc_parameter`], never by a midpoint round.
 #[allow(clippy::too_many_arguments)]
 fn arc_parameter_for_line(
     arc: &XMonotoneCircularArc2,
@@ -1327,14 +1344,14 @@ fn arc_parameter_for_line(
     dx: &Expansion,
     dy: &Expansion,
     s_iv: &ParameterEnclosure,
-) -> Option<ParameterEnclosure> {
+) -> Result<ArcParameterLift, PairUnresolved> {
     let cb = arc.source.cos_basis;
     let sb = arc.source.sin_basis;
     // The denominator enclosure comes from the exact squared radius, never
     // from the rounded `radius_squared()` scalar.
     let r2_exp = radius_squared_exp(&arc.source);
     if r2_exp.sign() == CertifiedSign::Zero {
-        return None;
+        return Err(PairUnresolved::ParameterLocationUndecided);
     }
     let r_iv = CertifiedInterval::from_expansion(&r2_exp);
     let s_ci = CertifiedInterval {
@@ -1345,13 +1362,22 @@ fn arc_parameter_for_line(
     let off_sin = CertifiedInterval::from_expansion(&dot_diff_exp(p, arc.source.center, sb));
     let d_cos = CertifiedInterval::from_expansion(&dot_vec_exp(dx, dy, cb.x, cb.y));
     let d_sin = CertifiedInterval::from_expansion(&dot_vec_exp(dx, dy, sb.x, sb.y));
-    let u = off_cos.add(&d_cos.mul(&s_ci)).div(&r_iv)?;
-    let v = off_sin.add(&d_sin.mul(&s_ci)).div(&r_iv)?;
-    arc_parameter_from_uv(arc, u, v)
+    let u = off_cos
+        .add(&d_cos.mul(&s_ci))
+        .div(&r_iv)
+        .ok_or(PairUnresolved::NonFiniteComputedValue)?;
+    let v = off_sin
+        .add(&d_sin.mul(&s_ci))
+        .div(&r_iv)
+        .ok_or(PairUnresolved::NonFiniteComputedValue)?;
+    lift_arc_parameter(arc, u, v)
 }
 
-/// The arc parameter enclosure of a circle–circle root on one arc, via the
-/// certified `(cos t, sin t)` intervals.
+/// The certified lift of a circle–circle root on one arc onto the arc piece's
+/// unwrapped axis, via the certified `(cos t, sin t)` intervals.
+///
+/// The returned [`ArcParameterLift`] is on the same authoritative unwrapped
+/// axis as the piece endpoints (see [`lift_arc_parameter`]).
 #[allow(clippy::too_many_arguments)]
 fn arc_parameter_for_circle(
     arc: &XMonotoneCircularArc2,
@@ -1362,18 +1388,18 @@ fn arc_parameter_for_circle(
     a_iv: &CertifiedInterval,
     h_iv: &CertifiedInterval,
     side: i64,
-) -> Option<ParameterEnclosure> {
+) -> Result<ArcParameterLift, PairUnresolved> {
     // The denominator enclosure comes from the exact squared radius, never
     // from the rounded `radius_squared()` scalar.
     let r2_exp = radius_squared_exp(&arc.source);
     if r2_exp.sign() == CertifiedSign::Zero {
-        return None;
+        return Err(PairUnresolved::ParameterLocationUndecided);
     }
     let r_iv = CertifiedInterval::from_expansion(&r2_exp);
     let cb = arc.source.cos_basis;
     let sb = arc.source.sin_basis;
-    let a_over_d = a_iv.div(dist_iv)?;
-    let h_over_d = h_iv.div(dist_iv)?;
+    let a_over_d = a_iv.div(dist_iv).ok_or(PairUnresolved::NonFiniteComputedValue)?;
+    let h_over_d = h_iv.div(dist_iv).ok_or(PairUnresolved::NonFiniteComputedValue)?;
     let sign_h = if side >= 0 { 1.0 } else { -1.0 };
     let sh = CertifiedInterval::point(sign_h);
     let off_cos = CertifiedInterval::from_expansion(&dot_diff_exp(root_center, arc.source.center, cb));
@@ -1383,10 +1409,16 @@ fn arc_parameter_for_circle(
     let rot_cos = CertifiedInterval::from_expansion(&rot_dot_exp(dcx, dcy, cb.x, cb.y));
     let rot_sin = CertifiedInterval::from_expansion(&rot_dot_exp(dcx, dcy, sb.x, sb.y));
     let mut u = off_cos.add(&a_over_d.mul(&dc_cos));
-    u = u.add(&h_over_d.mul(&rot_cos).mul(&sh)).div(&r_iv)?;
+    u = u
+        .add(&h_over_d.mul(&rot_cos).mul(&sh))
+        .div(&r_iv)
+        .ok_or(PairUnresolved::NonFiniteComputedValue)?;
     let mut v = off_sin.add(&a_over_d.mul(&dc_sin));
-    v = v.add(&h_over_d.mul(&rot_sin).mul(&sh)).div(&r_iv)?;
-    arc_parameter_from_uv(arc, u, v)
+    v = v
+        .add(&h_over_d.mul(&rot_sin).mul(&sh))
+        .div(&r_iv)
+        .ok_or(PairUnresolved::NonFiniteComputedValue)?;
+    lift_arc_parameter(arc, u, v)
 }
 
 // ---------------------------------------------------------------------------
@@ -1451,8 +1483,64 @@ fn line_piece_location(
     PieceLocation::undecided(NumericalCause::EnclosureOverlapsBoundary)
 }
 
-/// The location of a line–circle root on the arc piece, by the exact orient
-/// test over the root's certified enclosure.
+/// The membership of a root on an x-monotone arc piece, decided by certified
+/// parameter evidence (the A7 repair, GEN-001E).
+///
+/// A7: the previous chord-side orient test read rounded evaluated arc
+/// endpoints (`arc.start.point()` / `arc.end.point()`) and decided
+/// interior/exterior against a sign of the exact orient over those
+/// *representatives*. That rounded geometry could decide topology. The
+/// certified replacement decides membership by interval separation on the
+/// **authoritative parameter axis**: an x-monotone piece covers exactly the
+/// certified parameter range between its authoritative endpoints — the source's
+/// declared trim values or the certified critical enclosures, never a rounded
+/// `cos`/`sin` evaluation — and the root's certified parameter enclosure is
+/// compared against it.
+///
+/// - `Exterior` when the root is certifiably below or above the piece's
+///   parameter range (the piece endpoints' enclosures are upper/lower bounds on
+///   the true endpoint parameters, so strict interval separation is certified);
+/// - `Interior` when the root is certifiably strictly between the two endpoint
+///   parameters (its enclosure is separated from both);
+/// - `Boundary` when the root's enclosure touches a piece boundary — the caller
+///   attempts an endpoint admission and otherwise reports `Undecidable`.
+///
+/// The conservative outcomes are unchanged from the orient test: a straddle
+/// never invents membership. Only the deciding evidence is now certified
+/// parameter evidence instead of rounded endpoint representatives.
+fn arc_parameter_membership(
+    arc: &XMonotoneCircularArc2,
+    t_iv: &ParameterEnclosure,
+) -> OrientLocation {
+    let start = arc_endpoint_parameter(arc, EndpointRole::Start, &arc.start);
+    let end = arc_endpoint_parameter(arc, EndpointRole::End, &arc.end);
+    if arc.source.t1 == arc.source.t0 {
+        return OrientLocation::Boundary;
+    }
+    // The piece preserves the source traversal direction, so the parameter
+    // order of its endpoints is the source's: ascending when t1 > t0, else
+    // descending. `lower`/`upper` are the certified endpoint enclosures at the
+    // low and high parameter ends.
+    let (lower, upper) = if arc.source.t1 > arc.source.t0 {
+        (start, end)
+    } else {
+        (end, start)
+    };
+    if t_iv.hi < lower.lo {
+        return OrientLocation::Exterior;
+    }
+    if t_iv.lo > upper.hi {
+        return OrientLocation::Exterior;
+    }
+    if t_iv.lo > lower.hi && t_iv.hi < upper.lo {
+        return OrientLocation::Interior;
+    }
+    OrientLocation::Boundary
+}
+
+/// The location of a line–circle root on the arc piece, by certified
+/// parameter membership against the piece's authoritative endpoint parameters
+/// (A7: no rounded endpoint representative decides the location).
 #[allow(clippy::too_many_arguments)]
 fn arc_location_for_line_root(
     arc: &XMonotoneCircularArc2,
@@ -1462,26 +1550,14 @@ fn arc_location_for_line_root(
     s_iv: &ParameterEnclosure,
     other_root: Option<&ParameterEnclosure>,
 ) -> Result<PieceLocation, PairUnresolved> {
-    let expected = expected_orient_sign(arc).ok_or(PairUnresolved::ParameterLocationUndecided)?;
     let p = line.source.start;
-    let s = arc.start.point();
-    let e = arc.end.point();
-    let c0 = CertifiedInterval::from_expansion(&orient_exp(s, e, p));
-    let c1 = CertifiedInterval::from_expansion(&cross_ab_v_exp2(s, e, dx, dy));
-    let s_ci = CertifiedInterval {
-        lo: s_iv.lo,
-        hi: s_iv.hi,
+    let lift = arc_parameter_for_line(arc, p, dx, dy, s_iv)?;
+    let t_iv = match lift {
+        ArcParameterLift::OffPiece => return Ok(PieceLocation::exterior()),
+        ArcParameterLift::OnPiece(t) => t,
     };
-    let orient = c0.add(&c1.mul(&s_ci));
-    if !orient.is_finite() {
-        return Err(PairUnresolved::NonFiniteComputedValue);
-    }
-    match orient_location(&orient, expected) {
-        OrientLocation::Interior => {
-            let t = arc_parameter_for_line(arc, p, dx, dy, s_iv)
-                .ok_or(PairUnresolved::NonFiniteComputedValue)?;
-            Ok(PieceLocation::interior(t))
-        }
+    match arc_parameter_membership(arc, &t_iv) {
+        OrientLocation::Interior => Ok(PieceLocation::interior(t_iv)),
         OrientLocation::Exterior => Ok(PieceLocation::exterior()),
         OrientLocation::Boundary => {
             if let Some(ad) = arc_endpoint_identity_for_line(
@@ -1513,8 +1589,9 @@ fn arc_location_for_line_root(
     }
 }
 
-/// The location of a circle–circle root on one arc piece, by the exact
-/// orient test over the root's certified enclosure.
+/// The location of a circle–circle root on one arc piece, by certified
+/// parameter membership against the piece's authoritative endpoint parameters
+/// (A7: no rounded endpoint representative decides the location).
 #[allow(clippy::too_many_arguments)]
 fn arc_location_for_circle_root(
     arc: &XMonotoneCircularArc2,
@@ -1526,31 +1603,13 @@ fn arc_location_for_circle_root(
     h_iv: &CertifiedInterval,
     side: i64,
 ) -> Result<PieceLocation, PairUnresolved> {
-    let expected = expected_orient_sign(arc).ok_or(PairUnresolved::ParameterLocationUndecided)?;
-    let s = arc.start.point();
-    let e = arc.end.point();
-    let a_over_d = a_iv
-        .div(dist_iv)
-        .ok_or(PairUnresolved::NonFiniteComputedValue)?;
-    let h_over_d = h_iv
-        .div(dist_iv)
-        .ok_or(PairUnresolved::NonFiniteComputedValue)?;
-    let term0 = CertifiedInterval::from_expansion(&orient_exp(s, e, c1));
-    let terma = CertifiedInterval::from_expansion(&cross_ab_v_exp2(s, e, dcx, dcy));
-    // The ±h term is oriented along the 90°-rotated center axis.
-    let termh = CertifiedInterval::from_expansion(&cross_ab_v_exp2(s, e, &dcy.negate(), dcx));
-    let sign_h = if side >= 0 { 1.0 } else { -1.0 };
-    let mut orient = term0.add(&a_over_d.mul(&terma));
-    orient = orient.add(&h_over_d.mul(&termh).mul(&CertifiedInterval::point(sign_h)));
-    if !orient.is_finite() {
-        return Err(PairUnresolved::NonFiniteComputedValue);
-    }
-    match orient_location(&orient, expected) {
-        OrientLocation::Interior => {
-            let t = arc_parameter_for_circle(arc, c1, dcx, dcy, dist_iv, a_iv, h_iv, side)
-                .ok_or(PairUnresolved::NonFiniteComputedValue)?;
-            Ok(PieceLocation::interior(t))
-        }
+    let lift = arc_parameter_for_circle(arc, c1, dcx, dcy, dist_iv, a_iv, h_iv, side)?;
+    let t_iv = match lift {
+        ArcParameterLift::OffPiece => return Ok(PieceLocation::exterior()),
+        ArcParameterLift::OnPiece(t) => t,
+    };
+    match arc_parameter_membership(arc, &t_iv) {
+        OrientLocation::Interior => Ok(PieceLocation::interior(t_iv)),
         OrientLocation::Exterior => Ok(PieceLocation::exterior()),
         OrientLocation::Boundary => {
             if let Some(ad) = arc_endpoint_identity_for_circle(
@@ -2107,7 +2166,10 @@ mod tests {
         CurveOccurrenceProvenance, DevelopedCurve2D, SourceEdgeId, SourceEntityId, SourceFaceId,
     };
     use super::super::super::source_evidence::{BoundId, EdgeUseId, SourceVertexKey};
-    use super::super::xmonotone::{make_x_monotone, NumericalPolicy};
+    use super::super::xmonotone::{
+        make_x_monotone, ClosedInterval, DecompositionKind, MonotoneKind, NumericalPolicy,
+        PieceIdentity,
+    };
 
     const PI: f64 = std::f64::consts::PI;
 
@@ -2675,6 +2737,252 @@ mod tests {
             near_root_represented || near_root_unresolved,
             "the near-start root (s ~ 0.5 ulp) must be represented or the curve \
              pair Unresolved — a far-root-only resolution must not satisfy this"
+        );
+    }
+
+    // -- certified 2π-copy lift and parameter membership (A7, GEN-001E) -------
+
+    /// A fabricated x-monotone arc piece over the source interval `[t0, t1]`
+    /// with authoritative source-vertex endpoints. Test-only: the piece is not
+    /// produced by `make_x_monotone`; it exists to pin the certified lift and
+    /// membership semantics directly.
+    fn fabricated_piece(t0: f64, t1: f64) -> XMonotoneCircularArc2 {
+        let source = DirectedCircularArc2 {
+            center: Point2::new(0.0, 0.0),
+            cos_basis: Vector2::new(1.0, 0.0),
+            sin_basis: Vector2::new(0.0, 1.0),
+            t0,
+            t1,
+            provenance: provenance(),
+        };
+        let start = ArcPieceEndpoint::SourceVertex {
+            vertex_id: SourceVertexKey::ShellVertex(1),
+            point: Point2::new(0.0, 0.0),
+        };
+        let end = ArcPieceEndpoint::SourceVertex {
+            vertex_id: SourceVertexKey::ShellVertex(2),
+            point: Point2::new(0.0, 0.0),
+        };
+        XMonotoneCircularArc2 {
+            source,
+            start,
+            end,
+            kind: MonotoneKind::StrictlyIncreasingX,
+            identity: PieceIdentity {
+                source_occurrence: provenance(),
+                source_piece_index: 0,
+                parameter_hint_interval: ClosedInterval { t0, t1 },
+                decomposition_kind: DecompositionKind::WholeOccurrence,
+            },
+        }
+    }
+
+    fn lift(
+        piece: &XMonotoneCircularArc2,
+        u: CertifiedInterval,
+        v: CertifiedInterval,
+    ) -> Result<ArcParameterLift, PairUnresolved> {
+        lift_arc_parameter(piece, u, v)
+    }
+
+    fn on_piece(result: Result<ArcParameterLift, PairUnresolved>) -> ParameterEnclosure {
+        match result {
+            Ok(ArcParameterLift::OnPiece(t)) => t,
+            other => panic!("expected OnPiece, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ascending_interior_root_is_lifted_and_membership_is_interior() {
+        // The upper semicircle piece [0, π], ascending. A root at angle ≈ π/2.
+        let piece = fabricated_piece(0.0, PI);
+        let u = CertifiedInterval { lo: -0.1, hi: 0.1 };
+        let v = CertifiedInterval { lo: 0.9, hi: 1.1 };
+        let t = on_piece(lift(&piece, u, v));
+        // The lift is the k = 0 copy, on the piece's [0, π] axis.
+        assert!(t.lo > 1.0 && t.hi < 2.0, "lift ≈ π/2, got {t:?}");
+        assert_eq!(
+            arc_parameter_membership(&piece, &t),
+            OrientLocation::Interior
+        );
+    }
+
+    #[test]
+    fn descending_interior_root_is_lifted_and_membership_is_interior() {
+        // The same geometric piece traversed descending: source t1 < t0. The
+        // parameter evidence is unchanged and the membership stays Interior —
+        // direction is read from the authoritative source, not from a rounded
+        // endpoint.
+        let piece = fabricated_piece(PI, 0.0);
+        let u = CertifiedInterval { lo: -0.1, hi: 0.1 };
+        let v = CertifiedInterval { lo: 0.9, hi: 1.1 };
+        let t = on_piece(lift(&piece, u, v));
+        assert_eq!(
+            arc_parameter_membership(&piece, &t),
+            OrientLocation::Interior
+        );
+    }
+
+    #[test]
+    fn exterior_root_has_no_compatible_copy() {
+        // Piece [0, π]; a root at angle ≈ 4.08 rad (1.3π) is off the piece on
+        // every 2π copy.
+        let piece = fabricated_piece(0.0, PI);
+        let u = CertifiedInterval { lo: -0.55, hi: -0.45 };
+        let v = CertifiedInterval { lo: -0.85, hi: -0.75 };
+        match lift(&piece, u, v) {
+            Ok(ArcParameterLift::OffPiece) => {}
+            other => panic!("expected OffPiece, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn critical_endpoint_root_is_boundary_not_interior() {
+        // A root whose certified enclosure overlaps the piece's start critical
+        // (angle 0 on [0, π]): Boundary, so the caller attempts an endpoint
+        // admission and otherwise reports Undecidable — never Interior.
+        let piece = fabricated_piece(0.0, PI);
+        let u = CertifiedInterval { lo: 0.9, hi: 1.0 };
+        let v = CertifiedInterval { lo: -0.2, hi: 0.2 };
+        let t = on_piece(lift(&piece, u, v));
+        assert_eq!(
+            arc_parameter_membership(&piece, &t),
+            OrientLocation::Boundary
+        );
+    }
+
+    #[test]
+    fn boundary_overlap_root_is_boundary_not_interior() {
+        // A root enclosure straddling the piece start: Boundary. The straddle
+        // never invents membership.
+        let piece = fabricated_piece(0.0, PI);
+        let u = CertifiedInterval { lo: 0.9, hi: 1.0 };
+        let v = CertifiedInterval { lo: -0.3, hi: 0.3 };
+        let t = on_piece(lift(&piece, u, v));
+        assert_eq!(
+            arc_parameter_membership(&piece, &t),
+            OrientLocation::Boundary
+        );
+    }
+
+    #[test]
+    fn near_boundary_root_that_cannot_certify_interior_is_boundary_or_unresolved() {
+        // The unit-level counterpart of `near_start_root_...`: a root enclosure
+        // that just touches the start boundary cannot certify Interior and is
+        // Boundary (the pair-level lift then reports Undecidable/Unresolved).
+        let piece = fabricated_piece(0.0, PI);
+        let u = CertifiedInterval { lo: 0.999, hi: 1.0 };
+        let v = CertifiedInterval { lo: -0.001, hi: 0.001 };
+        let t = on_piece(lift(&piece, u, v));
+        assert_eq!(
+            arc_parameter_membership(&piece, &t),
+            OrientLocation::Boundary
+        );
+    }
+
+    #[test]
+    fn seam_crossing_root_lifts_onto_the_source_axis() {
+        // A seam-crossing piece spanning [2π, 3π]. A root at principal angle
+        // ≈ 0.6 rad is lifted to the k = 1 copy ≈ 2π + 0.6, on the piece's
+        // unwrapped axis — never wrapped back to the principal angle.
+        let piece = fabricated_piece(TAU, 3.0 * PI);
+        let u = CertifiedInterval { lo: 0.8, hi: 0.9 };
+        let v = CertifiedInterval { lo: 0.5, hi: 0.7 };
+        let t = on_piece(lift(&piece, u, v));
+        assert!(
+            t.lo >= TAU - 1e-9 && t.hi <= 3.0 * PI + 1e-9,
+            "the lift must lie on the [2π, 3π] source axis, got {t:?}"
+        );
+        assert!(t.contains(TAU + 0.6), "lift must contain the unwrapped 2π + 0.6");
+        // And membership on that axis is Interior for this interior root.
+        assert_eq!(
+            arc_parameter_membership(&piece, &t),
+            OrientLocation::Interior
+        );
+    }
+
+    #[test]
+    fn midpoint_nearest_copy_is_not_accepted_unless_uniquely_certified() {
+        // The A7 regression: the previous lift rounded `(center - a_lo)/2π`
+        // to the nearest integer, i.e. selected the copy nearest the *midpoint*
+        // of a reference window. Here a wide authoritative piece [0, 5π/2] is
+        // compatible with **two** 2π copies of the root's angle enclosure
+        // (k = 0 and k = 1 both intersect it), so no copy is uniquely
+        // certified: the certified lift is `Unresolved`, never a midpoint pick.
+        // The old midpoint would have selected k = round(1.25π/2π) = 1 and
+        // silently minted a lift.
+        let piece = fabricated_piece(0.0, 5.0 * PI / 2.0);
+        let u = CertifiedInterval { lo: 0.9, hi: 1.0 };
+        let v = CertifiedInterval { lo: -0.1, hi: 0.1 };
+        match lift(&piece, u, v) {
+            Err(PairUnresolved::ParameterLocationUndecided) => {}
+            other => panic!("ambiguous copy must be Unresolved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unique_copy_is_lifted_even_when_a_midpoint_would_not_be_nearest() {
+        // A seam-crossing piece [2π, 3π] with a root whose angle enclosure
+        // extends below the piece start: the certified lift selects the unique
+        // compatible copy (k = 1, containing 2π) on the piece axis. The
+        // parameter fed to the membership test is therefore on the same
+        // unwrapped axis as the piece endpoints.
+        let piece = fabricated_piece(TAU, 3.0 * PI);
+        // Principal angle enclosure straddling angle 0 (i.e. the piece's 2π
+        // boundary in unwrapped terms).
+        let u = CertifiedInterval { lo: 0.9, hi: 1.0 };
+        let v = CertifiedInterval { lo: -0.2, hi: 0.2 };
+        let t = on_piece(lift(&piece, u, v));
+        assert!(
+            t.lo <= TAU && TAU <= t.hi,
+            "the unique lift must contain the piece start 2π, got {t:?}"
+        );
+        // It is Boundary at that endpoint (never Interior), and the enclosure
+        // is on the [2π, 3π] axis.
+        assert_eq!(
+            arc_parameter_membership(&piece, &t),
+            OrientLocation::Boundary
+        );
+    }
+
+    #[test]
+    fn seam_crossing_arc_root_parameter_is_recorded_on_the_source_axis() {
+        // Integration: a full-turn arc [0, 2π] crossed by a line at
+        // y = sin(2π − 0.2). One root is at the unwrapped parameter 2π − 0.2,
+        // near the 2π seam. Its recorded parameter enclosure must lie on the
+        // source axis (π, 2π] — never wrapped to −0.2.
+        let line = line_piece(
+            Point2::new(-2.0, -0.2_f64.sin()),
+            Point2::new(2.0, -0.2_f64.sin()),
+        );
+        let arc = arc_pieces(Point2::new(0.0, 0.0), 1.0, 0.0, 2.0 * PI, 0);
+        let mut saw_seam_root = false;
+        for piece in &arc {
+            match intersect(&line, piece) {
+                PairIntersectionResult::Intersections(pts) => {
+                    for rec in &pts {
+                        // The root at (cos(-0.2), sin(-0.2)) ≈ (0.98, -0.20).
+                        if rec.point.x > 0.9 && rec.point.y < -0.19 {
+                            assert!(
+                                rec.rhs_parameter.lo > PI,
+                                "the seam root parameter must be on (π, 2π], got {:?}",
+                                rec.rhs_parameter
+                            );
+                            assert!(
+                                rec.rhs_parameter.contains(2.0 * PI - 0.2),
+                                "the seam root parameter must contain 2π − 0.2, got {:?}",
+                                rec.rhs_parameter
+                            );
+                            saw_seam_root = true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_seam_root,
+            "the seam-crossing root at 2π − 0.2 must be recorded"
         );
     }
 }

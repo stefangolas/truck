@@ -37,15 +37,19 @@
 //! geometric *placement* stays a typed [`DeckPlacementResult::Unsupported`] (no
 //! unreviewed closest-vector algorithm is invented).
 //!
-//! # A7 — the chord-side representative is hidden, not yet repaired
+//! # A7 — closed in GEN-001E by certified parameter membership
 //!
-//! ARR-002's chord-side membership test reads rounded evaluated arc endpoints
+//! ARR-002's chord-side membership test read rounded evaluated arc endpoints
 //! (`arc.start.point()` / `arc.end.point()`); see `GEN-001.md` assumption A7.
-//! It is sound today only under the ≤π monotone-piece precondition. The generic
-//! contract repairs this *structurally* in GEN-001A: every incident branch
-//! carries a certified [`super::span::BranchGerm`], and ARR-003 consumes germs —
-//! never representative coordinates — for ordering and topology. The analytic
-//! orient test itself is replaced by a germ-based test in GEN-001C.
+//! GEN-001E closes A7 in the analytic fast path: arc-piece membership is
+//! decided by **certified parameter evidence** — the root's certified
+//! arc-parameter enclosure, lifted onto the piece's authoritative unwrapped
+//! axis by an enumeration of every compatible `2π` copy, and compared against
+//! the piece's authoritative endpoint parameters (source trim values or
+//! certified critical enclosures). No rounded endpoint coordinate and no
+//! midpoint-selected `2π` copy decides topology. Every incident branch still
+//! carries a certified [`super::span::BranchGerm`], and ARR-003 consumes
+//! germs and parameter enclosures — never representative coordinates.
 
 use super::curve2d::CurveOccurrenceProvenance;
 use super::evidence::NonEmptyVec;
@@ -59,6 +63,11 @@ use super::quotient::{
 };
 use super::span::{BranchGerm, CurveSpan2, SpanId};
 use super::super::source_evidence::{EdgeUseId, SourceVertexKey};
+// The certified CommonArc substrate (GEN-001E) lives in [`super::common_arc`];
+// `contact` re-exports it so the arrangement-facing contact surface stays here.
+pub use super::common_arc::{
+    ArcParticipant, CommonArc2, CommonArcEnd, CommonSupportBasis, OrientationAlongSupport,
+};
 use truck_geometry::prelude::Point2;
 
 /// Why a generic contact computation could not be certified.
@@ -100,6 +109,10 @@ pub enum GenericUnresolved {
     UnresolvedIdentityReferBack,
     /// A reused ARR-002 pairwise cause.
     Pair(PairUnresolved),
+    /// A positive-dimensional overlap whose certified CommonArc construction
+    /// failed — the overlap extent or parameter correspondence could not be
+    /// certified (GEN-001E). Never a guessed common arc.
+    UnresolvedCommonArc,
 }
 
 impl GenericUnresolved {
@@ -116,6 +129,7 @@ impl GenericUnresolved {
             Self::UnresolvedTangencyOrSingularity => "unresolved_tangency_or_singularity",
             Self::UnresolvedIdentityOrdering => "unresolved_identity_ordering",
             Self::UnresolvedIdentityReferBack => "unresolved_identity_refer_back",
+            Self::UnresolvedCommonArc => "unresolved_common_arc",
             Self::Pair(_) => "unresolved_pair",
         }
     }
@@ -144,15 +158,6 @@ impl CrossingClassification {
             ContactKind::Tangent => Self::Tangent,
         }
     }
-}
-
-/// Which end of a common arc an endpoint event sits at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CommonArcEnd {
-    /// The start end of the common interval.
-    Start,
-    /// The end end of the common interval.
-    End,
 }
 
 /// One participant's occurrence identity within an isolated-root key.
@@ -428,67 +433,6 @@ pub struct AggregatedQuotientEventKey {
     pub relative_deck_signature: DeckSignature,
 }
 
-/// The certified basis on which common support is claimed for a common arc.
-///
-/// GEN-001E populates the minimal cases; full common-factor extraction stays
-/// deferred, but the variant set does not preclude it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommonSupportBasis {
-    /// Identical source provenance: the same occurrence, traversed together.
-    IdenticalSourceProvenance,
-    /// Identical analytic support with certified overlapping parameter intervals.
-    IdenticalAnalyticSupport,
-    /// Identical homogeneous Bézier representation (identity or certified
-    /// affine parameter reversal).
-    IdenticalHomogeneousRepresentation,
-    /// A general common component not covered by the minimal cases (deferred).
-    Deferred,
-}
-
-/// The relative orientation of one occurrence along a common arc.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OrientationAlongSupport {
-    /// Traversed in the same direction as the common support.
-    Codirected,
-    /// Traversed opposite the common support.
-    Opposed,
-}
-
-/// One occurrence's participation in a common arc.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ArcParticipant {
-    /// The span this participant is a piece of.
-    pub span_id: SpanId,
-    /// The source occurrence provenance.
-    pub provenance: CurveOccurrenceProvenance,
-    /// The parameter interval of the common sub-arc on this occurrence
-    /// `(start, end)`, as certified enclosures.
-    pub parameter_interval: (ParameterEnclosure, ParameterEnclosure),
-    /// Relative orientation along the common support.
-    pub orientation: OrientationAlongSupport,
-    /// This occurrence's multiplicity contribution.
-    pub multiplicity: u8,
-    /// The deck displacement of this participant's chart copy.
-    pub deck: DeckLabel,
-}
-
-/// A positive-dimensional common-arc contact component.
-///
-/// One geometric support fragment shared by every participant, with
-/// per-occurrence parameter correspondence, relative orientation and
-/// multiplicity. GEN-001E populates the minimal certified cases
-/// ([`CommonSupportBasis`]); the type does not preclude full common-factor
-/// extraction, which stays deferred.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CommonArc2 {
-    /// The stable identity (typically the common-arc endpoint identities).
-    pub identity: EventIdentity,
-    /// The participating occurrences.
-    pub participants: Vec<ArcParticipant>,
-    /// The certified basis on which common support is claimed.
-    pub support_basis: CommonSupportBasis,
-}
-
 /// One contact component: an isolated event or a common arc.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContactComponent2 {
@@ -615,9 +559,14 @@ fn sort_intersections_canonically(intersections: &mut [CertifiedIntersection2]) 
 /// shared multi-branch events — that is ARR-003's job, using the stable
 /// identities introduced here.
 ///
-/// The germ — not the representative point — is what ARR-003 reads, so the A7
-/// representative-endpoint issue is hidden beneath the generic contract here and
-/// repaired in GEN-001C.
+/// **GEN-001E (CommonArc).** A pairwise positive-length overlap (the analytic
+/// `Overlap` / `CoincidentCircles` tags) is no longer a bare `Unsupported`: it
+/// is first certified by [`super::common_arc::common_arc_for_pair`]. A
+/// certified positive-dimensional overlap becomes one
+/// [`ContactComponent2::CommonArc`]; a certified-empty overlap becomes
+/// `Disjoint`; a point-only or uncertifiable overlap keeps the original typed
+/// `Unsupported`. The germ and the certified parameter evidence — never a
+/// representative point — are what ARR-003 reads.
 pub fn lift_pair_result(
     lhs_span: &CurveSpan2,
     rhs_span: &CurveSpan2,
@@ -625,6 +574,23 @@ pub fn lift_pair_result(
 ) -> PairContactResult {
     match result {
         PairIntersectionResult::Disjoint => PairContactResult::Disjoint,
+        PairIntersectionResult::Unsupported(
+            cause @ (PairUnsupported::Overlap | PairUnsupported::CoincidentCircles),
+        ) => match super::common_arc::common_arc_for_pair(lhs_span, rhs_span) {
+            Ok(arc) => PairContactResult::Components(vec![ContactComponent2::CommonArc(arc)]),
+            // A certified-empty overlap is no contact component.
+            Err(super::common_arc::CommonArcError::EmptyOverlap) => PairContactResult::Disjoint,
+            // The overlap is not certifiable as positive-dimensional (a
+            // point-only meeting, or an uncertified support identity such as a
+            // periodic seam overlap): keep the original typed Unsupported.
+            Err(
+                super::common_arc::CommonArcError::PointOnlyOverlap
+                | super::common_arc::CommonArcError::UnsupportedSupportIdentity,
+            ) => PairContactResult::Unsupported(*cause),
+            // Any certification/operational failure of the CommonArc attempt is
+            // a typed Unresolved, never an Unsupported and never a guess.
+            Err(_) => PairContactResult::Unresolved(GenericUnresolved::UnresolvedCommonArc),
+        },
         PairIntersectionResult::Unsupported(cause) => PairContactResult::Unsupported(*cause),
         PairIntersectionResult::Unresolved(cause) => {
             PairContactResult::Unresolved(GenericUnresolved::Pair(*cause))
@@ -851,7 +817,11 @@ mod tests {
     }
 
     #[test]
-    fn overlap_passes_through_as_unsupported() {
+    fn collinear_overlap_certifies_a_common_arc() {
+        // GEN-001E: a positive-length collinear overlap between distinct line
+        // occurrences is no longer a bare `Unsupported(Overlap)` — the analytic
+        // support identity is certified by exact predicates and the overlap
+        // becomes one CommonArc component with two participants.
         let a = line_span_and_piece(
             Point2::new(0.0, 0.0),
             Point2::new(2.0, 0.0),
@@ -866,10 +836,29 @@ mod tests {
             SourceVertexKey::ShellVertex(3),
             SourceVertexKey::ShellVertex(4),
         );
+        let PairContactResult::Components(components) = intersect(&a, &b) else {
+            panic!("a certified collinear overlap must lift to components");
+        };
+        assert_eq!(components.len(), 1);
+        let ContactComponent2::CommonArc(arc) = &components[0] else {
+            panic!("a positive-length overlap must be a CommonArc");
+        };
+        assert_eq!(arc.participants.len(), 2);
         assert_eq!(
-            intersect(&a, &b),
-            PairContactResult::Unsupported(PairUnsupported::Overlap)
+            arc.support.basis,
+            CommonSupportBasis::IdenticalAnalyticSupport
         );
+        assert!(
+            arc.participants
+                .iter()
+                .all(|p| p.parameter_interval.lo < p.parameter_interval.hi),
+            "both participant intervals have positive certified extent"
+        );
+        assert!(
+            arc.certificate.boundaries_certified_distinct,
+            "boundaries are certified distinct"
+        );
+        arc.validate().expect("the certified CommonArc validates");
     }
 
     #[test]

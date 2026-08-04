@@ -1307,10 +1307,40 @@ fn enclosures_overlap(a: &ParameterEnclosure, b: &ParameterEnclosure) -> bool {
 /// any region cannot be certified — clustered or multiple roots, singular
 /// Jacobians, stationary or tangential contacts, and boundary roots are never
 /// guessed.
+///
+/// **GEN-001E (CommonArc).** Before the isolated-root solver runs, the
+/// certified CommonArc producer ([`super::common_arc::common_arc_for_pair`]) is
+/// consulted. Two spans sharing one authoritative source occurrence (identical,
+/// parent/child, or overlapping siblings) certify a positive-dimensional
+/// overlap directly as one [`ContactComponent2::CommonArc`] — the isolated-root
+/// solver cannot express it (identical spans leave the whole domain unresolved).
+///
+/// A failed CommonArc precheck **never** short-circuits to `Disjoint`:
+/// `EmptyOverlap` (disjoint same-source parameter intervals) does not exclude an
+/// endpoint contact or a self-intersection, `PointOnlyOverlap` does not exclude
+/// a tangency, and `UnsupportedSupportIdentity` (distinct occurrences) still
+/// admits isolated crossings. In every such case the certified isolated-root
+/// solver runs and its `Complete`/`Unresolved`/`Unsupported` outcome is
+/// authoritative. Operational or certification failures of the precheck are
+/// likewise resolved by the solver, which is independent certification
+/// machinery; the code never swallows them as if the pair were decided.
 pub fn intersect_bezier_pair(
     lhs: &RationalBezierSpan2,
     rhs: &RationalBezierSpan2,
 ) -> PairContactResult {
+    let lhs_span = super::span::CurveSpan2::RationalBezier(lhs.clone());
+    let rhs_span = super::span::CurveSpan2::RationalBezier(rhs.clone());
+    match super::common_arc::common_arc_for_pair(&lhs_span, &rhs_span) {
+        Ok(arc) => {
+            return PairContactResult::Components(vec![ContactComponent2::CommonArc(arc)])
+        }
+        // Any other precheck outcome: no admitted positive-dimensional
+        // CommonArc was certified, so the isolated-contact solver decides the
+        // pair (it may find endpoint meetings, self-intersections, tangencies,
+        // or report its own typed Unresolved/Unsupported for an uncertifiable
+        // coincident pair).
+        Err(_) => {}
+    }
     match solve_pair(lhs, rhs) {
         PairSolveResult::Complete(roots) if roots.is_empty() => PairContactResult::Disjoint,
         PairSolveResult::Complete(roots) => {

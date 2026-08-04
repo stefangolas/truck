@@ -69,6 +69,7 @@ pub mod curve_witness;
 pub mod bezier;
 
 pub mod bezier_isect;
+pub mod common_arc;
 pub mod contact;
 pub mod quotient;
 pub mod span;
@@ -173,10 +174,17 @@ pub use intersection::{
     PairUnsupported, ParameterEnclosure, ParameterLocation,
 };
 pub use contact::{
-    label_branch_from_placement, lift_pair_result, AggregatedQuotientEventKey, ArcParticipant,
-    BranchIncidence, CommonArc2, CommonArcEnd, CommonSupportBasis, ContactComponent2,
-    CrossingClassification, EventIdentity, GenericUnresolved, IsolatedEvent2, IsolatedRootKey,
-    IsolatedRootParticipant, OrientationAlongSupport, PairContactLiftKey, PairContactResult,
+    label_branch_from_placement, lift_pair_result, AggregatedQuotientEventKey,
+    BranchIncidence, ContactComponent2, CrossingClassification, EventIdentity, GenericUnresolved,
+    IsolatedEvent2, IsolatedRootKey, IsolatedRootParticipant, PairContactLiftKey, PairContactResult,
+};
+pub use common_arc::{
+    common_arc_for_pair, AnalyticSupportClass, AnalyticSupportCorrespondenceCertificate,
+    ArcParticipant, AuthoritativeParameterKey, AxisSide, CanonicalSourceAxis, CertifiedAffineMap,
+    CertifiedIntervalOverlap, CertifiedParameterCorrespondence, CommonArc2, CommonArcBoundaries,
+    CommonArcBoundary, CommonArcBoundaryKey, CommonArcCertificate, CommonArcEnd, CommonArcError,
+    CommonArcIdentity, CommonSupportBasis, CommonSupportFragment, CommonSupportIdentity,
+    OrientationAlongSupport, SharedParentCertificate, SupportIdentityCertificate,
 };
 pub use quotient::{
     adapt_axis_aligned_placement, certify_rank2_placement, AmbientLatticeId, CanonicalBranchSide,
