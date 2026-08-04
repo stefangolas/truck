@@ -1,5 +1,12 @@
 //! The formal path, built beside the legacy tessellator.
 //!
+//! The entire subtree is staged prototype work (see the per-stage notes below):
+//! each module lands ahead of the production caller that will consume it, so its
+//! public surface is intentionally unused until the corresponding priority in
+//! `HANDOFF.md` wires it in. Mirror `triangulation.rs`'s top-of-file allow
+//! rather than denying the build on work that is deliberately not yet reached.
+#![allow(dead_code, unused)]
+//!
 //! `MATHEMATICAL_FOUNDATION.md` §0 states the design rule this subtree exists
 //! to obey:
 //!

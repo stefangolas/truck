@@ -4,6 +4,8 @@
 // wire them up; remove this `allow` when the diagnostic API is finalized.
 #![allow(dead_code, unused)]
 
+use super::diagnosis;
+use super::domain::lattice::AxisPeriodStatus;
 use super::domain::lattice::CertifiedLattice;
 use super::formal;
 use super::source_evidence::{
@@ -18,6 +20,7 @@ use array_macro::array;
 use handles::{FixedUndirectedEdgeHandle, FixedVertexHandle};
 use itertools::Itertools;
 use rustc_hash::FxHashMap as HashMap;
+use serde::Serialize;
 
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
@@ -204,6 +207,10 @@ pub struct MeshedShellOutcome {
     pub shell: MeshedCShell,
     /// Why each face failed, positionally aligned with `shell.faces`.
     pub face_failures: Vec<Option<TessellationFailure>>,
+    /// DIAG-001: structured diagnostic record for each failed face, positionally
+    /// aligned with `shell.faces`. Populated only when `TRUCK_FACE_DIAG_JSONL`
+    /// is set; all `None` otherwise.
+    pub face_diagnoses: Vec<Option<diagnosis::FailedFaceDiagnosis>>,
 }
 
 /// Tessellates faces, discarding why any of them failed.
@@ -485,6 +492,15 @@ where
         PROBE_FACE_CONTEXT.with(|context| {
             context.set((source_face_id, declared_face_index, periodic_rank));
         });
+        let periodic_axes = diagnosis::PeriodicAxes {
+            u: face.surface.u_period().is_some(),
+            v: face.surface.v_period().is_some(),
+        };
+        let bound_count = face.boundaries.len();
+        let diag = diagnosis::diag_enabled();
+        if diag {
+            diagnosis::clear_sink();
+        }
 
         let boundaries = face.boundaries.clone();
         let surface = &face.surface;
@@ -707,18 +723,56 @@ where
             provenance: face.provenance,
         };
         PROBE_FACE_CONTEXT.with(|context| context.set((None, usize::MAX, 0)));
-        (result, failure)
+        let face_diagnosis = if diag {
+            if let Some(ref failure) = failure {
+                let all_periods_certified = (!periodic_axes.u
+                    || matches!(lattice.u, AxisPeriodStatus::Exact { .. }))
+                    && (!periodic_axes.v || matches!(lattice.v, AxisPeriodStatus::Exact { .. }));
+                let lift_status = diagnosis::compute_lift_status(
+                    periodic_axes,
+                    failure.reason,
+                    all_periods_certified,
+                );
+                let deck_status = diagnosis::compute_deck_status(periodic_rank);
+                Some(diagnosis::build_face_diagnosis(
+                    source_face_id,
+                    failure.reason,
+                    periodic_rank,
+                    periodic_axes,
+                    bound_count,
+                    lift_status,
+                    deck_status,
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        (result, failure, face_diagnosis)
     };
     #[cfg(not(target_arch = "wasm32"))]
-    let (faces, face_failures): (Vec<_>, Vec<_>) = shell
+    let results: Vec<_> = shell
         .faces
         .par_iter()
         .enumerate()
         .map(tessellate_face)
-        .unzip();
+        .collect();
     #[cfg(target_arch = "wasm32")]
-    let (faces, face_failures): (Vec<_>, Vec<_>) =
-        shell.faces.iter().enumerate().map(tessellate_face).unzip();
+    let results: Vec<_> = shell
+        .faces
+        .iter()
+        .enumerate()
+        .map(tessellate_face)
+        .collect();
+    let mut faces = Vec::with_capacity(results.len());
+    let mut face_failures = Vec::with_capacity(results.len());
+    let mut face_diagnoses = Vec::with_capacity(results.len());
+    for (f, ff, fd) in results {
+        faces.push(f);
+        face_failures.push(ff);
+        face_diagnoses.push(fd);
+    }
     MeshedShellOutcome {
         shell: MeshedCShell {
             vertices,
@@ -726,6 +780,7 @@ where
             faces,
         },
         face_failures,
+        face_diagnoses,
     }
 }
 
@@ -2283,8 +2338,8 @@ fn periodic_displacement(start: f64, end: f64, period: f64, tolerance: f64) -> O
 /// `PhysicalBoundary`, fabricated geometry included. The fix is not to
 /// reclassify afterwards but to record the origin where the segment is created,
 /// which is the only place it is known.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum SegmentOrigin {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+pub enum SegmentOrigin {
     /// Carries source boundary evidence: a lifted source edge use.
     Source,
     /// Synthesised to close an open piece against the working extent. No source
@@ -3092,6 +3147,12 @@ impl PolyBoundary {
         let mut installed_origins =
             probe.then(HashMap::<FixedUndirectedEdgeHandle, Vec<(usize, usize)>>::default);
         let mut first_conflict = None;
+        // DIAG-001: diagnostic capture. Gated on TRUCK_FACE_DIAG_JSONL. When
+        // disabled, none of this code has any effect — the edge map is never
+        // populated and the sink is never written. This instrumentation must
+        // not alter insertion order or insertion behaviour.
+        let diag = diagnosis::diag_enabled();
+        let mut diag_edge_map: HashMap<FixedUndirectedEdgeHandle, u64> = HashMap::default();
         for (piece_index, piece) in self.0.iter().enumerate() {
             let poly2tri: Vec<Option<FixedVertexHandle>> = piece
                 .points
@@ -3119,6 +3180,9 @@ impl PolyBoundary {
 
             if poly2tri.iter().any(|v| v.is_none()) {
                 probe_point_fail += 1;
+                if diag {
+                    diagnosis::set_vertex_insertion_failed();
+                }
                 failure.get_or_insert(TessellationFailureReason::ConstraintInsertionIncomplete);
                 continue;
             }
@@ -3158,6 +3222,11 @@ impl PolyBoundary {
                 // here indistinguishable from a real boundary.
                 let segment_origin = piece.origins.get(i).unwrap_or(SegmentOrigin::Source);
                 let segment_role = segment_origin.role();
+                let diag_seg_id = if diag {
+                    diagnosis::record_segment(segment_origin, Some(piece_index), k as u32)
+                } else {
+                    0
+                };
                 let overlapping = triangulation
                     .get_edge_from_neighbors(vi, vj)
                     .filter(|e| e.is_constraint_edge())
@@ -3214,6 +3283,10 @@ impl PolyBoundary {
                                 .or_default()
                                 .push((piece_index, k));
                         }
+                        if diag {
+                            diag_edge_map.entry(handle).or_insert(diag_seg_id);
+                            diagnosis::record_realized_edge(segment_role, diag_seg_id);
+                        }
                     }
                 } else {
                     if probe {
@@ -3269,6 +3342,21 @@ impl PolyBoundary {
                                     selected.1,
                                     selected.2,
                                 ));
+                            }
+                        }
+                    }
+                    if diag {
+                        let diag_conflicts: Vec<_> = triangulation
+                            .get_conflicting_edges_between_vertices(vi, vj)
+                            .map(|edge| edge.as_undirected().fix())
+                            .collect();
+                        for handle in &diag_conflicts {
+                            if let Some(&blocking_id) = diag_edge_map.get(handle) {
+                                diagnosis::record_conflict(
+                                    diag_seg_id,
+                                    blocking_id,
+                                    diagnosis::PresentedSegmentRelation::ProperInteriorCrossing,
+                                );
                             }
                         }
                     }
@@ -3363,7 +3451,7 @@ fn spade_round(x: f64) -> f64 {
 /// It is deliberately *not* the general cell-constraint solver. Parity is still
 /// the mechanism; the only thing that changes is which edges are entitled to
 /// flip it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub enum ConstraintRole {
     /// A trim segment carrying source boundary evidence. Toggles material side.
     PhysicalBoundary,
@@ -3463,7 +3551,7 @@ impl ConstraintRoles {
 /// stage the formal system requires and this implementation does not yet have —
 /// deleting them would erase the fact that the case is unhandled, which is the
 /// opposite of what a typed outcome is for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub enum TessellationFailureReason {
     /// No lifted boundary could be built, for a reason the lift does not name.
     ///

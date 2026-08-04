@@ -442,9 +442,13 @@ mod tests {
         SourceFaceOrientationEvidence,
     };
     use super::super::cylinder::{identify_cylinder, CylinderIdentification};
+    use super::super::cylinder_arrangement::{certify_cylinder_disk, placed_occurrences};
+    use super::super::cylinder_cover::build_working_cover;
     use super::super::cylinder_face::build_cylinder_face;
+    use super::super::cylinder_mesh::certify_cylinder_mesh;
+    use super::super::deck::DeckBudget;
     use super::super::support::identify_line_segment;
-    use truck_geometry::prelude::{Line, RevolutedCurve, Vector3};
+    use truck_geometry::prelude::{InnerSpace, Line, RevolutedCurve, Vector3};
     use truck_topology::compress::OuterBoundStanding;
 
     fn z_cylinder(radius: f64, h: f64) -> super::super::cylinder::CertifiedEmbeddedCylinder {
@@ -621,6 +625,139 @@ mod tests {
         let lift = propagate_and_classify_holonomy(&boundary, schema.deck_generator())
             .expect("zero holonomy: the seam crossings cancel");
         assert_eq!(lift.placements, vec![0, 1, 1, 0]);
+    }
+
+    /// The §13/§16 milestone: a seam-crossing contractible cylinder disk is
+    /// recovered through every formal stage — authoritative traversal,
+    /// certified curve-on-surface witnesses, certified integer deck placement,
+    /// finite working cover, quotient-aware disk, polygonalization, and a
+    /// topology-blind triangulation — with **no seam segment and no
+    /// `PolyBoundary`**.
+    ///
+    /// The seam crossing is ordinary in the continuous lift: the deck solve
+    /// places occurrences at `[0, 1, 1, 0]`, the nonzero joins cancel to zero
+    /// holonomy, and the developed boundary closes as a small quad entirely
+    /// inside one fundamental tile. The triangulator therefore receives an
+    /// already-certified planar disk and creates no synthetic closure, no
+    /// `SegmentOrigin::Seam`, and no parity guess.
+    #[test]
+    fn a_seam_crossing_contractible_disk_recovers_a_valid_mesh_end_to_end() {
+        let cylinder = z_cylinder(2.0, 5.0);
+        let schema = cylinder.schema().clone();
+        // theta 3.0 -> 3.5 straddles the principal-branch seam (π / -π): the
+        // developed arc is continuous, but the axial-line witnesses at theta
+        // 3.5 read its principal branch (-2.78…), so the deck solve must place
+        // them one period over to recover continuity.
+        let points = [
+            on_cylinder(&schema, 0.0, 3.0),
+            on_cylinder(&schema, 0.0, 3.5),
+            on_cylinder(&schema, 3.0, 3.5),
+            on_cylinder(&schema, 3.0, 3.0),
+        ];
+        let specs = vec![
+            WitnessSpec::CircumferentialArc {
+                declared_sweep: 0.5,
+            },
+            WitnessSpec::AxialLine,
+            WitnessSpec::CircumferentialArc {
+                declared_sweep: -0.5,
+            },
+            WitnessSpec::AxialLine,
+        ];
+        let (input, positions) = quad_face(&points);
+        let curves: Vec<_> = (0..4)
+            .map(|i| identify_line_segment(&Line(points[i], points[(i + 1) % 4])))
+            .collect();
+        let record = build_cylinder_face(
+            input.source_face_id,
+            cylinder,
+            &input,
+            declared_outer(),
+            &mut |index| curves[index].clone(),
+        )
+        .expect("regular traversal resolves");
+
+        let vertex_position = |key: SourceVertexKey| match key {
+            SourceVertexKey::ShellVertex(index) => positions.get(index).copied(),
+            SourceVertexKey::Absent => None,
+        };
+        let spec_by_use = |edge_use: EdgeUseId| specs[edge_use.index];
+        let boundary =
+            develop_traversal(&record.traversal, &schema, &vertex_position, &spec_by_use)
+                .expect("every occurrence develops to a witness");
+
+        let lift = propagate_and_classify_holonomy(&boundary, schema.deck_generator())
+            .expect("zero holonomy: the seam crossings cancel");
+        assert_eq!(lift.placements, vec![0, 1, 1, 0]);
+
+        // Stage F: finite working cover, derived from certified enclosures,
+        // not a fixed window. A small quad needs only the copy it lives in.
+        let cover = build_working_cover(
+            &boundary.witnesses,
+            &lift.placements,
+            schema.deck_generator(),
+            DeckBudget {
+                deck_width_cap: 4096,
+            },
+        )
+        .expect("a narrow seam-crossing quad needs a finite cover within budget");
+
+        // Stage G + H + I: quotient-aware disk. Periodic closure is the deck
+        // identification already solved; no seam arc is created.
+        let disk = certify_cylinder_disk(
+            &boundary.edge_uses,
+            &boundary.witnesses,
+            &lift.placements,
+            schema.deck_generator(),
+            declared_outer(),
+            &cover.materialized_copies,
+        )
+        .expect("the seam-crossing disk is simple and translate-disjoint");
+
+        // Stages K + L: polygonalization + topology-blind triangulation of an
+        // already-certified planar patch.
+        let occurrences = placed_occurrences(
+            &boundary.edge_uses,
+            &boundary.witnesses,
+            &lift.placements,
+            &schema.deck_generator(),
+        );
+        let mesh = certify_cylinder_mesh(&disk, &occurrences, &schema, 1e-9)
+            .expect("the certified disk triangulates and validates");
+
+        // Stage M / §13 realization invariants. The formal path emits a disk
+        // triangulation; every lifted vertex lies on the cylinder; the
+        // developed patch is a disk (Euler characteristic 1).
+        assert_eq!(mesh.validity.triangles, mesh.developed.triangles.len());
+        assert_eq!(
+            mesh.developed.triangles.len() + 2,
+            mesh.developed.vertices.len(),
+            "a quad disk triangulates to triangles + 2 == vertices"
+        );
+        assert_eq!(mesh.physical_vertices.len(), mesh.developed.vertices.len());
+        // §13 "no seam constraint exists in the emitted patch": the only
+        // boundary edges are the four certified source-traversal edges. A
+        // synthetic seam would appear as a fifth boundary edge or an extra
+        // boundary cycle, and `final_validity` would have rejected it; this
+        // makes the count explicit.
+        assert_eq!(
+            mesh.validity.boundary_edges, 4,
+            "the disk boundary is exactly the four source edges — no seam edge"
+        );
+        assert_eq!(
+            mesh.validity.internal_edges, 1,
+            "a quad disk has exactly one internal diagonal"
+        );
+        let radius = schema.radius().get();
+        for vertex in &mesh.physical_vertices {
+            let r = *vertex - schema.origin();
+            let axial = r.dot(schema.axis());
+            let radial = r - axial * schema.axis();
+            assert!(
+                (radial.magnitude() - radius).abs() < 1e-9,
+                "lifted vertex {vertex:?} is not on the cylinder"
+            );
+        }
     }
 
     /// A single-occurrence full-turn arc is outside the supported subset —

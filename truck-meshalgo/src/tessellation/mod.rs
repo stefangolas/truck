@@ -547,13 +547,17 @@ impl<C: PolylineableCurve, S: RobustMeshableSurface> RobustMeshableShape
     }
 }
 
+pub mod diagnosis;
 pub mod domain;
 pub mod formal;
 pub mod source_evidence;
 mod triangulation;
 
 use domain::lattice::CertifiedLattice;
-pub use triangulation::{MeshedShellOutcome, TessellationFailure, TessellationFailureReason};
+pub use triangulation::{
+    ConstraintRole, MeshedShellOutcome, SegmentOrigin, TessellationFailure,
+    TessellationFailureReason,
+};
 
 /// The lattice a surface reports through its bare accessors, with no evidence.
 ///
