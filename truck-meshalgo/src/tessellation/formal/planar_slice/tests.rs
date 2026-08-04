@@ -1052,3 +1052,66 @@ fn the_recovered_corpus_faces_are_extreme_slivers() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Generic material authority
+// ---------------------------------------------------------------------------
+
+/// The generic patch entry keeps requiring source outer-bound authority, and
+/// now distinguishes *why* it is absent.
+///
+/// The cylinder band was given a bounded, band-only route to material
+/// standing. This is the test that the route did not leak: a generic planar
+/// patch handed the identical certified simple cycle still refuses every
+/// non-unique standing, and reports the state the source is actually in —
+/// a multiply-declared face is a source contradiction, not missing provenance.
+#[test]
+fn generic_material_selection_still_requires_outer_bound_authority() {
+    let plane = xy_plane();
+    // The same simple Jordan cycle the successful path uses, so the only
+    // thing under test is the authority gate.
+    let arrangement = |_: ()| {
+        let fixture = unit_square();
+        let curves = fixture.curves.clone();
+        let positions = fixture.positions.clone();
+        let traversal = regular_traversal(&fixture.input, declared_outer(1), &mut |i| {
+            curves[i].clone()
+        })
+        .expect("traversal");
+        let planar = certified_planar_curves(
+            &traversal,
+            &plane,
+            &|key| match key {
+                SourceVertexKey::ShellVertex(index) => positions.get(index).copied(),
+                _ => None,
+            },
+            1e-6,
+        )
+        .expect("planar");
+        let developed = rank0_lift(&rank0(&plane), planar).expect("lift");
+        simple_jordan_arrangement(&developed).expect("jordan")
+    };
+
+    for (standing, expected) in [
+        (
+            OuterBoundStanding::NotRetained,
+            SliceExit::MissingOuterBoundAuthority,
+        ),
+        (
+            OuterBoundStanding::NoneDeclared,
+            SliceExit::MissingOuterBoundAuthority,
+        ),
+        (declared_outer(2), SliceExit::MultipleOuterBoundsDeclared),
+        (declared_outer(3), SliceExit::MultipleOuterBoundsDeclared),
+    ] {
+        assert_eq!(
+            bounded_material_region(arrangement(()), standing).err(),
+            Some(expected),
+            "generic material selection must refuse {standing:?}",
+        );
+    }
+
+    // And the conforming standing still succeeds, so the gate is a gate and
+    // not a wall.
+    assert!(bounded_material_region(arrangement(()), declared_outer(1)).is_ok());
+}

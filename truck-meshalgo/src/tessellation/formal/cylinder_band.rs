@@ -45,6 +45,30 @@
 //! tangent boundaries and singular supports are refused by name, not
 //! attempted.
 //!
+//! # The one repaired source defect
+//!
+//! ABC `00009190` declares **two** `FACE_OUTER_BOUND` entities on every one
+//! of its 1,968 band faces. ISO 10303-42 permits at most one, so the file is
+//! malformed and [`SliceExit::MultipleOuterBoundsDeclared`] stays the correct
+//! conformance verdict. The annotation is also unsatisfiable on the geometry
+//! it annotates: no complete essential parallel bounds a disk on a cylinder,
+//! so neither loop can be an outer bound in the sense 10303-42 defines. The
+//! exporter applied a simply-connected notion to an annulus.
+//!
+//! [`band_material_authority`] therefore downgrades *only* those two
+//! qualifiers to ordinary source bounds and takes material standing from the
+//! completed band certificate instead — see
+//! [`BandMaterialAuthority::IntrinsicBandCertificate`]. Loop identity,
+//! traversal sense, induced homology and carrier order are all retained and
+//! all still had to be certified first. The resulting mesh is marked
+//! [`SourceConformance::RecoveredFromMalformedSource`], so a recovery from a
+//! broken file is never reported as a clean read.
+//!
+//! The repair is scoped to exactly that pattern on exactly a certified band.
+//! Missing standing is not repaired, three declared outer bounds are not
+//! repaired, and the generic planar entry
+//! [`super::planar_slice::bounded_material_region`] is unchanged.
+//!
 //! # Why the material region is forced, not chosen
 //!
 //! Two disjoint parallels cut the cylinder into three pieces: the compact
@@ -82,7 +106,7 @@ use super::cylinder_lift::{
 use super::cylinder_mesh::lift_to_cylinder;
 use super::numeric::NonNegativeFinite;
 use super::planar_slice::{
-    bounded_material_region, certified_polygonal_region, final_validity, jordan_arrangement_of,
+    bounded_material_region_of, certified_polygonal_region, final_validity, jordan_arrangement_of,
     traverse_bound, CertificateRoute, CertifiedPlanarCurveOccurrence, CertifiedPolygonalRegion,
     FinalValidityReport, Rank0Displacement, Rank0DevelopedBoundary, SliceCategory, SliceExit,
     TriangulatedRegion,
@@ -124,6 +148,132 @@ const MAXIMUM_ARC_SEGMENTS: usize = 512;
 /// enough to prevent it; three leaves a margin. Any physical tolerance asks
 /// for far more than this, so the floor only guards a degenerate one.
 const MINIMUM_CHAIN_SEGMENTS: usize = 3;
+
+// ---------------------------------------------------------------------------
+// Material authority
+// ---------------------------------------------------------------------------
+
+/// Whether an accepted band's source annotations conformed to ISO 10303-42.
+///
+/// Carried on the realized mesh so a consumer can tell a mesh derived from a
+/// conforming file from one that required the repair below. A recovery is not
+/// silently promoted to a clean read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SourceConformance {
+    /// The source's bound annotations were conformant and were used as given.
+    Conforming,
+    /// The source was malformed and a named, bounded repair was applied. The
+    /// mesh is sound; the *file* is not.
+    RecoveredFromMalformedSource(NonconformantRepair),
+}
+
+/// The one nonconformant source pattern this module repairs.
+///
+/// Deliberately an enum with a single variant rather than a bare flag: adding
+/// a second repair should be a visible decision at this type, not a quiet
+/// widening of an existing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NonconformantRepair {
+    /// The face declared two `FACE_OUTER_BOUND` entities.
+    ///
+    /// ISO 10303-42 permits at most one, so the file is malformed and
+    /// [`SliceExit::MultipleOuterBoundsDeclared`] remains the correct
+    /// *conformance* verdict — it is what a validator should report. But the
+    /// annotation is also unsatisfiable on this face's own geometry: both
+    /// bounds are complete essential parallels, and no complete essential
+    /// parallel bounds a disk on a cylinder, so neither loop can individually
+    /// be an outer bound in the sense 10303-42 defines. The exporter's error
+    /// is applying a simply-connected notion to an annulus.
+    ///
+    /// The repair therefore downgrades *only* the two outer-bound qualifiers
+    /// to ordinary source bounds. Every other fact about the loops — vertex
+    /// identity, traversal sense, induced homology, carrier order — is
+    /// retained untouched and still had to be certified before this point.
+    /// Material standing then comes from
+    /// [`BandMaterialAuthority::IntrinsicBandCertificate`], not from either
+    /// discarded qualifier.
+    TwoOuterBoundsOnCertifiedBand,
+}
+
+/// Where an accepted band's material-region standing comes from.
+///
+/// Constructed only by [`band_material_authority`], which is the single place
+/// the admission rule lives.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BandMaterialAuthority {
+    /// The source declared exactly one outer bound and it was used as given.
+    SourceDeclared {
+        /// Which bound, as the source indexed it.
+        bound_index: u32,
+    },
+    /// The completed band certificate itself fixes the material region.
+    ///
+    /// The region is the closed axial interval between the two certified
+    /// carriers crossed with one angular period, modulo the certified deck
+    /// identification. That is a positive statement proved by
+    /// [`certify_cylinder_band`] and [`plan_cut_open`] — not a guess that one
+    /// loop is outer, and not an inference from area, order or orientation.
+    IntrinsicBandCertificate {
+        /// The repair that made this route necessary.
+        repair: NonconformantRepair,
+    },
+}
+
+impl BandMaterialAuthority {
+    /// The conformance verdict this standing implies.
+    pub fn conformance(self) -> SourceConformance {
+        match self {
+            Self::SourceDeclared { .. } => SourceConformance::Conforming,
+            Self::IntrinsicBandCertificate { repair } => {
+                SourceConformance::RecoveredFromMalformedSource(repair)
+            }
+        }
+    }
+}
+
+/// Decide a certified band's material-region standing.
+///
+/// The admission rule, in one place. A band reaches the intrinsic route only
+/// when the source's outer annotation is the specific unsatisfiable pattern
+/// described in [`NonconformantRepair::TwoOuterBoundsOnCertifiedBand`] *and*
+/// `band` is a completed [`CertifiedCylinderBand`] — which is itself the
+/// proof of every conjunct the recovery rule requires: exactly two source
+/// bounds, both complete essential parallels, physically distinct carriers in
+/// certified axial order, compatible induced orientations, and hence a unique
+/// compact strip between them. Holding a `&CertifiedCylinderBand` is how that
+/// precondition is enforced; there is no way to ask for this standing without
+/// one.
+///
+/// Note what is *not* admitted. A missing or unretained standing still
+/// refuses, even on a perfect band: absent provenance is a gap in this
+/// pipeline, not a statement by the file, and repairing a fact nobody stated
+/// is exactly the guess [`OuterBoundStanding`] exists to prevent. Three or
+/// more declared outer bounds also still refuse — the two-bound band is the
+/// only shape whose annotation is provably unsatisfiable, so it is the only
+/// one repaired.
+pub fn band_material_authority(
+    outer_bound: OuterBoundStanding,
+    band: &CertifiedCylinderBand,
+) -> Result<BandMaterialAuthority, BandExit> {
+    let _ = band;
+    match outer_bound {
+        OuterBoundStanding::Declared {
+            declared_count: 1,
+            bound_index,
+        } => Ok(BandMaterialAuthority::SourceDeclared { bound_index }),
+        OuterBoundStanding::Declared {
+            declared_count: 2, ..
+        } => Ok(BandMaterialAuthority::IntrinsicBandCertificate {
+            repair: NonconformantRepair::TwoOuterBoundsOnCertifiedBand,
+        }),
+        OuterBoundStanding::Declared { .. } => {
+            Err(BandExit::Patch(SliceExit::MultipleOuterBoundsDeclared))
+        }
+        OuterBoundStanding::NotRetained | OuterBoundStanding::NoneDeclared => {
+            Err(BandExit::Patch(SliceExit::MissingOuterBoundAuthority))
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Exits
@@ -981,17 +1131,30 @@ fn cut_occurrence(id: EdgeUseId, from: Point2, to: Point2) -> CertifiedPlanarCur
 /// period apart and are the two lifts of one cut arc — a fact this function
 /// establishes by *construction*, not by measuring them afterwards.
 ///
-/// [`jordan_arrangement_of`] and [`bounded_material_region`] then certify the
-/// patch simple and select its bounded complementary component, unchanged
-/// from the planar slice. That component is the compact strip between the two
-/// carriers, so the material region is established **before** any triangle
-/// exists.
+/// [`jordan_arrangement_of`] and [`bounded_material_region_of`] then certify
+/// the patch simple and select its bounded complementary component, with the
+/// same arithmetic as the planar slice. That component is the compact strip
+/// between the two carriers, so the material region is established **before**
+/// any triangle exists.
+///
+/// The difference from the planar slice is *where the standing to select it
+/// comes from*, and that question is settled before this function is called —
+/// see [`band_material_authority`], whose result must be handed in.
 pub fn cut_open(
     band: &CertifiedCylinderBand,
     plan: &CutOpenDomainPlan,
-    outer_bound: OuterBoundStanding,
+    authority: BandMaterialAuthority,
     tolerance: f64,
 ) -> Result<PlanarPatch, BandExit> {
+    // `authority` is a proof token, not data. The cut-open cycle below is one
+    // simple closed curve built by this function, so which of its two
+    // complementary components is bounded is settled by the Jordan curve
+    // theorem and does not vary with where the standing came from. What the
+    // token establishes is that *some* route granted material standing at
+    // all — the check that used to sit inside `bounded_material_region` and
+    // now sits in `band_material_authority`, which is the only constructor.
+    // Requiring it by value keeps that step impossible to skip.
+    let _: BandMaterialAuthority = authority;
     let schema = band.cylinder.schema();
     let radius = schema.radius().get();
     let magnitude = band.period.abs();
@@ -1022,7 +1185,7 @@ pub fn cut_open(
     occurrences.push(cut_occurrence(LEFT_CUT, second_terminal, first_origin));
 
     let arrangement = jordan_arrangement_of(&occurrences).map_err(BandExit::Patch)?;
-    let material = bounded_material_region(arrangement, outer_bound).map_err(BandExit::Patch)?;
+    let material = bounded_material_region_of(arrangement).map_err(BandExit::Patch)?;
 
     let developed = Rank0DevelopedBoundary {
         displacements: vec![Rank0Displacement; occurrences.len()],
@@ -1186,6 +1349,14 @@ pub struct CertifiedBandMesh {
     /// The developed vertices lifted onto the cylinder, in the same order as
     /// `developed.vertices`.
     pub physical_vertices: Vec<Point3>,
+    /// Whether the source this mesh came from was conformant, or was repaired
+    /// by a named nonconformant normalization.
+    ///
+    /// [`reglue`] cannot know this — it sees a patch, not a file — so it
+    /// writes the conservative value and [`run_cylinder_band`] overwrites it
+    /// with the authority's own verdict. The mesh is equally valid either
+    /// way; what differs is what may be claimed about the *file*.
+    pub conformance: SourceConformance,
 }
 
 /// Discharge the identification and validate the annulus.
@@ -1308,6 +1479,10 @@ pub fn reglue(
     }
 
     Ok(CertifiedBandMesh {
+        // The conservative default. `run_cylinder_band` replaces it with the
+        // authority's verdict; a caller driving `reglue` directly gets the
+        // claim that assumes least about the source.
+        conformance: SourceConformance::Conforming,
         validity: BandValidityReport {
             triangles: developed.triangles.len(),
             vertices: developed.vertices.len(),
@@ -1398,10 +1573,16 @@ pub fn run_cylinder_band(
         vertex_position,
         family_of,
     )?;
+    // Strictly after certification, and that order is the safety argument:
+    // the nonconformant repair is admissible only *because* the band is
+    // already proved, so the authority question cannot be asked until there
+    // is a `CertifiedCylinderBand` to ask it against.
+    let authority = band_material_authority(outer_bound, &band)?;
     let plan = plan_cut_open(&band)?;
-    let patch = cut_open(&band, &plan, outer_bound, tolerance)?;
+    let patch = cut_open(&band, &plan, authority, tolerance)?;
     let developed = triangulate_band_patch(&patch)?;
-    let mesh = reglue(&patch, developed, band.cylinder.schema())?;
+    let mut mesh = reglue(&patch, developed, band.cylinder.schema())?;
+    mesh.conformance = authority.conformance();
     Ok((band, mesh))
 }
 

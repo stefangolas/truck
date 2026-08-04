@@ -1188,9 +1188,40 @@ pub fn bounded_material_region(
     boundary: SimpleJordanArrangement,
     outer_bound: OuterBoundStanding,
 ) -> SliceResult<BoundedMaterialRegion> {
+    // Report the standing the source actually has. A face declaring two
+    // `FACE_OUTER_BOUND` entities is not one whose authority went missing —
+    // it is a source contradiction, and `MultipleOuterBoundsDeclared` is the
+    // exit that says so. Collapsing the two into one exit misattributes a
+    // stated fact about the source to a gap in this pipeline's provenance,
+    // which is the one confusion this module's exit taxonomy exists to
+    // prevent. Step 2's `regular_traversal` already separates them; this is
+    // the same split, applied where the authority is consumed.
     if outer_bound.unique_outer_bound_index().is_none() {
-        return Err(SliceExit::MissingOuterBoundAuthority);
+        return Err(match outer_bound {
+            OuterBoundStanding::Declared { .. } => SliceExit::MultipleOuterBoundsDeclared,
+            _ => SliceExit::MissingOuterBoundAuthority,
+        });
     }
+    bounded_material_region_of(boundary)
+}
+
+/// The bounded complementary component of an already-authorized simple cycle.
+///
+/// The area work of [`bounded_material_region`] without its authority gate.
+/// Splitting the two is what lets a caller that establishes material standing
+/// some *other* certified way reuse this arithmetic instead of copying it,
+/// while [`bounded_material_region`] — the only entry a generic patch can
+/// reach — keeps requiring source outer-bound authority exactly as before.
+///
+/// `pub(super)` deliberately: the authority question is settled per route
+/// inside [`super`], and nothing outside the formal module can call this and
+/// thereby skip a gate. The sole caller today is the cylinder band, whose
+/// standing comes from its own completed band certificate rather than from a
+/// declared outer loop — see
+/// [`super::cylinder_band::BandMaterialAuthority`].
+pub(super) fn bounded_material_region_of(
+    boundary: SimpleJordanArrangement,
+) -> SliceResult<BoundedMaterialRegion> {
     let signed_area = signed_area(&boundary.cycle);
     if !signed_area.is_finite() || signed_area == 0.0 {
         return Err(SliceExit::MeshGeometryInvalid);

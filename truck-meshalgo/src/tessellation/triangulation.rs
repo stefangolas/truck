@@ -231,6 +231,12 @@ pub enum CylinderBandAttempt {
     Recovered {
         /// Triangles in the validated annulus.
         triangles: usize,
+        /// Whether the source that produced it was conformant, or was
+        /// repaired by a named nonconformant normalization. A recovery from a
+        /// malformed file is still a recovery, and is still not a clean read;
+        /// carrying the distinction here is what keeps a census able to say
+        /// which it was.
+        conformance: formal::cylinder_band::SourceConformance,
     },
     /// `run_cylinder_band` returned a typed exit, and the original legacy
     /// failure was preserved unchanged.
@@ -785,12 +791,15 @@ where
                     tol,
                 ) {
                     None => (polygon, failure, None),
-                    Some(Ok(mesh)) => {
+                    Some(Ok((mesh, conformance))) => {
                         let triangles = mesh.tri_faces().len();
                         (
                             Some(mesh),
                             None,
-                            Some(CylinderBandAttempt::Recovered { triangles }),
+                            Some(CylinderBandAttempt::Recovered {
+                                triangles,
+                                conformance,
+                            }),
                         )
                     }
                     Some(Err(exit)) => {
@@ -1654,7 +1663,12 @@ fn run_cylinder_band_for_face<S, C>(
     cylinder_curve_schema_of: &impl Fn(&C) -> formal::CurveSchema,
     cylinder_curve_family_of: &impl Fn(&C) -> Option<formal::SourceCurveFamily>,
     tol: f64,
-) -> Option<std::result::Result<PolygonMesh, formal::cylinder_band::BandExit>> {
+) -> Option<
+    std::result::Result<
+        (PolygonMesh, formal::cylinder_band::SourceConformance),
+        formal::cylinder_band::BandExit,
+    >,
+> {
     let Ok(cylinder) = cylinder_of(&face.surface) else {
         return None;
     };
@@ -1709,7 +1723,14 @@ fn run_cylinder_band_for_face<S, C>(
             tol,
         )
         .map(|(_, mesh)| {
-            cylinder_polygon_from_lifted(&mesh.physical_vertices, &mesh.developed.triangles, &schema)
+            (
+                cylinder_polygon_from_lifted(
+                    &mesh.physical_vertices,
+                    &mesh.developed.triangles,
+                    &schema,
+                ),
+                mesh.conformance,
+            )
         }),
     )
 }

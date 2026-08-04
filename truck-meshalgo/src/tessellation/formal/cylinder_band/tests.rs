@@ -502,3 +502,172 @@ fn two_coincident_complete_circles_are_the_same_carrier() {
     assert_eq!(exit.category(), SliceCategory::Unsupported);
     assert_eq!(exit.stage(), "carrier");
 }
+
+// ---------------------------------------------------------------------------
+// Material authority
+// ---------------------------------------------------------------------------
+
+/// The nonconformant standing the ABC corpus actually presents: two
+/// `FACE_OUTER_BOUND` entities on one face.
+fn two_outer_bounds() -> OuterBoundStanding {
+    OuterBoundStanding::Declared {
+        bound_index: 0,
+        declared_count: 2,
+    }
+}
+
+/// The production-shaped case. A face declaring *two* outer bounds — which
+/// ISO 10303-42 forbids, and which no complete essential parallel could
+/// satisfy anyway — still reaches a validated annular mesh, and the mesh says
+/// out loud that its source was malformed.
+#[test]
+fn two_outer_bounds_on_a_certified_band_recover_a_mesh_marked_malformed() {
+    let fixture = Fixture::new(2.0, [0.0, 3.0], [1.0, -1.0]);
+
+    let (_, mesh) = run_cylinder_band(
+        fixture.input.source_face_id,
+        fixture.cylinder.clone(),
+        &fixture.input,
+        two_outer_bounds(),
+        &mut |_| curve_schema(),
+        &fixture.vertex_position(),
+        &fixture.family_of(),
+        1.0e-3,
+    )
+    .expect("an unsatisfiable outer annotation on a proved band is repaired, not fatal");
+
+    // A real annulus, held to the identical battery as the conforming path.
+    assert_eq!(mesh.validity.euler_characteristic, 0);
+    assert_eq!(mesh.validity.boundary_components, 2);
+    // And the file is not thereby called clean.
+    assert_eq!(
+        mesh.conformance,
+        SourceConformance::RecoveredFromMalformedSource(
+            NonconformantRepair::TwoOuterBoundsOnCertifiedBand
+        ),
+    );
+}
+
+/// The repair changes the *annotation*, never the region. The declared and
+/// intrinsic routes must agree on the physical annulus vertex for vertex.
+#[test]
+fn declared_and_intrinsic_authority_produce_the_same_physical_region() {
+    let fixture = Fixture::new(2.0, [0.0, 3.0], [1.0, -1.0]);
+    let run = |standing| {
+        run_cylinder_band(
+            fixture.input.source_face_id,
+            fixture.cylinder.clone(),
+            &fixture.input,
+            standing,
+            &mut |_| curve_schema(),
+            &fixture.vertex_position(),
+            &fixture.family_of(),
+            1.0e-3,
+        )
+        .expect("the band is certified either way")
+        .1
+    };
+
+    let declared = run(declared_outer());
+    let intrinsic = run(two_outer_bounds());
+
+    assert_eq!(declared.physical_vertices, intrinsic.physical_vertices);
+    assert_eq!(declared.developed.triangles, intrinsic.developed.triangles);
+    assert_eq!(declared.validity, intrinsic.validity);
+    // The one intended difference.
+    assert_eq!(declared.conformance, SourceConformance::Conforming);
+    assert_ne!(declared.conformance, intrinsic.conformance);
+}
+
+/// Absent authority is not repaired, even on a perfect band. A fact nobody
+/// stated cannot be normalized: `NotRetained` is a gap in this pipeline's
+/// provenance and `NoneDeclared` is a legal `FACE_BOUND`-only face, and
+/// neither is the unsatisfiable annotation the repair is scoped to.
+#[test]
+fn missing_authority_still_refuses_on_a_certified_band() {
+    let fixture = Fixture::new(2.0, [0.0, 3.0], [1.0, -1.0]);
+    for standing in [
+        OuterBoundStanding::NotRetained,
+        OuterBoundStanding::NoneDeclared,
+    ] {
+        let exit = run_cylinder_band(
+            fixture.input.source_face_id,
+            fixture.cylinder.clone(),
+            &fixture.input,
+            standing,
+            &mut |_| curve_schema(),
+            &fixture.vertex_position(),
+            &fixture.family_of(),
+            1.0e-3,
+        )
+        .expect_err("a band whose outer standing was never stated is not repaired");
+        assert_eq!(exit, BandExit::Patch(SliceExit::MissingOuterBoundAuthority));
+        assert_eq!(exit.category(), SliceCategory::Unresolved);
+    }
+}
+
+/// Three or more declared outer bounds stay a typed inconsistent refusal. Two
+/// is repaired because a two-bound band's annotation is *provably*
+/// unsatisfiable; three says nothing this module can read, so it refuses.
+#[test]
+fn three_declared_outer_bounds_remain_a_source_contradiction() {
+    let fixture = Fixture::new(2.0, [0.0, 3.0], [1.0, -1.0]);
+    let exit = run_cylinder_band(
+        fixture.input.source_face_id,
+        fixture.cylinder.clone(),
+        &fixture.input,
+        OuterBoundStanding::Declared {
+            bound_index: 0,
+            declared_count: 3,
+        },
+        &mut |_| curve_schema(),
+        &fixture.vertex_position(),
+        &fixture.family_of(),
+        1.0e-3,
+    )
+    .expect_err("three declared outer bounds are not the repaired pattern");
+    assert_eq!(exit, BandExit::Patch(SliceExit::MultipleOuterBoundsDeclared));
+}
+
+/// The repair is gated on the band certificate, not on the annotation. Two
+/// same-signed circles never become a band, so the authority question is
+/// never even reached — the orientation fact is what is reported.
+#[test]
+fn incompatible_orientation_refuses_before_authority_is_consulted() {
+    let fixture = Fixture::new(2.0, [0.0, 3.0], [1.0, 1.0]);
+    let exit = run_cylinder_band(
+        fixture.input.source_face_id,
+        fixture.cylinder.clone(),
+        &fixture.input,
+        two_outer_bounds(),
+        &mut |_| curve_schema(),
+        &fixture.vertex_position(),
+        &fixture.family_of(),
+        1.0e-3,
+    )
+    .expect_err("two same-signed parallels do not bound a band");
+    assert!(
+        matches!(exit, BandExit::OrientationIncompatible { .. }),
+        "expected an orientation refusal, got {exit:?}",
+    );
+    assert_eq!(exit.category(), SliceCategory::Unsupported);
+}
+
+/// Coincident carriers are refused with the malformed annotation too, so the
+/// repair cannot be read as permission for arbitrary two-bound faces.
+#[test]
+fn coincident_carriers_refuse_under_the_malformed_annotation() {
+    let fixture = Fixture::new(2.0, [1.5, 1.5], [1.0, -1.0]);
+    let exit = run_cylinder_band(
+        fixture.input.source_face_id,
+        fixture.cylinder.clone(),
+        &fixture.input,
+        two_outer_bounds(),
+        &mut |_| curve_schema(),
+        &fixture.vertex_position(),
+        &fixture.family_of(),
+        1.0e-3,
+    )
+    .expect_err("one carrier is not an annulus, whatever the annotation says");
+    assert_eq!(exit, BandExit::SameCarrier);
+}
