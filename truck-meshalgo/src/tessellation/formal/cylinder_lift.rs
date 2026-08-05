@@ -42,11 +42,9 @@ use super::curve_witness::{
     axial_line_witness, circumferential_arc_witness, identify_source_curve_witness,
     CurveOnCylinderWitness, SourceCurveFamily, WitnessFailure,
 };
-use super::deck::{
-    solve_axis_aligned, DeckGenerator, DeckInterval, DeckOperationalFailure, DeckSolveResult,
-    DevelopedBox,
-};
+use super::deck::{DeckGenerator, DeckOperationalFailure};
 use super::planar_slice::{RegularClosedTraversal, SliceCategory};
+use super::rank1_annulus::{propagate_deck_placements, DeckJoinFailure, DeckPlacementWalk};
 use truck_geometry::prelude::Point3;
 
 /// Which curve family one traversal occurrence's edge use presents.
@@ -121,6 +119,35 @@ pub enum CylinderLiftExit {
         /// The certified nonzero holonomy, in units of the deck generator.
         holonomy: i64,
     },
+}
+
+impl From<DeckJoinFailure> for CylinderLiftExit {
+    /// Forward the chart-neutral deck-walk failure into this module's own
+    /// vocabulary, one variant to one variant.
+    ///
+    /// The walk itself moved to [`super::rank1_annulus`] when the cone's
+    /// essential band needed the identical arithmetic; the names, the
+    /// categories and the tags a consumer sees are unchanged by that move.
+    fn from(failure: DeckJoinFailure) -> Self {
+        match failure {
+            DeckJoinFailure::NoCompatibleInteger { join_index } => {
+                Self::JoinNoCompatibleInteger { join_index }
+            }
+            DeckJoinFailure::MultipleCompatibleIntegers { join_index } => {
+                Self::JoinMultipleCompatibleIntegers { join_index }
+            }
+            DeckJoinFailure::Indeterminate { join_index } => {
+                Self::JoinIndeterminate { join_index }
+            }
+            DeckJoinFailure::OperationalFailure {
+                join_index,
+                failure,
+            } => Self::JoinOperationalFailure {
+                join_index,
+                failure,
+            },
+        }
+    }
 }
 
 impl CylinderLiftExit {
@@ -297,175 +324,32 @@ pub struct ZeroHolonomyLift {
     pub joins_checked: usize,
 }
 
-/// The number of chained elementary floating-point operations a certified
-/// join tolerance must cover.
+/// Step 5's walk. Propagate deck placements around the developed boundary
+/// from a fixed initial placement and report the terminal holonomy, taking no
+/// verdict on its value.
 ///
-/// A developed coordinate at one end of a join is built from a bounded,
-/// countable chain: a subtraction (`x - origin`), a dot product (two
-/// multiplies and an add) against a recorded basis vector, and — on the
-/// angular axis — an `atan2` evaluation or a `theta_start + declared_sweep`
-/// addition. Each elementary op contributes at most one ULP of *relative*
-/// error to a result of that op's own magnitude (IEEE 754 correct rounding),
-/// and `DeckGenerator`'s own shift arithmetic (`k * period`, folded in by the
-/// placement) adds one more. Eight covers that chain with headroom to spare
-/// without being so wide that a real discrepancy between two *different*
-/// physical vertices could hide inside it — the scale it multiplies, in
-/// [`certified_join_tolerance`], is the local magnitude of the specific pair
-/// of values being compared, per `FORMAL_SYSTEM.md`'s per-primitive
-/// discipline, never a global caller-chosen constant.
-const JOIN_EVALUATION_ULPS: f64 = 8.0;
-
-/// The certified enclosure radius for one developed coordinate's join
-/// discrepancy: [`JOIN_EVALUATION_ULPS`] machine epsilons of the larger
-/// operand magnitude, floored at `scale_floor` so a join whose true value is
-/// near zero still gets a nonzero, scale-appropriate enclosure (the floor for
-/// the angular axis is the deck period itself, since the shift arithmetic's
-/// error scales with the period regardless of how small the residual angle
-/// is).
-fn certified_join_tolerance(b: f64, a: f64, scale_floor: f64) -> f64 {
-    let scale = b.abs().max(a.abs()).max(scale_floor);
-    JOIN_EVALUATION_ULPS * f64::EPSILON * scale
-}
-
-/// Solve one join: the deck integer `k` with `A + k g` compatible with `B`,
-/// where `B` is the unplaced developed end of one occurrence and `A` the
-/// unplaced developed start of the next.
-///
-/// Each component is widened by [`certified_join_tolerance`] into `[value -
-/// tolerance, value + tolerance]` rather than passed to the deck solver as a
-/// bit-exact point. Both sides of a join are evaluated through genuinely
-/// different code paths for the same physical vertex — one occurrence's
-/// `atan2`-based `angular_coordinate`, the other's `theta_start +
-/// declared_sweep` arithmetic — so their difference at a true zero-holonomy
-/// join is not exactly `0.0`, only within a certified number of ULPs of it.
-/// Without this enclosure the deck solver would correctly, but uselessly,
-/// refuse every join as `NoCompatibleInteger`: a zero-width interval demands
-/// exact equality to an integer multiple of the period, which floating
-/// evaluation of two different expressions never gives even when the
-/// underlying claim is true.
-fn solve_join(
-    generator: &DeckGenerator,
-    b: truck_geometry::prelude::Point2,
-    a: truck_geometry::prelude::Point2,
-) -> Result<DeckSolveResult, DeckOperationalFailure> {
-    // The developed convention is (axial = First, angular = Second); see
-    // `super::cylinder`'s module docs.
-    let axial_tolerance = certified_join_tolerance(b.x, a.x, 1.0);
-    let angular_tolerance =
-        certified_join_tolerance(b.y, a.y, generator.period_magnitude().get());
-    let axial = DeckInterval::from_f64(b.x - a.x - axial_tolerance, b.x - a.x + axial_tolerance)
-        .map_err(|_| DeckOperationalFailure::ArithmeticOverflow)?;
-    let angular = DeckInterval::from_f64(
-        b.y - a.y - angular_tolerance,
-        b.y - a.y + angular_tolerance,
-    )
-    .map_err(|_| DeckOperationalFailure::ArithmeticOverflow)?;
-    let displacement = DevelopedBox {
-        first: axial,
-        second: angular,
-    };
-    solve_axis_aligned(generator, &displacement)
-}
-
-/// Step 5's raw product, before any verdict is taken on the holonomy: a
-/// certified deck placement for every occurrence, and the certified terminal
-/// holonomy itself.
+/// The arithmetic is [`propagate_deck_placements`]'s, which is chart-neutral:
+/// it reads only each occurrence's two developed endpoints and the certified
+/// generator, and nothing about which surface produced them. It moved there
+/// when the cone's essential band needed the identical walk; this function is
+/// the cylinder's entry to it and its behaviour is unchanged, including every
+/// exit name, category and tag.
 ///
 /// [`propagate_and_classify_holonomy`] is this walk plus the contractible
 /// subset's `h = 0` requirement. A consumer that admits an *essential*
 /// boundary — [`super::cylinder_band`], for which `h = ±1` is precisely the
 /// admission criterion rather than a failure — reads the holonomy from here
 /// rather than recovering it from an error variant.
-#[derive(Debug, Clone)]
-pub struct DeckPlacementWalk {
-    /// The certified deck integer for each occurrence, in traversal order,
-    /// with `placements[0] == 0` by the walk's fixed starting placement.
-    pub placements: Vec<i64>,
-    /// The certified terminal holonomy, in units of the deck generator: the
-    /// deck integer the closing join implies for occurrence `0`, read against
-    /// the fixed `n_0 = 0`.
-    pub holonomy: i64,
-    /// How many joins were checked, including the final-to-initial wrap.
-    pub joins_checked: usize,
-}
-
-/// Step 5's walk. Propagate deck placements around the developed boundary
-/// from a fixed initial placement and report the terminal holonomy, taking no
-/// verdict on its value.
-///
-/// Every join's enclosure is [`certified_join_tolerance`]'s certified bound
-/// on the evaluation discrepancy between two independent developed-coordinate
-/// computations of one physical vertex (see [`solve_join`]) — derived from
-/// the witnesses' own operand magnitudes, never a caller-supplied constant —
-/// and is not a geometric approximation of the curve itself, which the
-/// witnesses already represent exactly.
-///
-/// Every join is classified before any placement past it is used, so a join
-/// that does not resolve uniquely stops the walk with the specific
-/// [`CylinderLiftExit`] naming it — this function never guesses a placement
-/// to keep going. Summing the individual developed displacements around the
-/// loop instead would silently discard exactly the information the holonomy
-/// *is*; see the module docs.
 pub fn propagate_placements(
     boundary: &DevelopedCylinderBoundary,
     generator: DeckGenerator,
 ) -> Result<DeckPlacementWalk, CylinderLiftExit> {
-    let witnesses = &boundary.witnesses;
-    let count = witnesses.len();
-    // A degenerate (empty or single-occurrence) boundary has no closed walk
-    // to classify; the caller's traversal-continuity check already refuses
-    // this shape before reaching here in every real path.
-    debug_assert!(count > 0, "traverse_bound refuses an empty traversal");
-
-    let mut placements = vec![0i64; count];
-
-    let classify = |join_index: usize,
-                     result: Result<DeckSolveResult, DeckOperationalFailure>|
-     -> Result<i64, CylinderLiftExit> {
-        match result {
-            Ok(DeckSolveResult::Unique(k)) => Ok(k),
-            Ok(DeckSolveResult::NoCompatibleInteger) => {
-                Err(CylinderLiftExit::JoinNoCompatibleInteger { join_index })
-            }
-            Ok(DeckSolveResult::MultipleCompatibleIntegers) => {
-                Err(CylinderLiftExit::JoinMultipleCompatibleIntegers { join_index })
-            }
-            Ok(DeckSolveResult::Indeterminate) => {
-                Err(CylinderLiftExit::JoinIndeterminate { join_index })
-            }
-            Err(failure) => Err(CylinderLiftExit::JoinOperationalFailure {
-                join_index,
-                failure,
-            }),
-        }
-    };
-
-    // Propagate n_1 .. n_{count-1} from the fixed n_0 = 0. Every join here
-    // uses the *raw* (unplaced) developed end and start; the running
-    // placement is folded in only through the accumulated `k`s, never by
-    // re-deriving a coordinate.
-    for i in 0..count.saturating_sub(1) {
-        let b = witnesses[i].end;
-        let a = witnesses[i + 1].start;
-        let k = classify(i, solve_join(&generator, b, a))?;
-        placements[i + 1] = placements[i] + k;
-    }
-
-    // The final join closes the cycle back to occurrence 0 without
-    // overwriting its fixed placement: the candidate it implies for n_0 is
-    // read off directly as the terminal holonomy, and the walk stays "cut
-    // open" exactly as the module docs require.
-    let last = count - 1;
-    let b_last = witnesses[last].end;
-    let a_first = witnesses[0].start;
-    let k_last = classify(last, solve_join(&generator, b_last, a_first))?;
-    let holonomy = placements[last] + k_last;
-
-    Ok(DeckPlacementWalk {
-        placements,
-        holonomy,
-        joins_checked: count,
-    })
+    let chain: Vec<_> = boundary
+        .witnesses
+        .iter()
+        .map(|witness| (witness.start, witness.end))
+        .collect();
+    propagate_deck_placements(&chain, generator).map_err(CylinderLiftExit::from)
 }
 
 /// Step 5. Propagate deck placements around the developed boundary and

@@ -90,6 +90,7 @@ pub mod numeric;
 pub mod outcome;
 pub mod planar_holes;
 pub mod planar_slice;
+pub mod rank1_annulus;
 pub mod support;
 pub mod xmonotone;
 

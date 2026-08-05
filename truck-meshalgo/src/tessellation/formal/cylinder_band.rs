@@ -77,23 +77,20 @@
 //! the strip. Nothing here reverses a boundary to make an orientation work:
 //! the opposite-homology requirement is checked and refused, never repaired.
 //!
-//! # Why the patch is not ear-clipped
+//! # Where the realization lives
 //!
-//! [`super::planar_slice::triangulate`] is reused everywhere the formal
-//! subtree needs a *disk*, and this module reuses its certificate
-//! ([`certified_polygonal_region`]) and its checker ([`final_validity`])
-//! unchanged. It cannot supply the patch's triangles, for a structural
-//! reason rather than a stylistic one: ear clipping a convex patch fans it
-//! from one vertex, and that apex is one of the two developed lifts of a cut
-//! vertex, so the fan always contains a triangle carrying *both* lifts. That
-//! triangle is degenerate the moment the identification is discharged. The
-//! band's own triangulator ([`triangulate_band_patch`]) walks the two
-//! boundary chains instead, which by construction never puts both lifts of
-//! one cut vertex in one triangle — and its output is then handed to the
-//! *same* [`final_validity`] battery, so the strengthening is in the producer
-//! only, never in the checking.
-
-use std::collections::{BTreeMap, BTreeSet};
+//! Everything from "cut the strip open" onwards is chart arithmetic that knows
+//! nothing about cylinders, so it lives in [`super::rank1_annulus`] and the
+//! cone's essential band ([`super::cone_band`]) reaches the same code. What
+//! stays here is the whole of the paragraph above: the cylinder-specific
+//! certification, which is the only thing that decides whether a face is a
+//! band at all.
+//!
+//! The split changed no arithmetic and no operation order, so a face's mesh is
+//! what it was. The realizer additionally re-checks the obligations this
+//! module names when it hands them over — see
+//! [`super::rank1_annulus::RankOnePeriodicAnnulus`] — which for a certified
+//! cylinder band always hold by construction.
 
 use super::super::source_evidence::{
     BoundId, EdgeUseId, SourceBoundInput, SourceFaceInput, SourceVertexKey,
@@ -104,50 +101,25 @@ use super::cylinder_lift::{
     develop_traversal_from_source, propagate_placements, CylinderLiftExit,
 };
 use super::cylinder_mesh::lift_to_cylinder;
-use super::numeric::NonNegativeFinite;
 use super::planar_slice::{
-    bounded_material_region_of, certified_polygonal_region, final_validity, jordan_arrangement_of,
-    traverse_bound, CertificateRoute, CertifiedPlanarCurveOccurrence, CertifiedPolygonalRegion,
-    FinalValidityReport, Rank0Displacement, Rank0DevelopedBoundary, SliceCategory, SliceExit,
-    TriangulatedRegion,
+    traverse_bound, FinalValidityReport, SliceCategory, SliceExit, TriangulatedRegion,
+};
+use super::rank1_annulus::{
+    AnnulusBoundary, AnnulusCell, AnnulusExit, AnnulusValidityReport, CarrierOrder, FreeDeckAction,
+    RankOnePeriodicAnnulus,
 };
 use super::support::CurveSchema;
 use truck_geometry::prelude::{Point2, Point3};
 use truck_topology::compress::OuterBoundStanding;
 
-/// The bound identity the two artificial cut sides are recorded under.
+pub use super::rank1_annulus::{
+    CompleteParallel, CutOpenDomainPlan, EdgeIdentification, PlanarPatch,
+};
+
+/// What the regluded annular complex was proved to be.
 ///
-/// The cut sides are *not* source boundaries and must never be mistaken for
-/// one, so they carry an identity no source bound can hold: source bounds are
-/// indexed from zero by their position in the face, so `usize::MAX` is
-/// unreachable for them by construction. Everything downstream that keys on
-/// [`EdgeUseId`] therefore sees the cut for what it is.
-const CUT_BOUND: BoundId = BoundId(usize::MAX);
-
-/// The edge-use identity of the patch's right (leading) cut side.
-const RIGHT_CUT: EdgeUseId = EdgeUseId::new(CUT_BOUND, 0);
-
-/// The edge-use identity of the patch's left (trailing) cut side.
-const LEFT_CUT: EdgeUseId = EdgeUseId::new(CUT_BOUND, 1);
-
-/// The largest number of segments one developed arc is subdivided into.
-///
-/// The subdivision exists so the *lifted* chord stays within tolerance of the
-/// physical circle (see [`arc_segment_count`]); the cap bounds the cost of
-/// [`jordan_arrangement_of`]'s exhaustive `O(n^2)` pairwise certification on a
-/// pathological tolerance, and a face that would need more is refused by the
-/// polygonal certificate rather than approximated more coarsely in silence.
-const MAXIMUM_ARC_SEGMENTS: usize = 512;
-
-/// The fewest segments each boundary chain is cut into.
-///
-/// Three, for a topological reason and not a quality one. A chain with a
-/// single segment puts its two endpoints — which are the two developed lifts
-/// of one cut vertex — in one triangle of *any* triangulation, and that
-/// triangle collapses when the identification is discharged. Two is already
-/// enough to prevent it; three leaves a margin. Any physical tolerance asks
-/// for far more than this, so the floor only guards a degenerate one.
-const MINIMUM_CHAIN_SEGMENTS: usize = 3;
+/// The shared realizer's report, under this module's historical name.
+pub type BandValidityReport = AnnulusValidityReport;
 
 // ---------------------------------------------------------------------------
 // Material authority
@@ -371,6 +343,39 @@ pub enum BandExit {
     LiftNotFinite,
 }
 
+impl From<AnnulusExit> for BandExit {
+    /// Forward the shared realizer's exit into this module's own vocabulary,
+    /// one variant to one variant.
+    ///
+    /// [`AnnulusExit::ObligationNotDischarged`] has no historical counterpart
+    /// because it cannot arise here: a completed [`CertifiedCylinderBand`]
+    /// proves every obligation the contract names, so the realizer's re-check
+    /// is a restatement rather than a second gate. It maps onto
+    /// [`BandExit::Patch`] with the triangulation exit so that, if it ever did
+    /// fire, it would be reported as the operational failure it is rather than
+    /// as a verdict about the face.
+    fn from(exit: AnnulusExit) -> Self {
+        match exit {
+            AnnulusExit::ObligationNotDischarged { .. } => {
+                Self::Patch(SliceExit::TriangulationDidNotComplete)
+            }
+            AnnulusExit::CutCoordinateUnavailable => Self::CutCoordinateUnavailable,
+            AnnulusExit::Patch(exit) => Self::Patch(exit),
+            AnnulusExit::RegluedDegenerateTriangle => Self::RegluedDegenerateTriangle,
+            AnnulusExit::RegluedCutSurvives => Self::RegluedCutSurvives,
+            AnnulusExit::RegluedNotConnected => Self::RegluedNotConnected,
+            AnnulusExit::RegluedBoundaryComponents { components } => {
+                Self::RegluedBoundaryComponents { components }
+            }
+            AnnulusExit::RegluedEulerCharacteristic { characteristic } => {
+                Self::RegluedEulerCharacteristic { characteristic }
+            }
+            AnnulusExit::RegluedOrientationInconsistent => Self::RegluedOrientationInconsistent,
+            AnnulusExit::LiftNotFinite => Self::LiftNotFinite,
+        }
+    }
+}
+
 impl BandExit {
     /// Which semantic category this exit belongs to.
     ///
@@ -459,51 +464,6 @@ impl BandExit {
 // ---------------------------------------------------------------------------
 // Boundary components
 // ---------------------------------------------------------------------------
-
-/// One authoritative bound, developed into one complete simple cylinder
-/// parallel with a certified primitive homology.
-///
-/// Everything the source declared survives: the [`BoundId`], the ordered
-/// [`EdgeUseId`] sequence, and the source vertex identities the traversal
-/// joined on. Nothing here is keyed on a coordinate.
-#[derive(Debug, Clone)]
-pub struct CompleteParallel {
-    /// Which authoritative bound this is.
-    pub bound: BoundId,
-    /// The ordered edge-use identities, in source cyclic order.
-    pub edge_uses: Vec<EdgeUseId>,
-    /// The source vertices the traversal starts each occurrence at, in the
-    /// same order.
-    pub start_vertices: Vec<SourceVertexKey>,
-    /// The developed start point of each occurrence, already placed on its
-    /// certified deck copy: `(axial, angular)`, angular unwrapped.
-    pub starts: Vec<Point2>,
-    /// The developed end point of the *last* occurrence, placed. This is the
-    /// second developed lift of `starts[0]`'s source vertex, one full deck
-    /// period away — the boundary is closed because `end = start + h g`, not
-    /// because a segment joins them.
-    pub terminal: Point2,
-    /// The certified terminal holonomy: `+1` or `-1`.
-    pub homology: i64,
-}
-
-impl CompleteParallel {
-    /// The developed angular coordinate this component's traversal begins at.
-    pub fn start_angular(&self) -> f64 {
-        self.starts[0].y
-    }
-
-    /// The source vertex the cut may be taken at: the first occurrence's
-    /// start vertex.
-    pub fn cut_vertex(&self) -> SourceVertexKey {
-        self.start_vertices[0]
-    }
-
-    /// Every source vertex this component visits.
-    pub fn source_vertices(&self) -> BTreeSet<SourceVertexKey> {
-        self.start_vertices.iter().copied().collect()
-    }
-}
 
 /// Develop one authoritative bound and certify it a complete simple parallel.
 ///
@@ -905,436 +865,83 @@ pub fn certify_cylinder_band(
 }
 
 // ---------------------------------------------------------------------------
-// Cut-open construction
+// Realization, through the shared rank-one annulus realizer
 // ---------------------------------------------------------------------------
 
-/// The explicit identification of the patch's two artificial sides.
+/// Present a certified band to the shared realizer.
 ///
-/// The two sides are the two developed lifts of one cut arc, so the pairing
-/// is `(left, v) ~ (right, v)` vertex by vertex. Each pair names two cycle
-/// positions that are the two lifts of *one source vertex*, one deck period
-/// apart — which is why discharging the identification is a statement about
-/// identity and not about proximity.
-#[derive(Debug, Clone, PartialEq)]
-pub struct EdgeIdentification {
-    /// The identified vertex pairs, as `(left cycle index, right cycle
-    /// index)`.
-    pub pairs: Vec<(usize, usize)>,
-    /// The cycle position of the right cut segment.
-    pub right_segment: usize,
-    /// The cycle position of the left cut segment.
-    pub left_segment: usize,
+/// This is the whole of the handover, and it is deliberately one short
+/// function so that what the cylinder claims can be read against what it
+/// proved. Each obligation below is a restatement of a conjunct
+/// [`certify_cylinder_band`] already discharged:
+///
+/// - the two components are in the source's own bound order, which is the
+///   order the cut-open patch traverses them in;
+/// - both carriers have the cylinder's own single certified radius, because a
+///   complete parallel of a cylinder is a circle of that radius;
+/// - [`CarrierOrder::DisjointEnclosures`] is exactly
+///   [`CarrierRelation::DistinctCarrier`], restated in the chart's own terms;
+/// - [`FreeDeckAction::GloballyRegularSupport`] is the cylinder's structural
+///   fact and the reason this module never had an apex obligation: an embedded
+///   cylinder of certified positive radius has **no** singular orbit at any
+///   axial coordinate, so no strip of it can contain one. That is a statement
+///   about the support, proved by [`super::cylinder::identify_cylinder`], not
+///   an absence of contradiction.
+fn realization_contract<'a>(
+    band: &'a CertifiedCylinderBand,
+    authority: BandMaterialAuthority,
+) -> RankOnePeriodicAnnulus<'a> {
+    // `authority` is a proof token, not data. Which of the cut-open cycle's
+    // two complementary components is bounded is settled by the Jordan curve
+    // theorem and does not vary with where the standing came from. What the
+    // token establishes is that *some* route granted material standing at all
+    // — the check `band_material_authority` is the only constructor of.
+    // Requiring it by value keeps that step impossible to skip.
+    let _: BandMaterialAuthority = authority;
+    let (first, second) = band.in_source_order();
+    let radius = band.cylinder.schema().radius().get();
+    let first_is_lower = std::ptr::eq(first, &band.lower_boundary);
+    RankOnePeriodicAnnulus {
+        first: AnnulusBoundary {
+            parallel: first,
+            carrier_radius: radius,
+        },
+        second: AnnulusBoundary {
+            parallel: second,
+            carrier_radius: radius,
+        },
+        period: band.period,
+        carrier_order: CarrierOrder::DisjointEnclosures {
+            first_is_lower,
+            separation: band.separation,
+        },
+        free_deck_action: FreeDeckAction::GloballyRegularSupport,
+        cell: AnnulusCell::CylinderEssentialBand,
+    }
 }
 
-/// The plan for cutting one certified band open into a single patch.
-#[derive(Debug, Clone)]
-pub struct CutOpenDomainPlan {
-    /// The periodic coordinate the band is cut at.
-    pub cut_angular: f64,
-    /// The authoritative source vertex that coordinate was read from.
-    pub cut_vertex: SourceVertexKey,
-    /// The deck shift applied to the first (source-order) component, in
-    /// periods.
-    pub first_shift: i64,
-    /// The deck shift applied to the second component, in periods.
-    pub second_shift: i64,
-}
-
-/// Choose the band's cut, deterministically and from source data alone.
-///
-/// The cut coordinate is the periodic coordinate of the lexicographically
-/// earliest authoritative source endpoint that has a uniquely certified one:
-/// bounds are ordered by their source position, occurrences by their position
-/// within the bound, so the earliest such endpoint is the first occurrence of
-/// the earlier bound. No centroid, no midpoint, and no geometric optimisation
-/// enters the choice — two runs over the same file cut in the same place.
-///
-/// Each component is then placed in the single deck copy that carries it into
-/// the period window *starting at the cut*: the copy whose lowest developed
-/// angular coordinate lies in `[cut, cut + period)`. Both components then
-/// cover the same turn of the cylinder, which is what "cut here" means — the
-/// component that supplied the cut lands on `[cut, cut + period]` exactly,
-/// whichever way round it winds.
-///
-/// This is a placement, not a re-derivation: it shifts a whole certified
-/// chain by an integer number of periods and changes no coordinate's
-/// relationship to any other. Choosing the copy by the chain's *start*
-/// instead would put a component that winds the other way a full period below
-/// the cut, which is a legal developed image of the same band but a useless
-/// one — the two chains would then share no angular extent at all.
+/// Choose the band's cut. See [`super::rank1_annulus::plan_cut_open`].
 pub fn plan_cut_open(band: &CertifiedCylinderBand) -> Result<CutOpenDomainPlan, BandExit> {
     let (first, second) = band.in_source_order();
-    let cut_vertex = first.cut_vertex();
-    if !cut_vertex.is_identified() {
-        return Err(BandExit::CutCoordinateUnavailable);
-    }
-    let cut_angular = first.start_angular();
-    if !cut_angular.is_finite() {
-        return Err(BandExit::CutCoordinateUnavailable);
-    }
-    let magnitude = band.period.abs();
-    let lowest = |parallel: &CompleteParallel| -> f64 {
-        parallel
-            .starts
-            .iter()
-            .chain(std::iter::once(&parallel.terminal))
-            .fold(f64::INFINITY, |low, point| low.min(point.y))
-    };
-    let shift_of = |low: f64| -> i64 { -(((low - cut_angular) / magnitude).floor() as i64) };
-    Ok(CutOpenDomainPlan {
-        cut_angular,
-        cut_vertex,
-        first_shift: shift_of(lowest(first)),
-        second_shift: shift_of(lowest(second)),
-    })
+    super::rank1_annulus::plan_cut_open(first, second, band.period).map_err(BandExit::from)
 }
 
-/// The cut-open planar patch: one rectangle-like domain in the developed
-/// cylinder chart, certified simple, with its material region selected and
-/// its artificial sides recorded as an identification rather than as
-/// boundary.
-#[derive(Debug, Clone)]
-pub struct PlanarPatch {
-    /// The certified polygonal region, through the reused planar
-    /// certificates.
-    pub region: CertifiedPolygonalRegion,
-    /// The identification of the two artificial cut sides.
-    pub identification: EdgeIdentification,
-    /// How many vertices of the cycle belong to the lower-in-cycle-order
-    /// chain, counting both lifts of its cut vertex.
-    pub first_chain_vertices: usize,
-    /// The sign of the angular direction both chains advance in.
-    pub direction: f64,
-}
-
-/// How many segments one developed arc is cut into so that its *lifted* chord
-/// stays within `tolerance` of the physical circle.
-///
-/// A chord subtending `delta` on a circle of radius `r` departs from it by at
-/// most the sagitta `r (1 - cos(delta / 2))`, so `k` segments over a sweep
-/// `s` need `r (1 - cos(s / 2k)) <= tolerance`, i.e. `k >= s / (2 acos(1 -
-/// tolerance / r))`. That is a bound on the realized geometry, derived from
-/// the certified radius and the caller's own tolerance; it is not a shape
-/// heuristic and it does not touch the developed chart, where the arc is
-/// exactly the straight segment the witness already represents.
-fn arc_segment_count(sweep: f64, radius: f64, tolerance: f64, minimum: usize) -> usize {
-    let minimum = minimum.max(1);
-    let sweep = sweep.abs();
-    if !sweep.is_finite() || !radius.is_finite() || radius <= 0.0 {
-        return MAXIMUM_ARC_SEGMENTS;
-    }
-    if !(tolerance > 0.0) {
-        return MAXIMUM_ARC_SEGMENTS;
-    }
-    let cosine = (1.0 - tolerance / radius).clamp(-1.0, 1.0);
-    let half = cosine.acos();
-    let needed = match half > 0.0 {
-        true => (sweep / (2.0 * half)).ceil(),
-        false => MAXIMUM_ARC_SEGMENTS as f64,
-    };
-    if !needed.is_finite() || needed >= MAXIMUM_ARC_SEGMENTS as f64 {
-        return MAXIMUM_ARC_SEGMENTS.max(minimum);
-    }
-    (needed as usize).clamp(minimum, MAXIMUM_ARC_SEGMENTS)
-}
-
-/// Subdivide one placed developed arc into `count` collinear points.
-///
-/// The developed image of a circumferential arc *is* a straight segment, so
-/// every interpolated point lies exactly on it: the subdivision adds
-/// resolution to the lift without adding any approximation to the developed
-/// chart. That is why the patch's polygonal certificate stays exact, and why
-/// [`certified_polygonal_region`]'s exactness guard is satisfied here for the
-/// same reason it is for a line-bounded planar face, not by an exemption.
-fn subdivide(start: Point2, end: Point2, count: usize) -> Vec<Point2> {
-    let mut points = Vec::with_capacity(count + 1);
-    points.push(start);
-    for step in 1..count {
-        let t = step as f64 / count as f64;
-        points.push(Point2::new(
-            start.x + t * (end.x - start.x),
-            start.y + t * (end.y - start.y),
-        ));
-    }
-    points.push(end);
-    points
-}
-
-/// Build one chain's placed, subdivided occurrences.
-///
-/// Each occurrence runs from its own placed developed start to the *next*
-/// occurrence's placed developed start — the terminal for the last one — so
-/// the chain is closed by the source's own vertex identities and by the deck
-/// placement, never by reconciling two independently rounded copies of one
-/// endpoint.
-fn chain_occurrences(
-    parallel: &CompleteParallel,
-    shift: f64,
-    radius: f64,
-    tolerance: f64,
-) -> Vec<CertifiedPlanarCurveOccurrence> {
-    let count = parallel.starts.len();
-    let minimum_per_occurrence = MINIMUM_CHAIN_SEGMENTS.div_ceil(count);
-    let shifted = |p: Point2| Point2::new(p.x, p.y + shift);
-    (0..count)
-        .map(|index| {
-            let start = shifted(parallel.starts[index]);
-            let end = match index + 1 == count {
-                true => shifted(parallel.terminal),
-                false => shifted(parallel.starts[index + 1]),
-            };
-            let segments = arc_segment_count(
-                end.y - start.y,
-                radius,
-                tolerance,
-                minimum_per_occurrence,
-            );
-            CertifiedPlanarCurveOccurrence {
-                edge_use: parallel.edge_uses[index],
-                start_vertex: parallel.start_vertices[index],
-                end_vertex: match index + 1 == count {
-                    true => parallel.start_vertices[0],
-                    false => parallel.start_vertices[index + 1],
-                },
-                points: subdivide(start, end, segments),
-                route: CertificateRoute::AnalyticCylinderDevelopment,
-                endpoint_reconciliation: NonNegativeFinite::new(0.0)
-                    .expect("zero is a valid nonnegative bound"),
-            }
-        })
-        .collect()
-}
-
-/// One artificial cut side, as an occurrence.
-///
-/// It carries [`CUT_BOUND`], which no source bound can hold, so nothing
-/// downstream can mistake it for a physical boundary. It exists only to close
-/// the patch's cycle and is removed again by the identification.
-fn cut_occurrence(id: EdgeUseId, from: Point2, to: Point2) -> CertifiedPlanarCurveOccurrence {
-    CertifiedPlanarCurveOccurrence {
-        edge_use: id,
-        start_vertex: SourceVertexKey::Absent,
-        end_vertex: SourceVertexKey::Absent,
-        points: vec![from, to],
-        route: CertificateRoute::AnalyticCylinderDevelopment,
-        endpoint_reconciliation: NonNegativeFinite::new(0.0)
-            .expect("zero is a valid nonnegative bound"),
-    }
-}
-
-/// Cut a certified band open into one planar patch.
-///
-/// The cycle is, in order: the first component's physical boundary, the right
-/// artificial cut side, the second component's physical boundary (which runs
-/// in the reverse angular direction, since its homology is the opposite one),
-/// and the left artificial cut side. The two cut sides are exactly one deck
-/// period apart and are the two lifts of one cut arc — a fact this function
-/// establishes by *construction*, not by measuring them afterwards.
-///
-/// [`jordan_arrangement_of`] and [`bounded_material_region_of`] then certify
-/// the patch simple and select its bounded complementary component, with the
-/// same arithmetic as the planar slice. That component is the compact strip
-/// between the two carriers, so the material region is established **before**
-/// any triangle exists.
-///
-/// The difference from the planar slice is *where the standing to select it
-/// comes from*, and that question is settled before this function is called —
-/// see [`band_material_authority`], whose result must be handed in.
+/// Cut a certified band open into one planar patch. See
+/// [`super::rank1_annulus::cut_open`].
 pub fn cut_open(
     band: &CertifiedCylinderBand,
     plan: &CutOpenDomainPlan,
     authority: BandMaterialAuthority,
     tolerance: f64,
 ) -> Result<PlanarPatch, BandExit> {
-    // `authority` is a proof token, not data. The cut-open cycle below is one
-    // simple closed curve built by this function, so which of its two
-    // complementary components is bounded is settled by the Jordan curve
-    // theorem and does not vary with where the standing came from. What the
-    // token establishes is that *some* route granted material standing at
-    // all — the check that used to sit inside `bounded_material_region` and
-    // now sits in `band_material_authority`, which is the only constructor.
-    // Requiring it by value keeps that step impossible to skip.
-    let _: BandMaterialAuthority = authority;
-    let schema = band.cylinder.schema();
-    let radius = schema.radius().get();
-    let magnitude = band.period.abs();
-    let (first, second) = band.in_source_order();
-
-    let first_shift = plan.first_shift as f64 * magnitude;
-    let second_shift = plan.second_shift as f64 * magnitude;
-
-    let first_chain = chain_occurrences(first, first_shift, radius, tolerance);
-    let second_chain = chain_occurrences(second, second_shift, radius, tolerance);
-
-    let first_terminal = Point2::new(first.terminal.x, first.terminal.y + first_shift);
-    let first_origin = Point2::new(first.starts[0].x, first.starts[0].y + first_shift);
-    let second_terminal = Point2::new(second.terminal.x, second.terminal.y + second_shift);
-    let second_origin = Point2::new(second.starts[0].x, second.starts[0].y + second_shift);
-
-    let mut occurrences = first_chain;
-    let first_chain_segments: usize = occurrences
-        .iter()
-        .map(|occurrence| occurrence.points.len() - 1)
-        .sum();
-    occurrences.push(cut_occurrence(RIGHT_CUT, first_terminal, second_origin));
-    let second_chain_segments: usize = second_chain
-        .iter()
-        .map(|occurrence| occurrence.points.len() - 1)
-        .sum();
-    occurrences.extend(second_chain);
-    occurrences.push(cut_occurrence(LEFT_CUT, second_terminal, first_origin));
-
-    let arrangement = jordan_arrangement_of(&occurrences).map_err(BandExit::Patch)?;
-    let material = bounded_material_region_of(arrangement).map_err(BandExit::Patch)?;
-
-    let developed = Rank0DevelopedBoundary {
-        displacements: vec![Rank0Displacement; occurrences.len()],
-        occurrences,
-    };
-    let region =
-        certified_polygonal_region(material, &developed, tolerance).map_err(BandExit::Patch)?;
-
-    // Cycle layout, by construction: the first chain contributes one vertex
-    // per segment starting at index 0, the right cut contributes the first
-    // chain's terminal, the second chain follows, and the left cut
-    // contributes the second chain's terminal last.
-    let first_terminal_index = first_chain_segments;
-    let second_origin_index = first_chain_segments + 1;
-    let second_terminal_index = first_chain_segments + 1 + second_chain_segments;
-
-    Ok(PlanarPatch {
-        region,
-        identification: EdgeIdentification {
-            // `(left, v) ~ (right, v)`: the left side runs from the second
-            // chain's terminal to the first chain's origin, the right side
-            // from the first chain's terminal to the second chain's origin.
-            // Each pair is two developed lifts of one source vertex.
-            pairs: vec![
-                (second_terminal_index, second_origin_index),
-                (0, first_terminal_index),
-            ],
-            right_segment: first_terminal_index,
-            left_segment: second_terminal_index,
-        },
-        first_chain_vertices: first_chain_segments + 1,
-        direction: first.homology as f64 * band.period.signum(),
-    })
+    let annulus = realization_contract(band, authority);
+    super::rank1_annulus::cut_open(&annulus, plan, tolerance).map_err(BandExit::from)
 }
 
-// ---------------------------------------------------------------------------
-// Realization
-// ---------------------------------------------------------------------------
-
-/// Triangulate the cut-open patch by walking its two boundary chains.
-///
-/// The patch is a rectangle-like domain between two chains that are each
-/// strictly monotone in the angular coordinate and separated in the axial
-/// one, both certified upstream. Advancing whichever chain's next vertex
-/// comes first in that shared direction sweeps the patch exactly once, giving
-/// `n - 2` triangles over the polygon's own vertices with no Steiner point —
-/// the same shape [`final_validity`] checks a reused ear-clipped disk against,
-/// which is why that battery is applied to this output unchanged.
-///
-/// Why not [`super::planar_slice::triangulate`]: see the module docs. Its fan
-/// output always carries both developed lifts of one cut vertex in a single
-/// triangle, which the identification then collapses.
+/// Triangulate the cut-open patch. See
+/// [`super::rank1_annulus::triangulate_annulus_patch`].
 pub fn triangulate_band_patch(patch: &PlanarPatch) -> Result<TriangulatedRegion, BandExit> {
-    let vertices = patch.region.region.boundary.cycle.clone();
-    let total = vertices.len();
-    let first_count = patch.first_chain_vertices;
-    if first_count < 3 || total < first_count + 3 {
-        return Err(BandExit::Patch(SliceExit::TriangulationDidNotComplete));
-    }
-
-    // The first chain in cycle order; the second chain reversed, so both run
-    // in the same angular direction.
-    let lower: Vec<usize> = (0..first_count).collect();
-    let upper: Vec<usize> = (first_count..total).rev().collect();
-
-    let progress = |index: usize| patch.direction * vertices[index].y;
-
-    let mut triangles = Vec::with_capacity(total - 2);
-    let (mut i, mut j) = (0usize, 0usize);
-    while i + 1 < lower.len() || j + 1 < upper.len() {
-        // The two diagonals the identification cannot survive. `lower[0]` is
-        // identified with `lower[nl - 1]` and `upper[0]` with `upper[nu - 1]`,
-        // so a triangle edge joining `lower[0]` to `upper[nu - 1]`, or
-        // `lower[nl - 1]` to `upper[0]`, becomes a *third* copy of the cut
-        // edge once the identification is discharged. Each arises only by
-        // running one chain to its end before the other has moved at all, so
-        // each is excluded by holding the last step of a chain back until the
-        // other chain has taken one. The strip is unaffected everywhere else:
-        // the guards can only fire on a patch whose two chains barely overlap
-        // in angle, and the reused validity battery still checks the result.
-        let lower_would_finish_alone = i + 2 == lower.len() && j == 0 && upper.len() >= 2;
-        let upper_would_finish_alone = j + 2 == upper.len() && i == 0 && lower.len() >= 2;
-        let advance_lower = if i + 1 >= lower.len() {
-            false
-        } else if j + 1 >= upper.len() {
-            true
-        } else if lower_would_finish_alone {
-            false
-        } else if upper_would_finish_alone {
-            true
-        } else {
-            progress(lower[i + 1]) <= progress(upper[j + 1])
-        };
-        match advance_lower {
-            true => {
-                triangles.push([lower[i], lower[i + 1], upper[j]]);
-                i += 1;
-            }
-            false => {
-                triangles.push([lower[i], upper[j + 1], upper[j]]);
-                j += 1;
-            }
-        }
-    }
-
-    // Match the cycle's own handedness, so the complex is oriented the way
-    // the certified region is. The walk emits one consistent handedness; this
-    // only chooses which.
-    let reference = patch.region.region.signed_area;
-    if let Some(first) = triangles.first() {
-        let orientation = orient(&vertices, *first);
-        if orientation * reference < 0.0 {
-            for triangle in &mut triangles {
-                triangle.swap(1, 2);
-            }
-        }
-    }
-
-    Ok(TriangulatedRegion {
-        vertices,
-        triangles,
-    })
-}
-
-fn orient(vertices: &[Point2], triangle: [usize; 3]) -> f64 {
-    let [a, b, c] = triangle;
-    let (a, b, c) = (vertices[a], vertices[b], vertices[c]);
-    robust::orient2d(
-        robust::Coord { x: a.x, y: a.y },
-        robust::Coord { x: b.x, y: b.y },
-        robust::Coord { x: c.x, y: c.y },
-    )
-}
-
-/// What the regluded annular complex was proved to be.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BandValidityReport {
-    /// Triangles.
-    pub triangles: usize,
-    /// Distinct vertices after the identification.
-    pub vertices: usize,
-    /// Edges with exactly one incident triangle.
-    pub boundary_edges: usize,
-    /// Edges with exactly two.
-    pub interior_edges: usize,
-    /// Connected components of the boundary. Two, for an annulus.
-    pub boundary_components: usize,
-    /// `V - E + F`. Zero, for an annulus.
-    pub euler_characteristic: i64,
+    super::rank1_annulus::triangulate_annulus_patch(patch).map_err(BandExit::from)
 }
 
 /// The band's complete product: a validated annular mesh on the cylinder.
@@ -1359,198 +966,33 @@ pub struct CertifiedBandMesh {
     pub conformance: SourceConformance,
 }
 
-/// Discharge the identification and validate the annulus.
+/// Discharge the identification and validate the annulus. See
+/// [`super::rank1_annulus::reglue`].
 ///
-/// The merge is by *identity*: each pair names two cycle positions the
-/// construction already knows to be the two developed lifts of one source
-/// vertex, and the right-hand one is rewritten to the left-hand one. No
-/// coordinate is compared, no proximity threshold exists, and two vertices
-/// that happen to coincide are not merged unless the identification says so.
-///
-/// The artificial sides disappear as a consequence, not as a separate step:
-/// once both their endpoint pairs are identified they are the same edge, and
-/// that edge then carries two triangles instead of one, so it is interior.
-/// The check that it really did is [`BandExit::RegluedCutSurvives`].
+/// The lift handed to the shared realizer is [`lift_to_cylinder`], the one
+/// place in the realization that knows the support is a cylinder.
 pub fn reglue(
     patch: &PlanarPatch,
     developed: TriangulatedRegion,
     schema: &CylinderSchema,
 ) -> Result<CertifiedBandMesh, BandExit> {
-    let patch_validity = final_validity(&developed, &patch.region).map_err(BandExit::Patch)?;
-
-    let total = developed.vertices.len();
-    let mut representative: Vec<usize> = (0..total).collect();
-    for &(left, right) in &patch.identification.pairs {
-        if left >= total || right >= total {
-            return Err(BandExit::RegluedCutSurvives);
-        }
-        let (keep, drop) = (left.min(right), left.max(right));
-        representative[drop] = keep;
-    }
-    // One pass suffices: no pair's target is itself identified away, because
-    // the four cut endpoints are four distinct cycle positions forming two
-    // disjoint pairs.
-    let mut compacted: Vec<Option<usize>> = vec![None; total];
-    let mut vertices = Vec::with_capacity(total);
-    for index in 0..total {
-        if representative[index] == index {
-            compacted[index] = Some(vertices.len());
-            vertices.push(developed.vertices[index]);
-        }
-    }
-    let remap = |index: usize| compacted[representative[index]].expect("representatives are kept");
-
-    let mut triangles = Vec::with_capacity(developed.triangles.len());
-    for triangle in &developed.triangles {
-        let [a, b, c] = *triangle;
-        let mapped = [remap(a), remap(b), remap(c)];
-        if mapped[0] == mapped[1] || mapped[1] == mapped[2] || mapped[0] == mapped[2] {
-            return Err(BandExit::RegluedDegenerateTriangle);
-        }
-        triangles.push(mapped);
-    }
-
-    // Directed edge incidence, which decides orientation consistency and
-    // manifoldness together: in a consistently oriented complex every
-    // directed edge occurs exactly once.
-    let mut directed: BTreeSet<(usize, usize)> = BTreeSet::new();
-    let mut undirected: BTreeMap<(usize, usize), usize> = BTreeMap::new();
-    for triangle in &triangles {
-        let [a, b, c] = *triangle;
-        for (p, q) in [(a, b), (b, c), (c, a)] {
-            if !directed.insert((p, q)) {
-                return Err(BandExit::RegluedOrientationInconsistent);
-            }
-            *undirected.entry((p.min(q), p.max(q))).or_insert(0) += 1;
-        }
-    }
-    if undirected.values().any(|count| *count > 2) {
-        return Err(BandExit::RegluedOrientationInconsistent);
-    }
-
-    let boundary: Vec<(usize, usize)> = undirected
-        .iter()
-        .filter(|(_, count)| **count == 1)
-        .map(|(edge, _)| *edge)
-        .collect();
-    let interior_edges = undirected.values().filter(|count| **count == 2).count();
-
-    // The cut must not have survived. Its two sides became one edge under the
-    // identification; if that edge is still a boundary edge, the reglue did
-    // not happen.
-    let cut_edge = {
-        let left = patch.identification.pairs[0];
-        let right = patch.identification.pairs[1];
-        let p = remap(left.0);
-        let q = remap(right.0);
-        (p.min(q), p.max(q))
-    };
-    if undirected.get(&cut_edge) != Some(&2) {
-        return Err(BandExit::RegluedCutSurvives);
-    }
-
-    if !is_connected(vertices.len(), &triangles) {
-        return Err(BandExit::RegluedNotConnected);
-    }
-
-    let boundary_components = count_boundary_components(&boundary);
-    if boundary_components != 2 {
-        return Err(BandExit::RegluedBoundaryComponents {
-            components: boundary_components,
-        });
-    }
-
-    let characteristic = vertices.len() as i64 - (boundary.len() + interior_edges) as i64
-        + triangles.len() as i64;
-    if characteristic != 0 {
-        return Err(BandExit::RegluedEulerCharacteristic { characteristic });
-    }
-
-    let developed = TriangulatedRegion {
-        vertices,
-        triangles,
-    };
-    let physical_vertices = lift_to_cylinder(&developed, schema);
-    if physical_vertices
-        .iter()
-        .any(|p| !(p.x.is_finite() && p.y.is_finite() && p.z.is_finite()))
-    {
-        return Err(BandExit::LiftNotFinite);
-    }
-
+    let realized = super::rank1_annulus::reglue(
+        patch,
+        developed,
+        AnnulusCell::CylinderEssentialBand,
+        &|region| lift_to_cylinder(region, schema),
+    )
+    .map_err(BandExit::from)?;
     Ok(CertifiedBandMesh {
         // The conservative default. `run_cylinder_band` replaces it with the
         // authority's verdict; a caller driving `reglue` directly gets the
         // claim that assumes least about the source.
         conformance: SourceConformance::Conforming,
-        validity: BandValidityReport {
-            triangles: developed.triangles.len(),
-            vertices: developed.vertices.len(),
-            boundary_edges: boundary.len(),
-            interior_edges,
-            boundary_components,
-            euler_characteristic: characteristic,
-        },
-        developed,
-        patch_validity,
-        physical_vertices,
+        developed: realized.developed,
+        patch_validity: realized.patch_validity,
+        validity: realized.validity,
+        physical_vertices: realized.physical_vertices,
     })
-}
-
-/// Whether the complex is connected, walking vertex adjacency across
-/// triangles.
-fn is_connected(vertices: usize, triangles: &[[usize; 3]]) -> bool {
-    if vertices == 0 {
-        return false;
-    }
-    let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); vertices];
-    for [a, b, c] in triangles {
-        for (p, q) in [(*a, *b), (*b, *c), (*c, *a)] {
-            adjacency[p].push(q);
-            adjacency[q].push(p);
-        }
-    }
-    let mut seen = vec![false; vertices];
-    let mut stack = vec![0usize];
-    seen[0] = true;
-    let mut count = 1;
-    while let Some(current) = stack.pop() {
-        for &next in &adjacency[current] {
-            if !seen[next] {
-                seen[next] = true;
-                count += 1;
-                stack.push(next);
-            }
-        }
-    }
-    count == vertices
-}
-
-/// How many connected components the boundary edge set forms.
-fn count_boundary_components(boundary: &[(usize, usize)]) -> usize {
-    let mut adjacency: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for &(a, b) in boundary {
-        adjacency.entry(a).or_default().push(b);
-        adjacency.entry(b).or_default().push(a);
-    }
-    let mut seen: BTreeSet<usize> = BTreeSet::new();
-    let mut components = 0;
-    for &vertex in adjacency.keys() {
-        if seen.contains(&vertex) {
-            continue;
-        }
-        components += 1;
-        let mut stack = vec![vertex];
-        seen.insert(vertex);
-        while let Some(current) = stack.pop() {
-            for &next in adjacency.get(&current).into_iter().flatten() {
-                if seen.insert(next) {
-                    stack.push(next);
-                }
-            }
-        }
-    }
-    components
 }
 
 /// The whole band path, composed: certify, plan the cut, cut open,
