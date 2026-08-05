@@ -18,6 +18,56 @@
 //! axis. This module adds no new periodicity mathematics. What it adds is the
 //! apex.
 //!
+//! # Where the authority comes from
+//!
+//! Stated once, because "certified cone" has to mean something specific and
+//! because two of the checks below look like classifiers and are not.
+//!
+//! ```text
+//! that the surface is a cone      the representation. `look`'s adapter matches
+//!                                 `ElementarySurface::ConicalSurface`, which is
+//!                                 STEP's own `conical_surface` with its
+//!                                 `radius` and `semi_angle`. This module never
+//!                                 decides cone-ness from geometry.
+//!
+//! that the placement preserves    the adapter, which admits only a similarity
+//! it                              transform. A similarity carries circles to
+//!                                 circles and circular cones to circular
+//!                                 cones, which is what makes reassembling the
+//!                                 revolution from its transformed atomic
+//!                                 pieces equal to the `Processor`'s own
+//!                                 surface rather than merely close to it.
+//!
+//! where the apex is               closed form, from the generatrix's own
+//!                                 representation: the projected generatrix is
+//!                                 a ray in the plane normal to the axis, and
+//!                                 the apex is where it meets that plane's
+//!                                 origin. One division, no search, no fit.
+//!
+//! that the chart is regular       the two degeneracy floors, which refuse a
+//! enough to use                   declared cone whose half-angle is zero (a
+//!                                 cylinder's chart) or a right angle (a planar
+//!                                 annulus's).
+//!
+//! that the arithmetic held        [`CONE_STRUCTURAL_RESIDUAL`], applied to the
+//!                                 apex solve, the projected parallelism and
+//!                                 the half-angle's reproduction of the
+//!                                 declared endpoints. Confirmation of this
+//!                                 module's own algebra, at the scale of the
+//!                                 quantities involved.
+//!
+//! that the parameter convention   `u_period()`/`v_period()`, structurally.
+//! is the expected one
+//! ```
+//!
+//! **Sampling appears in exactly one place and creates no authority.**
+//! [`verify_angular_convention`] evaluates the surface at one interior point to
+//! *reject* a representation whose accessors disagree with its own evaluation.
+//! Every sample-derived branch there returns `None`; none of them can turn a
+//! `None` into a `Some`, and removing all of them would only make the function
+//! more permissive. The structural `2π` from `v_period()` carries the
+//! authority, exactly as it does in [`super::cylinder`].
+//!
 //! # The apex is the whole difference
 //!
 //! A cylinder is regular everywhere: every orbit of its angular deck action is
@@ -82,7 +132,33 @@ use truck_geometry::prelude::{
 /// deliberately the same number: a revolved line is admitted by exactly one of
 /// the two identifiers, and a surface in the gap between them is admitted by
 /// neither rather than by both.
+///
+/// A **degeneracy floor**, not a classifier — see the module docs' authority
+/// chain. What a surface *is* comes from the representation the caller matched
+/// on; what this refuses is a declared cone whose half-angle is so near zero
+/// that the generator coordinate carries no usable radius and the apex is
+/// effectively at infinity.
 pub const MINIMUM_CONE_GENERATRIX_TILT: f64 = 1e-9;
+
+/// Relative residual bound for confirming a closed-form structural derivation.
+///
+/// Distinct from the two floors above in *role*, which is why it is a distinct
+/// constant despite sharing their value. The floors decide whether a declared
+/// cone is degenerate. This one confirms that arithmetic this module performed
+/// — the apex solve, the parallelism of the projected generatrix, the
+/// half-angle's reproduction of the declared endpoints — reproduces the
+/// representation it was derived from, at the scale of the quantities
+/// involved.
+///
+/// It therefore never has to distinguish a cone from a nearby non-cone on a
+/// real file: a STEP `conical_surface` is built from a `radius` and a
+/// `semi_angle` about a placement axis, so its projected generatrix passes
+/// through the axis *exactly*, by construction, in the placement's own frame —
+/// and `look`'s adapter admits only similarity placements, which preserve that
+/// exactly. What this bound measures on a conforming file is floating-point
+/// drift, and what it refuses is a `RevolutedCurve<Line>` handed in from
+/// somewhere else that is genuinely not a cone at all.
+pub const CONE_STRUCTURAL_RESIDUAL: f64 = 1e-9;
 
 /// Dimensionless cosine floor below which a generatrix line counts as
 /// perpendicular to the axis.
@@ -457,7 +533,7 @@ pub fn identify_cone(revo: &RevolutedCurve<Line<Point3>>) -> ConeIdentification 
         return refuse(Failure::DegenerateRadius);
     }
     let skew = rp_perp.cross(d_perp).magnitude();
-    if !(skew <= MINIMUM_CONE_GENERATRIX_TILT * rp_perp_norm * d_perp_norm) {
+    if !(skew <= CONE_STRUCTURAL_RESIDUAL * rp_perp_norm * d_perp_norm) {
         return refuse(Failure::GeneratrixSkewToAxis);
     }
 
@@ -472,7 +548,7 @@ pub fn identify_cone(revo: &RevolutedCurve<Line<Point3>>) -> ConeIdentification 
     // generatrix's own length, which is the only length this surface declares.
     let apex_offset = apex - origin;
     let apex_radial = apex_offset - apex_offset.dot(axis) * axis;
-    if !(apex_radial.magnitude() <= MINIMUM_CONE_GENERATRIX_TILT * d_norm.max(1.0)) {
+    if !(apex_radial.magnitude() <= CONE_STRUCTURAL_RESIDUAL * d_norm.max(1.0)) {
         return refuse(Failure::ApexNotOnAxis);
     }
 
@@ -492,7 +568,7 @@ pub fn identify_cone(revo: &RevolutedCurve<Line<Point3>>) -> ConeIdentification 
         let s = r.dot(axis);
         let radial = r - s * axis;
         let predicted = slope.get() * s.abs();
-        if !((radial.magnitude() - predicted).abs() <= MINIMUM_CONE_GENERATRIX_TILT * scale) {
+        if !((radial.magnitude() - predicted).abs() <= CONE_STRUCTURAL_RESIDUAL * scale) {
             return refuse(Failure::SlopeDoesNotReproduceGeneratrix);
         }
     }
@@ -561,10 +637,17 @@ pub fn identify_cone(revo: &RevolutedCurve<Line<Point3>>) -> ConeIdentification 
 ///
 /// Checks the surface's reported `u_period`/`v_period`, then verifies
 /// `subs(u, v) == subs(u, v + 2π)` (angular closure), that the aperiodic
-/// derivative is parallel to the generatrix direction, and that the sample
-/// point lies on the certified cone. Sampling diagnoses or rejects; it never
-/// certifies on its own — the structural `2π` period from `v_period()` carries
-/// the authority, exactly as in [`super::cylinder`].
+/// derivative runs along a generator, and that the sample point lies on the
+/// certified cone.
+///
+/// **Every sample-derived branch here returns `None`.** The structural `2π`
+/// from the accessors is the only thing that can produce a `Some`, so sampling
+/// can narrow this function's acceptance but never widen it, and deleting all
+/// of it would make the identifier strictly more permissive rather than less
+/// justified. That is the same discipline [`super::cylinder`] applies, and it
+/// is why a sample landing somewhere unhelpful — at the apex, say, where the
+/// on-cone test is trivially satisfied — costs nothing: an uninformative sample
+/// declines to reject, and rejection is all a sample can do.
 fn verify_angular_convention(
     revo: &RevolutedCurve<Line<Point3>>,
     axis: Vector3,
@@ -609,9 +692,9 @@ fn verify_angular_convention(
             && (v.dot(axis).abs() / magnitude - generatrix_cosine).abs() <= 1e-9
     };
 
-    // An interior sample, deliberately away from `u = 0` so that a cone whose
-    // declared domain begins at the apex is not sampled at the one point where
-    // the surface is singular and every direction test is vacuous.
+    // One interior sample. Nothing depends on where it lands — a sample at the
+    // apex, or on a domain that does not reach the face, simply declines to
+    // reject — because rejection is the only thing a sample can do here.
     let (u0, v0) = (0.5, 0.3);
     let base = revo.subs(u0, v0);
     if !on_cone(base) {

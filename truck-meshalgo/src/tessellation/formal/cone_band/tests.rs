@@ -581,3 +581,67 @@ fn the_nappe_verdict_reads_signs_and_not_distances() {
         NappeRelation::Undecided
     );
 }
+
+/// The property that makes the enclosure width sound rather than merely small:
+/// widening it is monotone toward refusal.
+///
+/// A wider enclosure can turn a nappe verdict into `Undecided` and can never do
+/// the reverse, and it can never flip one nappe into the other. So the bound's
+/// only power over admission is to withhold it — which is why "the tolerance
+/// decided the nappe" is not a reading this cell admits. Checked by sweeping
+/// the enclosure over sixteen decades against a fixed pair of carriers.
+#[test]
+fn widening_the_enclosure_only_ever_withholds_a_nappe_verdict() {
+    let carrier = |s: f64, enclosure: f64| ConeCircleCarrier {
+        bound: BoundId(0),
+        observed_low: s,
+        observed_high: s,
+        enclosure,
+        radius: 1.0,
+        winding: 1,
+    };
+    let mut withheld = false;
+    let mut previous_decided = true;
+    for exponent in -16..=2 {
+        let enclosure = 10.0_f64.powi(exponent);
+        let relation = classify_nappes(&carrier(1.0, enclosure), &carrier(4.0, enclosure));
+        match relation {
+            NappeRelation::SameNappe { nappe, .. } => {
+                // Never the wrong side, at any width.
+                assert_eq!(nappe, Nappe::Positive, "enclosure 1e{exponent}");
+                assert!(
+                    previous_decided,
+                    "a verdict reappeared after being withheld at a narrower enclosure"
+                );
+            }
+            NappeRelation::Undecided => {
+                withheld = true;
+                previous_decided = false;
+            }
+            // Widening must never invent the opposite-nappe verdict, which is
+            // a *positive* claim about the face.
+            NappeRelation::OppositeNappes { .. } => {
+                panic!("widening produced an opposite-nappe claim at 1e{exponent}")
+            }
+        }
+    }
+    assert!(
+        withheld,
+        "the sweep must reach a width wide enough to withhold, or it proves nothing"
+    );
+
+    // The same, for a genuinely opposite-nappe pair: widening withholds the
+    // verdict rather than converting it into a same-nappe one.
+    for exponent in -16..=2 {
+        let enclosure = 10.0_f64.powi(exponent);
+        match classify_nappes(&carrier(-2.0, enclosure), &carrier(3.0, enclosure)) {
+            NappeRelation::OppositeNappes { first, second } => {
+                assert_eq!((first, second), (Nappe::Negative, Nappe::Positive));
+            }
+            NappeRelation::Undecided => {}
+            NappeRelation::SameNappe { .. } => {
+                panic!("widening turned an opposite-nappe pair into one nappe at 1e{exponent}")
+            }
+        }
+    }
+}

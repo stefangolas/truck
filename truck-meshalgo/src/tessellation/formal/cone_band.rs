@@ -770,6 +770,27 @@ pub enum NappeRelation {
 /// circles a kilometre apart on one nappe are the same verdict, because the
 /// question is which side of the apex each is on and not how far apart they
 /// are.
+///
+/// # Why the enclosure width cannot manufacture a verdict
+///
+/// The enclosure carries a relative bound, and it is worth being precise about
+/// what that bound can and cannot do, because "a tolerance decides the nappe"
+/// would be exactly the unsound reading this cell must not have.
+///
+/// Widening an enclosure is **monotone toward refusal**. A carrier has a
+/// certified nappe only when its whole enclosure clears zero, so widening can
+/// move `Some(nappe)` to `None` and can never move `None` to `Some`, and it can
+/// never move `Some(Positive)` to `Some(Negative)` or back — the two conditions
+/// are `low > 0` and `high < 0`, and no width satisfies both. So the bound's
+/// only power is to *withhold* a verdict, which turns into
+/// [`ConicalBandExit::ApexContactUndecided`] and refuses the face.
+///
+/// A false verdict would therefore need the enclosure to be too **narrow**: the
+/// evaluated generator coordinate would have to clear zero by more than the
+/// bound while the true coordinate did not, which means an evaluation error of
+/// more than `1e-9` relative on a dot product — some seven orders of magnitude
+/// past what one subtraction and one dot product can produce. The direction
+/// that fails safe is the direction a tolerance error actually takes here.
 pub fn classify_nappes(first: &ConeCircleCarrier, second: &ConeCircleCarrier) -> NappeRelation {
     match (first.certified_nappe(), second.certified_nappe()) {
         (Some(a), Some(b)) if a == b => NappeRelation::SameNappe {
