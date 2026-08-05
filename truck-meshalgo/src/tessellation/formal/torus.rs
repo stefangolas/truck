@@ -56,6 +56,8 @@ pub enum TorusIdentificationFailure {
     NonFiniteCoordinate { cause: NumericDomainError },
     /// A radius was not strictly positive.
     DegenerateRadius,
+    /// The symmetry axis was zero (a degenerate placement).
+    DegenerateAxis,
     /// `small_radius >= large_radius`: a spindle or horn torus, not a regular
     /// ring torus.
     SpindleOrHornTorus,
@@ -178,19 +180,43 @@ pub enum TorusIdentification {
 /// coordinate, and any surface whose `2π` period on either axis it cannot
 /// verify by evaluation.
 pub fn identify_torus(torus: &Torus) -> TorusIdentification {
-    let center = torus.center();
-    let large = torus.large_radius();
-    let small = torus.small_radius();
+    identify_torus_world(
+        torus.center(),
+        Vector3::new(0.0, 0.0, 1.0),
+        torus.large_radius(),
+        torus.small_radius(),
+    )
+}
 
+/// Read a torus from its world-space parameters and certify a regular embedded
+/// torus with a rank-two deck.
+///
+/// The look-side adapter extracts the centre, the (similarity-rotated) axis and
+/// the (similarity-scaled) radii from the STEP `ToroidalSurface` placement and
+/// calls this. The periods are placement-independent and are verified on a
+/// canonical evaluation torus. The axis is normalized defensively.
+pub fn identify_torus_world(
+    center: Point3,
+    axis: Vector3,
+    large: f64,
+    small: f64,
+) -> TorusIdentification {
     // --- finiteness -------------------------------------------------------
     let finite = |v: f64| FiniteF64::new(v);
-    for coordinate in [center.x, center.y, center.z, large, small] {
+    for coordinate in [center.x, center.y, center.z, large, small, axis.x, axis.y, axis.z] {
         if let Err(cause) = finite(coordinate) {
             return TorusIdentification::NotATorus(TorusIdentificationFailure::NonFiniteCoordinate {
                 cause,
             });
         }
     }
+
+    // --- axis nondegenerate (normalize) ----------------------------------
+    let axis_norm = axis.magnitude();
+    if !(axis_norm > 0.0) {
+        return TorusIdentification::NotATorus(TorusIdentificationFailure::DegenerateAxis);
+    }
+    let axis = axis / axis_norm;
 
     // --- strictly positive radii ----------------------------------------
     let Ok(large_pf) = PositiveFinite::new(large) else {
@@ -205,16 +231,15 @@ pub fn identify_torus(torus: &Torus) -> TorusIdentification {
         return TorusIdentification::NotATorus(TorusIdentificationFailure::SpindleOrHornTorus);
     }
 
-    // --- both 2π periods, verified by evaluation -------------------------
-    // subs(u, v) == subs(u + 2π, v) and subs(u, v) == subs(u, v + 2π), to
-    // within a residual scaled by the radii (sin/cos of t + 2π disagree with
-    // sin/cos of t at the f64::EPSILON scale).
+    // --- both 2π periods, verified on a canonical evaluation torus ------
+    // Periods are placement-independent, so evaluate on a canonical torus.
+    let canon = Torus::new(Point3::new(0.0, 0.0, 0.0), large, small);
     let scale = large + small;
     let tol = MINIMUM_TORUS_PERIOD_RESIDUAL * scale;
     let (u0, v0) = (0.3, 0.7);
-    let p = torus.subs(u0, v0);
-    let pu = torus.subs(u0 + TAU, v0);
-    let pv = torus.subs(u0, v0 + TAU);
+    let p = canon.subs(u0, v0);
+    let pu = canon.subs(u0 + TAU, v0);
+    let pv = canon.subs(u0, v0 + TAU);
     if (p - pu).magnitude() > tol || (p - pv).magnitude() > tol {
         return TorusIdentification::NotATorus(TorusIdentificationFailure::UnverifiedPeriod);
     }
@@ -245,7 +270,7 @@ pub fn identify_torus(torus: &Torus) -> TorusIdentification {
     TorusIdentification::Torus(CertifiedRankTwoDeck {
         schema: TorusSchema {
             center,
-            axis: Vector3::new(0.0, 0.0, 1.0),
+            axis,
             large_radius: large_pf,
             small_radius: small_pf,
             major_generator,
