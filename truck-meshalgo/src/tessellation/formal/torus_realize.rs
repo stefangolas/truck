@@ -81,7 +81,10 @@ pub enum DevelopedSide {
     },
     /// A cut edge along the complementary deck direction (`u = 0` and
     /// `u = 2π`), identified with its partner by the major deck generator.
-    CutEdge { u: f64 },
+    CutEdge {
+        /// The developed `u` coordinate of this cut edge (`0` or `2π`).
+        u: f64,
+    },
 }
 
 /// The developed planar representation of a certified torus annular cell.

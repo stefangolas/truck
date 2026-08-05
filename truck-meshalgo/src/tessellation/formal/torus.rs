@@ -53,7 +53,10 @@ pub const MINIMUM_TORUS_PERIOD_RESIDUAL: f64 = 1e-9;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TorusIdentificationFailure {
     /// A coordinate or radius was `NaN` or infinite.
-    NonFiniteCoordinate { cause: NumericDomainError },
+    NonFiniteCoordinate {
+        /// The failing coordinate's domain error.
+        cause: NumericDomainError,
+    },
     /// A radius was not strictly positive.
     DegenerateRadius,
     /// The symmetry axis was zero (a degenerate placement).

@@ -174,9 +174,6 @@ pub enum TorusCellFailure {
     NonprimitiveWinding,
     /// The two loops are not the same unsigned primitive class (inhomologous).
     InhomologousLoops,
-    /// The first cell admits parallels only; a meridian-bearing pair is a
-    /// different cell.
-    MeridianNotAdmitted,
     /// The two loops coincide (same developed coordinate mod `2π`): not disjoint.
     IntersectingBoundaries,
     /// A loop's radius/height are inconsistent with the torus: it does not lie
@@ -270,10 +267,6 @@ pub fn certify_torus_annular_cell(
     if cert_a.primitive != cert_b.primitive {
         return Err(TorusCellFailure::InhomologousLoops);
     }
-    // First cell: parallels only.
-    if cert_a.primitive != PrimitiveWinding::Parallel {
-        return Err(TorusCellFailure::MeridianNotAdmitted);
-    }
     // h is primitive: each loop is a complete source circle (one occurrence,
     // closed), which by the closed-edge rule is exactly one traversal, so its
     // unsigned winding is (±1, 0). The effective orientation sign (which may be
@@ -289,11 +282,13 @@ pub fn certify_torus_annular_cell(
 
     // B3 material authority: the unique annular 2-chain M with ∂M = effective
     // source boundary. 0/1/2 solutions → Inconsistent/Resolved/Unresolved.
-    let authority = resolve_material_authority(
-        cert_a.winding[0],
-        cert_b.winding[0],
-        composition.outer_bound_malformation,
-    )?;
+    // The sign lives on the primitive component: winding[0] for parallels,
+    // winding[1] for meridians.
+    let (s_a, s_b) = match cert_a.primitive {
+        PrimitiveWinding::Parallel => (cert_a.winding[0], cert_b.winding[0]),
+        PrimitiveWinding::Meridian => (cert_a.winding[1], cert_b.winding[1]),
+    };
+    let authority = resolve_material_authority(s_a, s_b, composition.outer_bound_malformation)?;
 
     Ok(CertifiedTorusAnnularCell {
         deck: deck.clone(),
@@ -547,7 +542,10 @@ mod tests {
     }
 
     #[test]
-    fn meridian_pair_is_not_admitted_in_the_first_cell() {
+    fn a_meridian_pair_with_opposite_orientations_resolves() {
+        // Two meridians (plane contains the axis, normal ⊥ axis), centre off
+        // axis at radius large, radius small. The first cell now admits
+        // meridian pairs (homologous) as well as parallel pairs.
         let d = deck();
         let m1 = BoundaryLoopPlacement {
             center: Point3::new(5.0, 0.0, 0.0),
@@ -561,9 +559,30 @@ mod tests {
             radius: 1.0,
             effective_orientation_sign: -1,
         };
+        let cell = certify_torus_annular_cell(&d, m1, m2, &clean_composition()).unwrap();
+        assert_eq!(cell.primitive_class(), PrimitiveWinding::Meridian);
+        assert_eq!(cell.boundary_a().winding(), [0, 1]);
+        assert_eq!(cell.boundary_b().winding(), [0, -1]);
+    }
+
+    #[test]
+    fn a_meridian_pair_with_same_orientations_is_inconsistent() {
+        let d = deck();
+        let m1 = BoundaryLoopPlacement {
+            center: Point3::new(5.0, 0.0, 0.0),
+            normal: Vector3::new(0.0, 1.0, 0.0),
+            radius: 1.0,
+            effective_orientation_sign: 1,
+        };
+        let m2 = BoundaryLoopPlacement {
+            center: Point3::new(0.0, 5.0, 0.0),
+            normal: Vector3::new(1.0, 0.0, 0.0),
+            radius: 1.0,
+            effective_orientation_sign: 1,
+        };
         assert_eq!(
             certify_torus_annular_cell(&d, m1, m2, &clean_composition()),
-            Err(TorusCellFailure::MeridianNotAdmitted)
+            Err(TorusCellFailure::InconsistentBoundaryHomology)
         );
     }
 
