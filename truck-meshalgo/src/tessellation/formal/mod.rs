@@ -64,6 +64,8 @@
 //! certified lattice is [`ambient::resolve_ambient_periods`].
 
 pub mod ambient;
+pub mod cone;
+pub mod cone_band;
 pub mod cylinder;
 pub mod cylinder_arrangement;
 pub mod cylinder_band;
@@ -109,6 +111,24 @@ pub use ambient::{
     PeriodAxisEvidence, PeriodCertificate, PeriodCertificationAttempt, PeriodCertificationFailure,
     PeriodContradictionWitness, PeriodHintSet, PeriodHintSource, QuotientIdentificationAuthority,
     UncertifiedPeriodValue,
+};
+pub use cone::{
+    identify_cone, CertifiedEmbeddedCone, ConeIdentification, ConeIdentificationFailure,
+    ConeSchema, ConeValidityCertificate, Nappe, MINIMUM_CONE_AXIAL_COMPONENT,
+    MINIMUM_CONE_GENERATRIX_TILT,
+};
+pub use cone_band::{
+    carrier_of as cone_carrier_of, certify_conical_essential_band, classify_cone_carriers,
+    classify_nappes, complete_cone_circle_witness, conical_band_material_authority,
+    develop_complete_cone_parallel, run_conical_essential_band, CertifiedConicalBandMesh,
+    CertifiedConicalEssentialBand, ConeCarrierRelation, ConeCircleCarrier, ConeParallelWitness,
+    ConeWitnessFailure, ConicalBandExit, ConicalBandMaterialAuthority, ConicalSourceStanding,
+    NappeRelation,
+};
+pub use rank1_annulus::{
+    realize as realize_rank_one_annulus, AnnulusBoundary, AnnulusCell, AnnulusExit,
+    AnnulusObligation, AnnulusValidityReport, CarrierOrder, CompleteParallel, FreeDeckAction,
+    RankOnePeriodicAnnulus, RealizedAnnulus,
 };
 pub use cylinder::{
     identify_cylinder, CertifiedEmbeddedCylinder, CylinderIdentification,
