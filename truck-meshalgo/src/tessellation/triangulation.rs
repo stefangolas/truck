@@ -216,6 +216,16 @@ pub struct MeshedShellOutcome {
     /// fallback was not eligible for, which includes every face when the gate
     /// is closed.
     pub band_attempts: Vec<Option<CylinderBandAttempt>>,
+    /// What the formal conical essential-band route did on each face,
+    /// positionally aligned with `shell.faces`.
+    ///
+    /// A second vector rather than a widened first one, because the two routes
+    /// have genuinely different vocabularies: the cylinder's exit set names a
+    /// nonconformant-source repair this cell has none of, and this cell's names
+    /// nappe and apex obligations the cylinder has none of. Flattening them
+    /// would force a reconciliation to guess which cell a shared tag came from.
+    /// Both are `None` on any face neither route was eligible for.
+    pub cone_band_attempts: Vec<Option<ConeBandAttempt>>,
 }
 
 /// What the cylinder-band fallback did on one eligible face.
@@ -241,6 +251,32 @@ pub enum CylinderBandAttempt {
     /// `run_cylinder_band` returned a typed exit, and the original legacy
     /// failure was preserved unchanged.
     Refused(formal::cylinder_band::BandExit),
+}
+
+/// What the conical essential-band route did on one eligible face.
+///
+/// The same shape as [`CylinderBandAttempt`], and deliberately not the same
+/// type: the unrecovered arm carries [`formal::cone_band::ConicalBandExit`]
+/// unchanged, which names this cell's own obligations — same nappe, apex
+/// exclusion, carrier order — and the recovered arm carries what the *source*
+/// declared about outer-bound standing rather than a conformance repair,
+/// because this cell has no repair to report.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ConeBandAttempt {
+    /// `run_conical_essential_band` returned a validated annular mesh, and
+    /// that mesh replaced the preserved legacy failure.
+    Recovered {
+        /// Triangles in the validated annulus.
+        triangles: usize,
+        /// Which nappe the band was certified on.
+        nappe: formal::cone::Nappe,
+        /// What the source declared about outer-bound standing. Retained as
+        /// provenance; the material region did not come from it.
+        standing: formal::cone_band::ConicalSourceStanding,
+    },
+    /// `run_conical_essential_band` returned a typed exit, and the original
+    /// legacy failure was preserved unchanged.
+    Refused(formal::cone_band::ConicalBandExit),
 }
 
 /// Tessellates faces, discarding why any of them failed.
@@ -311,6 +347,50 @@ where
     )
 }
 
+/// [`cshell_tessellation_with_outcomes_and_cylinder`], additionally threading
+/// the conical-surface adapter the conical essential-band route needs.
+///
+/// A fourth entry point rather than a widened third one, so every caller with
+/// no conical evidence to offer keeps compiling and keeps behaving identically:
+/// the delegation below supplies a `cone_of` that refuses every surface, which
+/// makes the cone route unreachable and the cylinder entry point's output what
+/// it was.
+///
+/// Only one new closure is needed. The two curve readers are surface-agnostic —
+/// they classify a `Curve3D` into a [`formal::SourceCurveFamily`] and know
+/// nothing about what the face is trimmed from — so the cone route reads its
+/// complete source circles through the same two the cylinder route does.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn cshell_tessellation_with_outcomes_and_cone<'a, C, S>(
+    shell: &CompressedShell<Point3, C, S>,
+    tol: f64,
+    sp: impl SP<S>,
+    lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
+    schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
+    curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
+    cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str> + Parallelizable,
+    cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
+    cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
+    cone_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCone, &'static str> + Parallelizable,
+) -> MeshedShellOutcome
+where
+    C: PolylineableCurve + 'a,
+    S: PreMeshableSurface + 'a,
+{
+    cshell_tessellation_inner(
+        shell,
+        tol,
+        sp,
+        lattice_of,
+        schema_of,
+        curve_schema_of,
+        cylinder_of,
+        cylinder_curve_schema_of,
+        cylinder_curve_family_of,
+        cone_of,
+    )
+}
+
 /// [`cshell_tessellation_with_outcomes`], additionally threading the rank-1
 /// cylinder evidence readers (Milestone A / FORMAL-013-015).
 ///
@@ -334,6 +414,43 @@ pub(super) fn cshell_tessellation_with_outcomes_and_cylinder<'a, C, S>(
     cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str> + Parallelizable,
     cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
     cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
+) -> MeshedShellOutcome
+where
+    C: PolylineableCurve + 'a,
+    S: PreMeshableSurface + 'a,
+{
+    cshell_tessellation_inner(
+        shell,
+        tol,
+        sp,
+        lattice_of,
+        schema_of,
+        curve_schema_of,
+        cylinder_of,
+        cylinder_curve_schema_of,
+        cylinder_curve_family_of,
+        // No conical evidence was offered, so none is claimed and the conical
+        // route is unreachable. This entry point's output is unchanged by the
+        // route's existence, by construction.
+        |_: &S| -> std::result::Result<formal::CertifiedEmbeddedCone, &'static str> {
+            Err("cone_evidence_not_provided")
+        },
+    )
+}
+
+/// The one tessellation body every entry point above funnels into.
+#[allow(clippy::too_many_arguments)]
+fn cshell_tessellation_inner<'a, C, S>(
+    shell: &CompressedShell<Point3, C, S>,
+    tol: f64,
+    sp: impl SP<S>,
+    lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
+    schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
+    curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
+    cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str> + Parallelizable,
+    cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
+    cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
+    cone_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCone, &'static str> + Parallelizable,
 ) -> MeshedShellOutcome
 where
     C: PolylineableCurve + 'a,
@@ -809,6 +926,49 @@ where
             }
             _ => (polygon, failure, None),
         };
+        // The conical essential-band route, on the identical production rule
+        // and under the identical gate. It runs only after the cylinder band
+        // has had its chance and only on a face that *still* has no mesh, so
+        // the two cells cannot both claim one face: `cylinder_of` and `cone_of`
+        // are mutually exclusive on any one surface anyway — a revolved line is
+        // either parallel to its axis or tilted from it, and each identifier
+        // refuses the other's case by name — but the ordering makes that a
+        // property of the pipeline rather than only of the adapters.
+        let (polygon, failure, cone_band_attempt) = match (
+            band_recovery_gate,
+            failure.is_some(),
+            legacy_bucket == Some(diagnosis::LossBucket::SyntheticSyntheticCrossing),
+        ) {
+            (true, true, true) => {
+                match run_conical_band_for_face(
+                    declared_face_index,
+                    source_face_id,
+                    face,
+                    &shell.edges,
+                    &shell.vertices,
+                    &cone_of,
+                    &cylinder_curve_schema_of,
+                    &cylinder_curve_family_of,
+                    tol,
+                ) {
+                    None => (polygon, failure, None),
+                    Some(Ok((mesh, nappe, standing))) => {
+                        let triangles = mesh.tri_faces().len();
+                        (
+                            Some(mesh),
+                            None,
+                            Some(ConeBandAttempt::Recovered {
+                                triangles,
+                                nappe,
+                                standing,
+                            }),
+                        )
+                    }
+                    Some(Err(exit)) => (polygon, failure, Some(ConeBandAttempt::Refused(exit))),
+                }
+            }
+            _ => (polygon, failure, None),
+        };
         let result = CompressedFace {
             boundaries,
             orientation: face.orientation,
@@ -846,7 +1006,13 @@ where
         } else {
             None
         };
-        (result, failure, face_diagnosis, band_attempt)
+        (
+            result,
+            failure,
+            face_diagnosis,
+            band_attempt,
+            cone_band_attempt,
+        )
     };
     #[cfg(not(target_arch = "wasm32"))]
     let results: Vec<_> = shell
@@ -866,11 +1032,13 @@ where
     let mut face_failures = Vec::with_capacity(results.len());
     let mut face_diagnoses = Vec::with_capacity(results.len());
     let mut band_attempts = Vec::with_capacity(results.len());
-    for (f, ff, fd, ba) in results {
+    let mut cone_band_attempts = Vec::with_capacity(results.len());
+    for (f, ff, fd, ba, cba) in results {
         faces.push(f);
         face_failures.push(ff);
         face_diagnoses.push(fd);
         band_attempts.push(ba);
+        cone_band_attempts.push(cba);
     }
     MeshedShellOutcome {
         shell: MeshedCShell {
@@ -881,6 +1049,7 @@ where
         face_failures,
         face_diagnoses,
         band_attempts,
+        cone_band_attempts,
     }
 }
 
@@ -1730,6 +1899,169 @@ fn run_cylinder_band_for_face<S, C>(
                     &schema,
                 ),
                 mesh.conformance,
+            )
+        }),
+    )
+}
+
+/// Build the recovered conical band's mesh, with a per-vertex normal read from
+/// the certified cone rather than from the triangles.
+///
+/// The cone's outward unit normal at a point is perpendicular to the generator
+/// through it and to the parallel through it, which in the certified frame is
+/// the radial direction tilted back by the half-angle: `(axis_component,
+/// radial_component)` proportional to `(-slope · sign(s), 1)`, normalized. It
+/// is derived from the certificate — the apex, the axis and the half-angle —
+/// and not averaged from adjacent facets, so a coarse band and a fine one carry
+/// the same normal field.
+///
+/// At the apex the normal is undefined, and every vertex of a certified band is
+/// strictly off it; the fallback exists only so the function is total.
+fn cone_polygon_from_lifted(
+    positions: &[Point3],
+    triangles: &[[usize; 3]],
+    schema: &formal::ConeSchema,
+) -> PolygonMesh {
+    let positions = positions.to_vec();
+    let slope = schema.slope().get();
+    let scale = 1.0 / (1.0 + slope * slope).sqrt();
+    let normals: Vec<Vector3> = positions
+        .iter()
+        .map(|p| {
+            let r = *p - schema.apex();
+            let s = r.dot(schema.axis());
+            let radial = r - s * schema.axis();
+            let magnitude = radial.magnitude();
+            match magnitude > 0.0 {
+                true => scale * (radial / magnitude - slope * s.signum() * schema.axis()),
+                false => schema.axis(),
+            }
+        })
+        .collect();
+    let tri_faces: Vec<[StandardVertex; 3]> = triangles
+        .iter()
+        .map(|indices| {
+            array![i => StandardVertex {
+                pos: indices[i],
+                uv: None,
+                nor: Some(indices[i]),
+            }; 3]
+        })
+        .collect();
+    PolygonMesh::debug_new(
+        StandardAttributes {
+            positions,
+            uv_coords: Vec::new(),
+            normals,
+        },
+        Faces::from_tri_and_quad_faces(tri_faces, Vec::new()),
+    )
+}
+
+/// Run the formal conical essential-band path for one face, when it is
+/// eligible.
+///
+/// `None` is "not eligible, nothing was attempted": no certified cone support,
+/// no source evidence, or a bound count other than two authoritative bounds.
+/// `Some` means `run_conical_essential_band` was actually called and the value
+/// is its verdict.
+///
+/// This is an adapter and nothing more, and every input it hands over is one
+/// production already produces — the same list [`run_cylinder_band_for_face`]
+/// documents, with `cone_of` in place of `cylinder_of`. The two curve readers
+/// are literally the same closures: they classify a source curve into a
+/// [`formal::SourceCurveFamily`] and know nothing about the ambient surface, so
+/// a complete source `CIRCLE` is read identically whichever cell will consume
+/// it. What differs is entirely in what the cell then requires of that circle,
+/// and that lives in [`formal::cone_band`].
+#[allow(clippy::too_many_arguments)]
+fn run_conical_band_for_face<S, C>(
+    declared_face_index: usize,
+    source_face_id: Option<u64>,
+    face: &CompressedFace<S>,
+    edges: &[CompressedEdge<C>],
+    vertices: &[Point3],
+    cone_of: &impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCone, &'static str>,
+    cylinder_curve_schema_of: &impl Fn(&C) -> formal::CurveSchema,
+    cylinder_curve_family_of: &impl Fn(&C) -> Option<formal::SourceCurveFamily>,
+    tol: f64,
+) -> Option<
+    std::result::Result<
+        (
+            PolygonMesh,
+            formal::cone::Nappe,
+            formal::cone_band::ConicalSourceStanding,
+        ),
+        formal::cone_band::ConicalBandExit,
+    >,
+> {
+    let Ok(cone) = cone_of(&face.surface) else {
+        return None;
+    };
+    let Ok(input) =
+        source_face_input_from_compressed(declared_face_index, source_face_id, face, edges)
+    else {
+        return None;
+    };
+    // Exactly two bounds, and both of them authoritative. A face with a
+    // degenerate-evidence bound is not a two-bound face with one bound missing;
+    // it is a face this route has no evidence for, and it is left alone rather
+    // than attempted and refused.
+    if input.bounds.len() != 2 || input.regular_bound_count() != 2 {
+        return None;
+    }
+
+    let schema = cone.schema().clone();
+    let mut curve_of = |edge_index: usize| match edges.get(edge_index) {
+        Some(edge) => cylinder_curve_schema_of(&edge.curve),
+        None => formal::CurveSchema::not_structurally_identified(
+            formal::CurveSchemaFailure::NoStructuralReader {
+                representation: "edge_index_out_of_range",
+            },
+        ),
+    };
+    let vertex_position = |vertex| match vertex {
+        SourceVertexKey::ShellVertex(index) => vertices.get(index).copied(),
+        _ => None,
+    };
+    // Resolved from *identity*: `EdgeUseId` selects the source edge use, the
+    // use names its `source_edge_index`, and that indexes the shell's edge
+    // table. No tessellated coordinate is consulted to decide what a curve is.
+    //
+    // Unlike the cylinder route this has no `Line` fallback, and that is a
+    // deliberate difference rather than an oversight. This cell admits exactly
+    // one curve family, so an edge use whose family cannot be read has nothing
+    // it could safely be defaulted to; `None` reaches
+    // `BoundNotACompleteSourceCircle` and says the boundary was not readable as
+    // a complete circle, which is the true statement.
+    let family_of = |edge_use: EdgeUseId| {
+        input
+            .edge_uses()
+            .find(|use_| use_.id == edge_use)
+            .and_then(|use_| edges.get(use_.source_edge_index))
+            .and_then(|edge| cylinder_curve_family_of(&edge.curve))
+    };
+
+    Some(
+        formal::cone_band::run_conical_essential_band(
+            source_face_id,
+            cone,
+            &input,
+            face.provenance.outer_bound,
+            &mut curve_of,
+            &vertex_position,
+            &family_of,
+            tol,
+        )
+        .map(|(_, mesh)| {
+            (
+                cone_polygon_from_lifted(
+                    &mesh.physical_vertices,
+                    &mesh.developed.triangles,
+                    &schema,
+                ),
+                mesh.nappe,
+                mesh.standing,
             )
         }),
     )

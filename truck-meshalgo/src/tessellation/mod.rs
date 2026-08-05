@@ -433,6 +433,33 @@ pub trait LatticeMeshableShape<S, C> {
         cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
         cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
     ) -> MeshedShellOutcome;
+
+    /// As [`Self::robust_triangulation_with_cylinder_outcome`], additionally
+    /// supplying the conical-surface adapter the conical essential-band route
+    /// needs.
+    ///
+    /// A fifth entry point rather than a widened fourth one, for the reason the
+    /// fourth was added: a caller with no conical evidence to offer keeps
+    /// compiling against the previous form, and that form's output is unchanged
+    /// by this route's existence because it supplies a `cone_of` that refuses
+    /// every surface.
+    ///
+    /// Only one new closure. The two source-curve classifiers are
+    /// surface-agnostic, so the cone route reads its complete source circles
+    /// through the same readers the cylinder route does; what differs is what
+    /// each cell then requires of the circle it was handed.
+    #[allow(clippy::too_many_arguments)]
+    fn robust_triangulation_with_cone_outcome(
+        &self,
+        tol: f64,
+        lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
+        schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
+        curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
+        cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str> + Parallelizable,
+        cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
+        cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
+        cone_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCone, &'static str> + Parallelizable,
+    ) -> MeshedShellOutcome;
 }
 
 impl<C: PolylineableCurve, S: RobustMeshableSurface> LatticeMeshableShape<S, C>
@@ -519,6 +546,32 @@ impl<C: PolylineableCurve, S: RobustMeshableSurface> LatticeMeshableShape<S, C>
             cylinder_curve_family_of,
         )
     }
+
+    fn robust_triangulation_with_cone_outcome(
+        &self,
+        tol: f64,
+        lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
+        schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
+        curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
+        cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str> + Parallelizable,
+        cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
+        cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
+        cone_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCone, &'static str> + Parallelizable,
+    ) -> MeshedShellOutcome {
+        nonpositive_tolerance!(tol);
+        triangulation::cshell_tessellation_with_outcomes_and_cone(
+            self,
+            tol,
+            triangulation::by_search_nearest_parameter,
+            lattice_of,
+            schema_of,
+            curve_schema_of,
+            cylinder_of,
+            cylinder_curve_schema_of,
+            cylinder_curve_family_of,
+            cone_of,
+        )
+    }
 }
 
 impl<C: PolylineableCurve, S: MeshableSurface> MeshableShape for CompressedSolid<Point3, C, S> {
@@ -555,7 +608,8 @@ mod triangulation;
 
 use domain::lattice::CertifiedLattice;
 pub use triangulation::{
-    ConstraintRole, CylinderBandAttempt, MeshedShellOutcome, SegmentOrigin, TessellationFailure,
+    ConeBandAttempt, ConstraintRole, CylinderBandAttempt, MeshedShellOutcome, SegmentOrigin,
+    TessellationFailure,
     TessellationFailureReason,
 };
 
