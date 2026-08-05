@@ -66,6 +66,7 @@
 pub mod ambient;
 pub mod cone;
 pub mod cone_band;
+pub mod torus;
 pub mod cylinder;
 pub mod cylinder_arrangement;
 pub mod cylinder_band;
