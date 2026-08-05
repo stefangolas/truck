@@ -7,31 +7,49 @@
 //! `1[Ci1];1[Ci1]` / double-outer-declared population (2,375 faces in the
 //! post-cone ABC corpus).
 //!
-//! # What is proved
+//! # The material-authority rule (B3)
 //!
-//! For each boundary loop:
-//! - its plane is perpendicular to the torus axis (a *parallel*, winding
-//!   `(±1, 0)`) — a latitude, not a meridian;
-//! - its centre lies on the axis (a true torus parallel, not a skew circle);
-//! - its radius and axial height are consistent with a single minor angle `v`,
-//!   so it lies on the torus.
+//! Two disjoint loops representing the same primitive class `h ∈ H₁(T²)` bound
+//! a valid annulus only as `C₁ − C₂` (or its negative). The source boundary
+//! chain `∂M` of the material 2-chain `M` must be null-homologous:
 //!
-//! For the pair:
-//! - both loops are the same primitive class (homologous);
-//! - they are disjoint (distinct minor coordinates, not coincident mod `2π`);
-//! - the material side is source-derived from the loop orientation signs:
-//!   opposite signs select the annulus *between* them (the induced boundary
-//!   orientation agrees with the source); equal signs leave the two
-//!   complementary annuli indistinguishable → `AmbiguousMaterialAuthority`.
+//! - **opposite effective orientations** (`[C₁] = h`, `[C₂] = −h`): the chain
+//!   is `h + (−h) = 0`, null-homologous; exactly **one** of the two
+//!   complementary annuli has this boundary → `Resolved`.
+//! - **same effective orientations** (`[C₁] = h`, `[C₂] = h`): the chain is
+//!   `2h ≠ 0` (h primitive), **not** null-homologous; it cannot bound either
+//!   annulus → `InconsistentBoundaryHomology` (zero solutions), **not**
+//!   ambiguity.
+//! - **effective orientation unavailable/undecidable**: both complementary
+//!   annuli match the unsigned chain → `UnresolvedMaterialAuthority` (two
+//!   solutions).
+//!
+//! The double-outer-bound malformation is a *discarded invalid qualifier*, not
+//! an annulus selector: it never implies "material lies between the loops."
+//! Admission follows only after the cell proves a unique material annulus; the
+//! malformation is recorded as a conformance tag.
+//!
+//! # Effective orientation
+//!
+//! The orientation sign each loop carries is the **effective** bound
+//! orientation, not the raw circle parameter direction. The caller (look-side
+//! adapter) folds each contribution exactly once:
+//!
+//! ```text
+//! effective = curve_traversal × edge_orientation
+//!           × loop_traversal × face_bound_orientation
+//!           × face/surface_orientation_convention
+//! ```
+//!
+//! A sign of `0` means the effective orientation could not be decided
+//! (`UnresolvedMaterialAuthority`).
 //!
 //! # What is NOT done here
 //!
 //! No cut-open realization, no triangulation, no production outcome wiring.
-//! The cell is a certificate; the realization (B4) and the outcome path (B5)
-//! consume it later. Meridian-bounded cells (`(0, ±1)`) and mixed classes are
-//! refused, not admitted: the first cell is the parallel-parallel annulus only.
+//! Meridian-bounded cells (`(0, ±1)`) and mixed classes are refused: the first
+//! cell is the parallel-parallel annulus only.
 
-use super::numeric::PositiveFinite;
 use super::torus::CertifiedRankTwoDeck;
 use std::f64::consts::TAU;
 use truck_geometry::prelude::{InnerSpace, Point3, Vector3};
@@ -40,14 +58,8 @@ use truck_geometry::prelude::{InnerSpace, Point3, Vector3};
 /// the on-axis / coordinate-consistency tests.
 const MINIMUM_TORUS_CELL_PARALLELISM: f64 = 1e-9;
 
-/// A boundary loop's geometric placement on the torus plus the source's
-/// orientation sign.
-///
-/// `orientation_sign` is the loop's directed sense projected onto the certified
-/// winding axis: `+1` if the curve runs with the parameter-increasing azimuthal
-/// direction at its placement, `-1` against it. The caller (look-side adapter)
-/// derives it from the source edge's own parameter direction, never from a
-/// visual guess.
+/// A boundary loop's geometric placement on the torus plus its **effective**
+/// orientation sign (see the module docs for the folding chain).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BoundaryLoopPlacement {
     /// The circle's centre.
@@ -56,8 +68,8 @@ pub struct BoundaryLoopPlacement {
     pub normal: Vector3,
     /// The circle's radius.
     pub radius: f64,
-    /// The source orientation sign: `+1` or `-1`.
-    pub orientation_sign: i8,
+    /// The effective bound orientation sign: `+1`, `-1`, or `0` (undecidable).
+    pub effective_orientation_sign: i8,
 }
 
 /// The primitive homology class of a torus boundary loop.
@@ -84,11 +96,11 @@ pub struct CertifiedEssentialLoop {
 }
 
 impl CertifiedEssentialLoop {
-    /// The certified `Z²` winding of this loop.
+    /// The certified `Z²` winding of this loop (with effective orientation).
     pub fn winding(&self) -> [i64; 2] {
         self.winding
     }
-    /// The primitive class.
+    /// The primitive class (unsigned).
     pub fn primitive(&self) -> PrimitiveWinding {
         self.primitive
     }
@@ -98,15 +110,60 @@ impl CertifiedEssentialLoop {
     }
 }
 
-/// The source-derived material authority for the annular region between two
-/// homologous essential loops.
+/// The source-boundary composition facts the look-side establishes and the
+/// cell requires.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SourceBoundaryComposition {
+    /// The number of source boundary components on the face. Must be exactly 2.
+    pub component_count: usize,
+    /// Whether any extra source edge or hidden bound participates. Must be
+    /// false.
+    pub extra_source_edge: bool,
+    /// The double-outer-bound malformation, if present: two
+    /// `FACE_OUTER_BOUND` qualifiers on one face, which are contradictory.
+    pub outer_bound_malformation: Option<TwoOuterBoundMalformation>,
+}
+
+/// The malformed-source fact: two `FACE_OUTER_BOUND` qualifiers on one face.
+///
+/// Retained authority (loop identity, traversal, effective orientation,
+/// winding, incidence, torus embedding) is unaffected; only the invalid outer
+/// qualifiers are discarded by the normalization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CertifiedMaterialAuthority {
-    /// The two loops carry opposite orientation signs, so the annulus *between*
-    /// them is the unique region whose induced boundary orientation agrees with
-    /// the source. This is the only authority that does not select by size,
-    /// interval length, or visual plausibility.
-    OppositeOrientationAnnulus,
+pub struct TwoOuterBoundMalformation;
+
+/// The conformance tag recording whether the certified cell relied on a
+/// malformed-source normalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConformanceTag {
+    /// The source boundary was well-formed.
+    SourceClean,
+    /// Two contradictory `FACE_OUTER_BOUND` qualifiers were discarded; the
+    /// unique material annulus was proved independently of them.
+    MalformedTwoOuterBoundsOnCertifiedTorusAnnulus,
+}
+
+/// The source-derived material authority: the unique annular 2-chain whose
+/// boundary equals the effective source boundary chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CertifiedMaterialAuthority {
+    conformance: ConformanceTag,
+}
+
+impl CertifiedMaterialAuthority {
+    /// The conformance tag.
+    pub fn conformance(&self) -> ConformanceTag {
+        self.conformance
+    }
+    /// A stable diagnostic tag.
+    pub fn tag(&self) -> &'static str {
+        match self.conformance {
+            ConformanceTag::SourceClean => "torus_annulus_authority_source_clean",
+            ConformanceTag::MalformedTwoOuterBoundsOnCertifiedTorusAnnulus => {
+                "malformed:two_outer_bounds_on_certified_torus_annulus"
+            }
+        }
+    }
 }
 
 /// Why a torus annular cell could not be certified.
@@ -115,7 +172,7 @@ pub enum TorusCellFailure {
     /// A loop's plane is neither parallel nor perpendicular to the axis, or its
     /// centre is off the axis for a parallel: not a primitive torus loop.
     NonprimitiveWinding,
-    /// The two loops are not homologous (different primitive classes).
+    /// The two loops are not the same unsigned primitive class (inhomologous).
     InhomologousLoops,
     /// The first cell admits parallels only; a meridian-bearing pair is a
     /// different cell.
@@ -123,16 +180,23 @@ pub enum TorusCellFailure {
     /// The two loops coincide (same developed coordinate mod `2π`): not disjoint.
     IntersectingBoundaries,
     /// A loop's radius/height are inconsistent with the torus: it does not lie
-    /// on the surface.
+    /// on the surface, or is not a torus-coordinate circle.
     SourceContradiction,
-    /// Both loops carry the same orientation sign; the two complementary annuli
-    /// both satisfy the retained evidence, so the material side is ambiguous.
-    AmbiguousMaterialAuthority,
+    /// The source does not present exactly two boundary components.
+    WrongSourceBoundaryComponentCount,
+    /// An extra source edge or hidden bound participates in the face.
+    ExtraSourceEdgePresent,
+    /// Same effective orientations: the boundary chain is `2h ≠ 0`, not
+    /// null-homologous; it cannot bound either annulus (zero solutions).
+    InconsistentBoundaryHomology,
+    /// The effective orientation of a loop is unavailable/undecidable: both
+    /// complementary annuli match the unsigned chain (two solutions).
+    UnresolvedMaterialAuthority,
 }
 
 /// A certified torus annular atlas cell: a regular torus, a rank-two deck, two
 /// homologous essential boundary loops that are disjoint and bound a unique
-/// annular material region.
+/// annular material region whose authority is source-derived.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CertifiedTorusAnnularCell {
     deck: CertifiedRankTwoDeck,
@@ -160,8 +224,8 @@ impl CertifiedTorusAnnularCell {
         self.primitive_class
     }
     /// The source-derived material authority.
-    pub fn material_authority(&self) -> CertifiedMaterialAuthority {
-        self.material_authority
+    pub fn material_authority(&self) -> &CertifiedMaterialAuthority {
+        &self.material_authority
     }
     /// A short stable tag, for probe records.
     pub fn tag(&self) -> &'static str {
@@ -169,18 +233,29 @@ impl CertifiedTorusAnnularCell {
     }
 }
 
-/// Certify a torus annular cell from a rank-two deck and two boundary loop
-/// placements.
+/// Certify a torus annular cell from a rank-two deck, two boundary loop
+/// placements, and the source boundary composition.
 ///
-/// Admission proves the obligations of B2 (regular torus, rank-two deck, two
-/// closed essential loops, certified `Z²` winding, homologous, disjoint, unique
-/// annular region) and B3 (material authority source-derived from orientation,
-/// never by size). See the module docs.
+/// Admission proves the B2 obligations (regular torus, rank-two deck, two
+/// closed essential loops, certified primitive `Z²` winding, homologous,
+/// disjoint, embedded, exactly two source components, no extra bound, distinct
+/// transverse coordinates, torus-coordinate circles) and the B3 material
+/// authority (unique annular 2-chain, source-derived from effective
+/// orientation, never by size). See the module docs.
 pub fn certify_torus_annular_cell(
     deck: &CertifiedRankTwoDeck,
     loop_a: BoundaryLoopPlacement,
     loop_b: BoundaryLoopPlacement,
+    composition: &SourceBoundaryComposition,
 ) -> Result<CertifiedTorusAnnularCell, TorusCellFailure> {
+    // Source composition: exactly two components, no extra bound.
+    if composition.component_count != 2 {
+        return Err(TorusCellFailure::WrongSourceBoundaryComponentCount);
+    }
+    if composition.extra_source_edge {
+        return Err(TorusCellFailure::ExtraSourceEdgePresent);
+    }
+
     let schema = deck.schema();
     let axis = schema.axis();
     let center = schema.center();
@@ -191,7 +266,7 @@ pub fn certify_torus_annular_cell(
     let cert_a = certify_loop(loop_a, axis, center, large, small, scale)?;
     let cert_b = certify_loop(loop_b, axis, center, large, small, scale)?;
 
-    // Homologous: same primitive class.
+    // Unsigned geometric classes must match (homologous).
     if cert_a.primitive != cert_b.primitive {
         return Err(TorusCellFailure::InhomologousLoops);
     }
@@ -199,19 +274,26 @@ pub fn certify_torus_annular_cell(
     if cert_a.primitive != PrimitiveWinding::Parallel {
         return Err(TorusCellFailure::MeridianNotAdmitted);
     }
-    // Disjoint: distinct minor coordinates (not coincident mod 2π).
+    // h is primitive: each loop is a complete source circle (one occurrence,
+    // closed), which by the closed-edge rule is exactly one traversal, so its
+    // unsigned winding is (±1, 0). The effective orientation sign (which may be
+    // 0 = unavailable) is folded in separately below — it is not a statement
+    // about primitiveness.
+    // Disjoint: distinct transverse (minor) coordinates, not coincident mod 2π.
     let dv = (cert_a.constant_coordinate - cert_b.constant_coordinate).abs();
     let dv_mod = dv % TAU;
     let dv_wrapped = dv_mod.min(TAU - dv_mod);
     if dv_wrapped < MINIMUM_TORUS_CELL_PARALLELISM * scale.max(1.0) {
         return Err(TorusCellFailure::IntersectingBoundaries);
     }
-    // Material authority (B3): opposite orientation signs select the annulus
-    // between; equal signs are ambiguous — never pick by size.
-    if cert_a.winding[0].signum() == cert_b.winding[0].signum() {
-        return Err(TorusCellFailure::AmbiguousMaterialAuthority);
-    }
-    let authority = CertifiedMaterialAuthority::OppositeOrientationAnnulus;
+
+    // B3 material authority: the unique annular 2-chain M with ∂M = effective
+    // source boundary. 0/1/2 solutions → Inconsistent/Resolved/Unresolved.
+    let authority = resolve_material_authority(
+        cert_a.winding[0],
+        cert_b.winding[0],
+        composition.outer_bound_malformation,
+    )?;
 
     Ok(CertifiedTorusAnnularCell {
         deck: deck.clone(),
@@ -220,6 +302,34 @@ pub fn certify_torus_annular_cell(
         primitive_class: cert_a.primitive,
         material_authority: authority,
     })
+}
+
+/// Resolve the material authority from the two loops' effective winding signs.
+///
+/// Both loops are parallels with winding `(s_a, 0)` and `(s_b, 0)` where
+/// `s_a, s_b ∈ {-1, 0, +1}` (`0` = orientation undecidable). The source
+/// boundary chain is null-homologous iff `s_a + s_b == 0` (opposite signs).
+fn resolve_material_authority(
+    s_a: i64,
+    s_b: i64,
+    malformation: Option<TwoOuterBoundMalformation>,
+) -> Result<CertifiedMaterialAuthority, TorusCellFailure> {
+    if s_a == 0 || s_b == 0 {
+        // Orientation unavailable: both complementary annuli match the unsigned
+        // chain — two solutions.
+        return Err(TorusCellFailure::UnresolvedMaterialAuthority);
+    }
+    if s_a == s_b {
+        // Same effective orientation: chain is 2h ≠ 0, not null-homologous —
+        // zero solutions. This is an inconsistency, not ambiguity.
+        return Err(TorusCellFailure::InconsistentBoundaryHomology);
+    }
+    // Opposite effective orientations: exactly one annulus matches — Resolved.
+    let conformance = match malformation {
+        Some(_) => ConformanceTag::MalformedTwoOuterBoundsOnCertifiedTorusAnnulus,
+        None => ConformanceTag::SourceClean,
+    };
+    Ok(CertifiedMaterialAuthority { conformance })
 }
 
 /// Certify one boundary loop's primitive class, winding, and constant
@@ -234,7 +344,7 @@ fn certify_loop(
 ) -> Result<CertifiedEssentialLoop, TorusCellFailure> {
     let rel = lp.center - center;
     let height = rel.dot(axis); // signed axial offset from the torus centre
-    let radial_offset = rel - height * axis; // must be ~0 for a parallel (centre on axis)
+    let radial_offset = rel - height * axis; // ~0 for a parallel (centre on axis)
 
     let dot = lp.normal.dot(axis);
     let abs_dot = dot.abs();
@@ -257,18 +367,18 @@ fn certify_loop(
             // cos v = (r - large)/small,  sin v = height/small.
             let cos_v = (lp.radius - large) / small;
             let sin_v = height / small;
-            // The circle must lie on the torus: cos²v + sin²v = 1.
+            // The circle must lie on the torus: cos²v + sin²v = 1. This also
+            // guarantees it is the torus-coordinate circle at v, not an
+            // arbitrary planar circle.
             if (cos_v * cos_v + sin_v * sin_v - 1.0).abs() > 1e-9 {
                 return Err(TorusCellFailure::SourceContradiction);
             }
             let v = sin_v.atan2(cos_v).rem_euclid(TAU);
-            ([lp.orientation_sign as i64, 0], v)
+            ([lp.effective_orientation_sign as i64, 0], v)
         }
         PrimitiveWinding::Meridian => {
-            // The meridian's azimuth around the axis is its constant `u`.
-            // radial_offset is the centre's offset from the axis (radius large).
             let u = radial_offset.y.atan2(radial_offset.x).rem_euclid(TAU);
-            ([0, lp.orientation_sign as i64], u)
+            ([0, lp.effective_orientation_sign as i64], u)
         }
     };
 
@@ -294,8 +404,24 @@ mod tests {
         }
     }
 
-    /// A parallel circle at minor angle `v`, orientation `sign`, on the
-    /// canonical z-axis torus (large=5, small=1, centre origin).
+    fn clean_composition() -> SourceBoundaryComposition {
+        SourceBoundaryComposition {
+            component_count: 2,
+            extra_source_edge: false,
+            outer_bound_malformation: None,
+        }
+    }
+
+    fn double_outer_composition() -> SourceBoundaryComposition {
+        SourceBoundaryComposition {
+            component_count: 2,
+            extra_source_edge: false,
+            outer_bound_malformation: Some(TwoOuterBoundMalformation),
+        }
+    }
+
+    /// A parallel circle at minor angle `v`, effective orientation `sign`, on
+    /// the canonical z-axis torus (large=5, small=1, centre origin).
     fn parallel(v: f64, sign: i8) -> BoundaryLoopPlacement {
         let r = 5.0 + 1.0 * v.cos();
         let z = 1.0 * v.sin();
@@ -303,59 +429,89 @@ mod tests {
             center: Point3::new(0.0, 0.0, z),
             normal: Vector3::new(0.0, 0.0, 1.0),
             radius: r,
-            orientation_sign: sign,
+            effective_orientation_sign: sign,
         }
     }
 
     #[test]
-    fn two_opposite_parallels_certify_an_annulus() {
+    fn opposite_effective_orientations_resolve_a_unique_annulus() {
         let d = deck();
-        let cell = certify_torus_annular_cell(&d, parallel(0.0, 1), parallel(1.2, -1));
-        assert!(cell.is_ok());
-        let cell = cell.unwrap();
+        let cell = certify_torus_annular_cell(&d, parallel(0.0, 1), parallel(1.2, -1), &clean_composition()).unwrap();
         assert_eq!(cell.primitive_class(), PrimitiveWinding::Parallel);
+        assert_eq!(cell.boundary_a().winding(), [1, 0]);
+        assert_eq!(cell.boundary_b().winding(), [-1, 0]);
         assert_eq!(
-            cell.material_authority(),
-            CertifiedMaterialAuthority::OppositeOrientationAnnulus
+            cell.material_authority().conformance(),
+            ConformanceTag::SourceClean
         );
-        let [wa, wb] = [cell.boundary_a().winding(), cell.boundary_b().winding()];
-        assert_eq!(wa, [1, 0]);
-        assert_eq!(wb, [-1, 0]);
     }
 
     #[test]
-    fn two_same_orientation_parallels_are_ambiguous() {
+    fn same_effective_orientations_are_inconsistent_not_ambiguous() {
         let d = deck();
-        let err = certify_torus_annular_cell(&d, parallel(0.0, 1), parallel(1.2, 1));
-        assert_eq!(err, Err(TorusCellFailure::AmbiguousMaterialAuthority));
+        let err = certify_torus_annular_cell(&d, parallel(0.0, 1), parallel(1.2, 1), &clean_composition());
+        assert_eq!(err, Err(TorusCellFailure::InconsistentBoundaryHomology));
+    }
+
+    #[test]
+    fn unavailable_orientation_is_unresolved() {
+        let d = deck();
+        // One loop's effective orientation undecidable (sign = 0).
+        let err = certify_torus_annular_cell(&d, parallel(0.0, 0), parallel(1.2, -1), &clean_composition());
+        assert_eq!(err, Err(TorusCellFailure::UnresolvedMaterialAuthority));
+    }
+
+    #[test]
+    fn double_outer_malformation_is_a_conformance_tag_not_a_selector() {
+        // Same geometry as the resolved case, but the source carried two
+        // FACE_OUTER_BOUND qualifiers. The malformation is discarded; the
+        // unique annulus is still proved from orientation.
+        let d = deck();
+        let cell = certify_torus_annular_cell(&d, parallel(0.0, 1), parallel(1.2, -1), &double_outer_composition()).unwrap();
+        assert_eq!(
+            cell.material_authority().conformance(),
+            ConformanceTag::MalformedTwoOuterBoundsOnCertifiedTorusAnnulus
+        );
+        assert_eq!(
+            cell.material_authority().tag(),
+            "malformed:two_outer_bounds_on_certified_torus_annulus"
+        );
+    }
+
+    #[test]
+    fn double_outer_does_not_save_an_inconsistent_chain() {
+        // Same orientations + double-outer is still inconsistent: the
+        // malformation never implies "material lies between the loops."
+        let d = deck();
+        let err = certify_torus_annular_cell(&d, parallel(0.0, 1), parallel(1.2, 1), &double_outer_composition());
+        assert_eq!(err, Err(TorusCellFailure::InconsistentBoundaryHomology));
     }
 
     #[test]
     fn coincident_parallels_are_intersecting() {
         let d = deck();
-        let err = certify_torus_annular_cell(&d, parallel(0.7, 1), parallel(0.7, -1));
+        let err = certify_torus_annular_cell(&d, parallel(0.7, 1), parallel(0.7, -1), &clean_composition());
         assert_eq!(err, Err(TorusCellFailure::IntersectingBoundaries));
     }
 
     #[test]
     fn a_full_turn_apart_parallels_are_coincident_mod_two_pi() {
         let d = deck();
-        let err = certify_torus_annular_cell(&d, parallel(0.4, 1), parallel(0.4 + TAU, -1));
+        let err = certify_torus_annular_cell(&d, parallel(0.4, 1), parallel(0.4 + TAU, -1), &clean_composition());
         assert_eq!(err, Err(TorusCellFailure::IntersectingBoundaries));
     }
 
     #[test]
     fn an_off_axis_circle_is_not_a_primitive_parallel() {
         let d = deck();
-        // Centre off the axis: not a torus parallel.
         let bad = BoundaryLoopPlacement {
             center: Point3::new(2.0, 0.0, 0.0),
             normal: Vector3::new(0.0, 0.0, 1.0),
             radius: 5.0,
-            orientation_sign: 1,
+            effective_orientation_sign: 1,
         };
         assert_eq!(
-            certify_torus_annular_cell(&d, parallel(0.0, 1), bad),
+            certify_torus_annular_cell(&d, parallel(0.0, 1), bad, &clean_composition()),
             Err(TorusCellFailure::NonprimitiveWinding)
         );
     }
@@ -363,18 +519,14 @@ mod tests {
     #[test]
     fn a_circle_not_on_the_torus_is_a_source_contradiction() {
         let d = deck();
-        // Centre on axis, normal along axis, but radius/height inconsistent
-        // with any minor angle (radius 5, height 1 -> cos v = 0, sin v = 1 -> v = pi/2,
-        // but then radius should be 5 + 0 = 5; height 1 is fine; so pick a
-        // genuinely inconsistent radius).
         let bad = BoundaryLoopPlacement {
             center: Point3::new(0.0, 0.0, 1.0),
             normal: Vector3::new(0.0, 0.0, 1.0),
-            radius: 7.0, // would need cos v = 2 (impossible)
-            orientation_sign: 1,
+            radius: 7.0, // cos v = 2 (impossible)
+            effective_orientation_sign: 1,
         };
         assert_eq!(
-            certify_torus_annular_cell(&d, parallel(0.0, 1), bad),
+            certify_torus_annular_cell(&d, parallel(0.0, 1), bad, &clean_composition()),
             Err(TorusCellFailure::SourceContradiction)
         );
     }
@@ -386,10 +538,10 @@ mod tests {
             center: Point3::new(0.0, 0.0, 0.0),
             normal: Vector3::new(0.0, 1.0, 1.0).normalize(),
             radius: 5.0,
-            orientation_sign: 1,
+            effective_orientation_sign: 1,
         };
         assert_eq!(
-            certify_torus_annular_cell(&d, parallel(0.0, 1), tilted),
+            certify_torus_annular_cell(&d, parallel(0.0, 1), tilted, &clean_composition()),
             Err(TorusCellFailure::NonprimitiveWinding)
         );
     }
@@ -397,23 +549,49 @@ mod tests {
     #[test]
     fn meridian_pair_is_not_admitted_in_the_first_cell() {
         let d = deck();
-        // A meridian: plane contains the axis (normal ⊥ axis), centre off axis
-        // at radius large, radius small.
-        let meridian = BoundaryLoopPlacement {
+        let m1 = BoundaryLoopPlacement {
             center: Point3::new(5.0, 0.0, 0.0),
             normal: Vector3::new(0.0, 1.0, 0.0),
             radius: 1.0,
-            orientation_sign: 1,
+            effective_orientation_sign: 1,
         };
-        let meridian2 = BoundaryLoopPlacement {
+        let m2 = BoundaryLoopPlacement {
             center: Point3::new(0.0, 5.0, 0.0),
             normal: Vector3::new(1.0, 0.0, 0.0),
             radius: 1.0,
-            orientation_sign: -1,
+            effective_orientation_sign: -1,
         };
         assert_eq!(
-            certify_torus_annular_cell(&d, meridian, meridian2),
+            certify_torus_annular_cell(&d, m1, m2, &clean_composition()),
             Err(TorusCellFailure::MeridianNotAdmitted)
+        );
+    }
+
+    #[test]
+    fn wrong_component_count_is_refused() {
+        let d = deck();
+        let bad = SourceBoundaryComposition {
+            component_count: 3,
+            extra_source_edge: false,
+            outer_bound_malformation: None,
+        };
+        assert_eq!(
+            certify_torus_annular_cell(&d, parallel(0.0, 1), parallel(1.2, -1), &bad),
+            Err(TorusCellFailure::WrongSourceBoundaryComponentCount)
+        );
+    }
+
+    #[test]
+    fn extra_source_edge_is_refused() {
+        let d = deck();
+        let bad = SourceBoundaryComposition {
+            component_count: 2,
+            extra_source_edge: true,
+            outer_bound_malformation: None,
+        };
+        assert_eq!(
+            certify_torus_annular_cell(&d, parallel(0.0, 1), parallel(1.2, -1), &bad),
+            Err(TorusCellFailure::ExtraSourceEdgePresent)
         );
     }
 }
