@@ -587,7 +587,13 @@ where
         // axes and the entity reads it in its own, so transpose on the way in.
         // The result comes back in the entity's axes and is transposed below
         // before it is used as a hint against `self`.
-        let hint = transpose_hint(hint.into(), self.orientation);
+        let hint = hint.into();
+        // Whether the caller supplied a hint at all, read before it is
+        // transposed and consumed. The fallback below is admitted only on the
+        // hintless call, which is the *last* thing the meshalgo projection
+        // chain asks of an analytic surface — see there.
+        let hintless = matches!(hint, SPHint2D::None);
+        let hint = transpose_hint(hint, self.orientation);
         let hint =
             self.entity
                 .search_nearest_parameter(inv.transform_point(point), hint, trials)?;
@@ -596,7 +602,58 @@ where
             false => (hint.1, hint.0),
         };
         algo::surface::search_nearest_parameter(self, point, hint, trials)
+            // `hint` is not a hint. It is the entity's own answer for the
+            // inverse-transformed point, mapped back to this processor's
+            // parameter axes — closed form for every primitive that reaches
+            // here (cylinder and cone are `RevolutedCurve<Line>`, torus is
+            // `Torus`). The generic Newton above refines it, and when the
+            // Newton fails to converge the refinement is discarded *along with
+            // the answer it started from*, so a surface that can invert itself
+            // exactly reports that it cannot invert itself at all.
+            //
+            // Returning the unrefined answer is safe rather than optimistic:
+            // this trait promises a *nearest* parameter, never an incidence,
+            // so every caller that needs the point to lie on the surface
+            // already checks the residual itself. The meshalgo boundary lift
+            // does exactly that, against the caller's tolerance, immediately
+            // after this returns — so a bad closed-form answer is refused
+            // there by the check that already exists, and typed as the
+            // off-surface point it is instead of a projection that failed.
+            //
+            // **Only on the hintless call**, and that restriction is load
+            // bearing rather than conservative. The meshalgo chain asks four
+            // things in order, of which the third is
+            // `search_nearest_parameter(point, hint)` and the fourth is
+            // `search_nearest_parameter(point, None)`. Admitted on the third,
+            // the entity's answer is taken from whichever branch or period
+            // copy the caller's hint led to, and it pre-empts the better
+            // answer the hintless call would have found — measured: one cone
+            // face on `00009190` went rendered -> lost that way, with the
+            // recovery otherwise identical. Restricted to the hintless call
+            // the fallback is last, and can replace nothing but a failure.
+            //
+            // `TRUCK_FORMAL_RECOVERY_ANALYTIC=0` withdraws it, restoring the
+            // discard exactly.
+            .or_else(|| (hintless && analytic_inverse_fallback_enabled()).then_some(hint))
     }
+}
+
+/// Whether [`Processor`] may return the entity's own closed-form inverse when
+/// the generic Newton refinement fails to converge.
+///
+/// Default-on, disabled by an explicit `0`/`off`/`false`/`no`, matching the
+/// `TRUCK_FORMAL_RECOVERY_*` convention in `truck-meshalgo`. Read once: this
+/// sits on the per-boundary-point path.
+fn analytic_inverse_fallback_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !std::env::var("TRUCK_FORMAL_RECOVERY_ANALYTIC").is_ok_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "off" | "false" | "no"
+            )
+        })
+    })
 }
 
 impl<E, T, U> ToSameGeometry<U> for Processor<E, T>

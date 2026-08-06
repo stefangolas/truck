@@ -31,6 +31,18 @@ type Cdt = ConstrainedDelaunayTriangulation<SPoint2>;
 std::thread_local! {
     /// Optional document-local source face id, declared face index, and
     /// parameter-space periodic rank for probes.
+    /// Which reading of material parity the flood in
+    /// `triangulation_into_polymesh_outcome` is to use for the next call.
+    ///
+    /// A thread-local rather than a parameter because the reading has to reach
+    /// a function seven call levels down whose signature is shared with the
+    /// legacy path, and because the winding retry is a *second* whole
+    /// tessellation of one face rather than a branch inside the first — see
+    /// the retry stage in the per-face chain for why it has to run there and
+    /// not where the contradiction is detected.
+    static PARITY_READING: std::cell::Cell<ParityReading> =
+        const { std::cell::Cell::new(ParityReading::Legacy) };
+
     static PROBE_FACE_CONTEXT: std::cell::Cell<(Option<u64>, usize, u8)> =
         const { std::cell::Cell::new((None, usize::MAX, 0)) };
 }
@@ -63,6 +75,59 @@ where
         .or_else(|| surface.search_parameter(point, None, 100))
 }
 
+/// What the projection chain did on one point, for `TRUCK_PROBE_PROJ`.
+///
+/// Recorded because a bare count of failing points cannot tell the three
+/// readings apart that decide what to do about them: a chain that stopped
+/// early, a seed route that ran but had only one seed to offer (and so did
+/// nothing the plain call had not already done), and a seed route that
+/// converged to just outside tolerance — which is a tolerance question, not an
+/// initialisation one.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ProjectionAttempt {
+    /// Furthest link of the five-step chain reached, 1-based. 5 is
+    /// `by_structural_seeds`.
+    pub link: u8,
+    /// Seeds `search_parameter_seeds` actually offered. One seed means the
+    /// route fired and did nothing different from the plain call.
+    pub seeds: usize,
+    /// The best seed's residual, or `f64::NAN` if no seed converged at all.
+    /// Residuals clustered just above `tol` mean the class is a tolerance
+    /// question rather than an initialisation one.
+    pub best_residual: f64,
+}
+
+impl Default for ProjectionAttempt {
+    fn default() -> Self {
+        Self {
+            link: 0,
+            seeds: 0,
+            best_residual: f64::NAN,
+        }
+    }
+}
+
+thread_local! {
+    /// The last projection attempt, filled by [`by_search_nearest_parameter`]
+    /// and read at the failure site in `PolyBoundaryPiece::try_new`. A
+    /// thread-local for the same reason the other probes here are: the two
+    /// sites are far apart and the signature between them is shared with paths
+    /// that must stay untouched.
+    static PROJECTION_ATTEMPT: std::cell::Cell<ProjectionAttempt> =
+        const { std::cell::Cell::new(ProjectionAttempt { link: 0, seeds: 0, best_residual: f64::NAN }) };
+}
+
+pub(super) fn last_projection_attempt() -> ProjectionAttempt {
+    PROJECTION_ATTEMPT.with(std::cell::Cell::get)
+}
+
+/// Read once: this gate sits on the per-boundary-point path, where an
+/// `env::var_os` per call would be a syscall per point across the whole model.
+fn projection_probe_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("TRUCK_PROBE_PROJ").is_some())
+}
+
 pub(super) fn by_search_nearest_parameter<S>(
     surface: &S,
     point: Point3,
@@ -71,16 +136,53 @@ pub(super) fn by_search_nearest_parameter<S>(
 where
     S: RobustMeshableSurface,
 {
-    surface
-        .search_parameter(point, hint, 100)
-        .or_else(|| surface.search_parameter(point, None, 100))
-        .or_else(|| surface.search_nearest_parameter(point, hint, 100))
-        .or_else(|| surface.search_nearest_parameter(point, None, 100))
-        // Last, so it is reached only where every existing attempt returned
-        // `None` — which is exactly the population that becomes
-        // `BoundaryProjectionFailed`. A face that projects today projects
-        // through the identical chain and gets the identical parameter.
-        .or_else(|| by_structural_seeds(surface, point, hint))
+    if !projection_probe_enabled() {
+        return surface
+            .search_parameter(point, hint, 100)
+            .or_else(|| surface.search_parameter(point, None, 100))
+            .or_else(|| surface.search_nearest_parameter(point, hint, 100))
+            .or_else(|| surface.search_nearest_parameter(point, None, 100))
+            // Last, so it is reached only where every existing attempt returned
+            // `None` — which is exactly the population that becomes
+            // `BoundaryProjectionFailed`. A face that projects today projects
+            // through the identical chain and gets the identical parameter.
+            .or_else(|| by_structural_seeds(surface, point, hint));
+    }
+    // The instrumented chain: identical calls in an identical order, with the
+    // link recorded as it is reached. Kept as a separate arm so the production
+    // path stays one expression and cannot drift from it silently.
+    let mut attempt = ProjectionAttempt::default();
+    let mut result = None;
+    for link in 1..=4u8 {
+        attempt.link = link;
+        result = match link {
+            1 => surface.search_parameter(point, hint, 100),
+            2 => surface.search_parameter(point, None, 100),
+            3 => surface.search_nearest_parameter(point, hint, 100),
+            _ => surface.search_nearest_parameter(point, None, 100),
+        };
+        if result.is_some() {
+            break;
+        }
+    }
+    if result.is_none() {
+        attempt.link = 5;
+        let seeds = surface.search_parameter_seeds();
+        attempt.seeds = seeds.len();
+        result = by_structural_seeds(surface, point, hint);
+        // The best residual over the seeds, recomputed rather than threaded out
+        // of `by_structural_seeds` so that route stays exactly as it ships.
+        attempt.best_residual = seeds
+            .into_iter()
+            .filter_map(|seed| surface.search_parameter(point, seed, 100))
+            .map(|uv| surface.subs(uv.0, uv.1).distance(point))
+            .fold(f64::INFINITY, f64::min);
+        if attempt.best_residual.is_infinite() {
+            attempt.best_residual = f64::NAN;
+        }
+    }
+    PROJECTION_ATTEMPT.with(|cell| cell.set(attempt));
+    result
 }
 
 /// Retry the parameter inverse from the starts the surface's own structure
@@ -923,6 +1025,11 @@ where
         let deck_join_candidate = deck_join_gate
             && (lattice.declared_u_period().is_some() || lattice.declared_v_period().is_some())
             && preboundary.as_ref().is_ok_and(|pieces| pieces.len() == 2);
+        // The legacy boundary, kept only for a face whose parity flood
+        // contradicted itself, so the winding retry at the end of this chain
+        // has something to re-tessellate. Nothing else reads it, and on every
+        // other face it stays `None`.
+        let mut parity_retry_boundary: Option<PolyBoundary> = None;
         let (polygon, failure) = match preboundary {
             Err(reason) => (None, Some(TessellationFailure::from(reason))),
             Ok(preboundary) => {
@@ -934,6 +1041,12 @@ where
                     // reached only from the arm where the legacy path produced
                     // no mesh, so it can replace a failure and nothing else.
                     Err(failure) => {
+                        if failure.reason
+                            == TessellationFailureReason::ContradictoryDualParity
+                            && diagnosis::winding_parity_enabled()
+                        {
+                            parity_retry_boundary = Some(boundary.clone());
+                        }
                         // The DIAG-001 record, and with it the loss bucket the
                         // band routes admit on, must keep describing the legacy
                         // boundary — not a mixture of it and this second
@@ -1314,6 +1427,58 @@ where
             }
         } else {
             (polygon, failure, None)
+        };
+        // The winding retry, and it runs **last** for a reason that cost a
+        // measurement to learn.
+        //
+        // Material parity is the boundary's winding number mod 2, so an edge
+        // the boundary traversed twice separates nothing; the flood reads the
+        // *set* of realized constraint edges and so toggles across it once.
+        // That is the whole of `ContradictoryDualParity`: on `00009190` all
+        // 126 contradicting faces have a repeated traversal and none of the
+        // 23,258 that flood cleanly does.
+        //
+        // Run inside the first tessellation instead, this recovers the same
+        // 126 faces but **pre-empts the torus annulus route on 8 of them**,
+        // replacing a validated 64-triangle annulus with a 1–2 triangle
+        // remnant. Those 8 are `two_outer_bounds_on_certified_torus_annulus`:
+        // the source declares the whole bound twice, every edge is traversed
+        // twice, and the winding reading correctly cancels the entire
+        // boundary — the face is not a slit, it is malformed, and the repair
+        // belongs to the route that knows that. Placing the retry after every
+        // other route makes "cancels to nothing" a failure this face already
+        // recovered from, rather than a mesh that replaces the recovery.
+        let (polygon, failure) = match (&failure, parity_retry_boundary) {
+            (Some(f), Some(boundary))
+                if f.reason == TessellationFailureReason::ContradictoryDualParity =>
+            {
+                // The DIAG-001 record must keep describing the legacy attempt.
+                let _suspension = diagnosis::SinkSuspension::new();
+                PARITY_READING.with(|cell| cell.set(ParityReading::TraversalParity));
+                let retried = trimming_tessellation_result(&surface, &boundary, tol, &lattice);
+                PARITY_READING.with(|cell| cell.set(ParityReading::Legacy));
+                match retried {
+                    Ok(mesh) => {
+                        if recovery_log {
+                            eprintln!(
+                                "RECOVERED\tsource_face_id={}\t\
+                                 declared_face_index={declared_face_index}\t\
+                                 triangles={}\tpath=winding_parity",
+                                source_face_id
+                                    .map(|id| id.to_string())
+                                    .unwrap_or_else(|| "none".into()),
+                                mesh.tri_faces().len(),
+                            );
+                        }
+                        (Some(mesh), None)
+                    }
+                    // The retry refused in its own right — `NoOddParityRegion`
+                    // for a boundary that cancels completely. The legacy
+                    // failure is preserved exactly.
+                    Err(_) => (polygon, failure),
+                }
+            }
+            _ => (polygon, failure),
         };
         let result = CompressedFace {
             boundaries,
@@ -3135,6 +3300,17 @@ impl PolyBoundaryPiece {
         }
         bdry3d.push(bdry3d[0]);
         let lift_probe = std::env::var_os("TRUCK_PROBE_LIFT").is_some();
+        // PROJ-001. Under this probe the walk does *not* stop at the first
+        // failing point: the ratio of failing points to boundary points is the
+        // measurement, and three failures out of 400 is a different diagnosis
+        // from three out of five. The face still fails, at the bottom of the
+        // loop, with the same reason.
+        let proj_probe = std::env::var_os("TRUCK_PROBE_PROJ").is_some();
+        let mut failed_points = 0usize;
+        let mut failed_links = [0usize; 6];
+        let mut seeds_offered = 0usize;
+        let mut best_residual = f64::INFINITY;
+        let mut first_failed_point: Option<Point3> = None;
         let mut previous: Option<(f64, f64)> = None;
         let mut previous_pt: Option<Point3> = None;
         let mut vec: Vec<SurfacePoint> = Vec::with_capacity(bdry3d.len());
@@ -3159,6 +3335,17 @@ impl PolyBoundaryPiece {
                 let (mut u, mut v) = match (projected, synthetic) {
                     (Some(uv), _) => uv,
                     (None, true) => continue,
+                    (None, false) if proj_probe => {
+                        let attempt = last_projection_attempt();
+                        failed_points += 1;
+                        failed_links[usize::from(attempt.link).min(5)] += 1;
+                        seeds_offered = seeds_offered.max(attempt.seeds);
+                        if attempt.best_residual.is_finite() {
+                            best_residual = best_residual.min(attempt.best_residual);
+                        }
+                        first_failed_point.get_or_insert(pt);
+                        continue;
+                    }
                     (None, false) => {
                         return Err(TessellationFailureReason::BoundaryProjectionFailed)
                     }
@@ -3256,6 +3443,35 @@ impl PolyBoundaryPiece {
                 previous = Some((u, v));
                 previous_pt = Some(pt);
             }
+        }
+        if proj_probe && failed_points > 0 {
+            let (source_face_id, declared_face_index, _) =
+                PROBE_FACE_CONTEXT.with(std::cell::Cell::get);
+            let p = first_failed_point.unwrap_or_else(Point3::origin);
+            eprintln!(
+                "PROJ\tsource_face_id={source_face_id:?}\t\
+                 declared_face_index={declared_face_index}\t\
+                 failed_points={failed_points}\tboundary_points={}\t\
+                 ratio={:.6}\tlink1={}\tlink2={}\tlink3={}\tlink4={}\tlink5={}\t\
+                 seeds={seeds_offered}\tbest_residual={}\ttol={tol:.6e}\t\
+                 first_failed_xyz={:.9},{:.9},{:.9}",
+                bdry3d.len(),
+                failed_points as f64 / bdry3d.len() as f64,
+                failed_links[1],
+                failed_links[2],
+                failed_links[3],
+                failed_links[4],
+                failed_links[5],
+                if best_residual.is_finite() {
+                    format!("{best_residual:.6e}")
+                } else {
+                    "none".into()
+                },
+                p.x,
+                p.y,
+                p.z,
+            );
+            return Err(TessellationFailureReason::BoundaryProjectionFailed);
         }
         if (bdry3d.len() <= 2 || bdry3d[0].distance(bdry3d[bdry3d.len() - 1]) < 1e-4)
             && piece_lengths.iter().all(|&l| l <= 2)
@@ -4794,6 +5010,20 @@ impl PolyBoundary {
                         // provenance, which would be a second semantic change
                         // in the same experiment. Tagged as it behaves today;
                         // A6 splits the population.
+                        // Count the traversal, not just the claim. `record`
+                        // keeps the first role — which is right — but when a
+                        // *later* segment of this same boundary realizes onto
+                        // an edge an earlier one already claimed, that second
+                        // traversal otherwise leaves no trace, and mod 2 two
+                        // traversals of one edge cancel where one realized edge
+                        // toggles once. That is the parity break: it is exactly
+                        // the faces with a repeated traversal that contradict
+                        // (126 of 126 on `00009190`, against 0 of 23,258 that
+                        // flood cleanly). The `overlapping` test above cannot
+                        // see it, because it inspects only the direct edge
+                        // `(vi, vj)` and not the rest of the chain Spade
+                        // realized.
+                        *roles.traversals.entry(handle).or_insert(0) += 1;
                         roles.record(handle, segment_role);
                         *roles.origin_census.entry(segment_origin).or_insert(0) += 1;
                         if let Some(installed_origins) = installed_origins.as_mut() {
@@ -5010,6 +5240,28 @@ struct ConstraintRoles {
     /// synthesised geometry stay unchanged, so without this the synthetic
     /// populations are indistinguishable in the census.
     origin_census: HashMap<SegmentOrigin, usize>,
+    /// How many times the face's boundary traversed each constraint edge.
+    ///
+    /// [`Self::roles`] is a set and cannot answer this: when two boundary
+    /// segments realize onto one CDT edge, the second `record` is a no-op and
+    /// the second traversal leaves no trace. Material parity is the boundary's
+    /// winding number mod 2, so a twice-traversed edge must contribute
+    /// *nothing* — counting is the only way to know that it should.
+    traversals: HashMap<FixedUndirectedEdgeHandle, usize>,
+}
+
+/// Which reading of "this constraint edge separates material" the parity flood
+/// is using.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParityReading {
+    /// Every edge a boundary segment realized toggles, exactly once — the set
+    /// reading, which is what the flood has always used.
+    Legacy,
+    /// An edge toggles only if the boundary traversed it an *odd* number of
+    /// times. Two traversals cancel mod 2 whether they run the same way (a
+    /// doubled segment) or opposite ways (a slit), and in both cases the edge
+    /// genuinely separates nothing.
+    TraversalParity,
 }
 
 impl ConstraintRoles {
@@ -5042,23 +5294,50 @@ impl ConstraintRoles {
     ///
     /// Measured after G5a: zero occurrences on ABC `00009190`, so this guard
     /// lands provably non-firing.
-    fn toggles_material(&self, edge: FixedUndirectedEdgeHandle) -> Option<bool> {
-        match self.role_of(edge) {
+    ///
+    /// Under [`ParityReading::TraversalParity`] a role that would toggle still
+    /// only does so if the boundary crossed the edge an odd number of times;
+    /// see [`Self::traversals`].
+    fn toggles_material(
+        &self,
+        edge: FixedUndirectedEdgeHandle,
+        reading: ParityReading,
+    ) -> Option<bool> {
+        let toggles = match self.role_of(edge) {
             Some(ConstraintRole::SurfaceSampling) => Some(false),
             Some(ConstraintRole::ArtificialCut) => Some(false),
             Some(ConstraintRole::PhysicalBoundary) => Some(true),
             // FORMAL_SYSTEM Definition 20 says a native ambient boundary does
             // not itself toggle; its interpretation comes from incident
-            // physical constraints. Neither this nor the synthetic-closure case
-            // is ever constructed today, so both keep their legacy answer and
-            // are decided when G6 first builds them.
+            // physical constraints. This case is never constructed today, so it
+            // keeps its legacy answer and is decided when G6 first builds it.
             Some(ConstraintRole::NativeBoundary) => Some(true),
+            // Definition 20's second bullet says an artificial cut generates
+            // μ_L = μ_R, which would make this `false`. **Measured, and it
+            // recovers nothing**: read as non-toggling, all 126 contradicting
+            // faces on `00009190` still contradict, and the odd-vertex count
+            // rises rather than falls. The synthesised segments sit inside a
+            // closed cycle; the contradiction is elsewhere. Left at the legacy
+            // answer rather than changed on the strength of the definition
+            // alone, because the experiment says the definition is not what
+            // this cell is about.
             Some(ConstraintRole::UnresolvedSyntheticClosure) => Some(true),
             None => {
                 self.unresolved_at_flood
                     .set(self.unresolved_at_flood.get() + 1);
                 None
             }
+        };
+        match (toggles, reading) {
+            (Some(true), ParityReading::TraversalParity) => {
+                // Absent from `traversals` means the edge was never traversed
+                // by a boundary segment at all, which for a toggling role can
+                // only be a bookkeeping gap — read it as one traversal, so this
+                // reading is never *weaker* than the legacy one by accident.
+                let crossings = self.traversals.get(&edge).copied().unwrap_or(1);
+                Some(crossings % 2 == 1)
+            }
+            _ => toggles,
         }
     }
 }
@@ -5462,18 +5741,22 @@ fn insert_surface(
     (on_boundary, location_unresolved)
 }
 
-/// Converts triangulation into `TessellationOutcome`.
-fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
+/// Labels every CDT face with material parity by flooding the dual graph from
+/// the outer face, flipping across constraint edges that are entitled to toggle.
+///
+/// `reading` is handed straight to [`ConstraintRoles::toggles_material`]; see
+/// there.
+///
+/// Errors carry the terminal reason rather than a bool so the caller can tell a
+/// self-contradicting flood (retryable under a different reading) from a
+/// missing role (an invariant violation that no reading repairs).
+fn flood_parity(
     triangulation: &Cdt,
-    surface: &S,
-    _polyline: &PolyBoundary,
-    boundary_map: &HashMap<FixedVertexHandle, Point3>,
     roles: &ConstraintRoles,
-    lattice: &CertifiedLattice,
-) -> TessellationOutcome {
+    reading: ParityReading,
+) -> std::result::Result<std::collections::HashMap<usize, u32>, TessellationFailureReason> {
     use std::collections::{HashMap as StdHashMap, VecDeque};
 
-    // 1. Parity-labeled CDT dual traversal across domain-boundary constraint edges
     let mut face_parity = StdHashMap::<usize, u32>::new();
     let mut queue = VecDeque::new();
 
@@ -5500,13 +5783,9 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
             let is_domain_boundary = if e.is_constraint_edge() {
                 // G5b: an edge with no resolvable role stops the face rather
                 // than being assigned a material meaning it does not have.
-                match roles.toggles_material(e.as_undirected().fix()) {
+                match roles.toggles_material(e.as_undirected().fix(), reading) {
                     Some(toggles) => toggles,
-                    None => {
-                        return TessellationOutcome::Failed(
-                            TessellationFailureReason::ConstraintRoleMissing.into(),
-                        )
-                    }
+                    None => return Err(TessellationFailureReason::ConstraintRoleMissing),
                 }
             } else {
                 false
@@ -5530,10 +5809,79 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
     }
 
     if contradictory_parity {
-        return TessellationOutcome::Failed(
-            TessellationFailureReason::ContradictoryDualParity.into(),
+        return Err(TessellationFailureReason::ContradictoryDualParity);
+    }
+    Ok(face_parity)
+}
+
+/// How many vertices carry an odd number of incident *toggling* constraint
+/// edges.
+///
+/// This is the exact obstruction the flood trips over. Walking the faces around
+/// one vertex returns to where it started, so parity is consistent there only
+/// if the walk crosses an even number of toggling edges; a single odd vertex
+/// anywhere makes [`flood_parity`] contradict itself no matter which order it
+/// visits faces in. Zero odd vertices means the toggling subgraph is a cycle
+/// mod 2 — a closed boundary — and the flood cannot fail.
+///
+/// So this separates "the material reading of some role is wrong" from "the
+/// constraint set is not a closed boundary at all", which no count of failures
+/// can distinguish. Diagnostic only.
+fn odd_toggling_vertices(
+    triangulation: &Cdt,
+    roles: &ConstraintRoles,
+    reading: ParityReading,
+) -> usize {
+    use std::collections::HashMap as StdHashMap;
+    let mut degree = StdHashMap::<usize, usize>::new();
+    for e in triangulation.undirected_edges() {
+        if !e.is_constraint_edge() {
+            continue;
+        }
+        if roles.toggles_material(e.fix(), reading) != Some(true) {
+            continue;
+        }
+        for v in e.vertices() {
+            *degree.entry(v.fix().index()).or_insert(0) += 1;
+        }
+    }
+    degree.values().filter(|d| **d % 2 == 1).count()
+}
+
+/// Converts triangulation into `TessellationOutcome`.
+fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
+    triangulation: &Cdt,
+    surface: &S,
+    _polyline: &PolyBoundary,
+    boundary_map: &HashMap<FixedVertexHandle, Point3>,
+    roles: &ConstraintRoles,
+    lattice: &CertifiedLattice,
+) -> TessellationOutcome {
+    use std::collections::HashMap as StdHashMap;
+
+    // 1. Parity-labeled CDT dual traversal across domain-boundary constraint
+    //    edges. The set reading is asked first, so a face that renders today
+    //    renders identically.
+    let reading = PARITY_READING.with(std::cell::Cell::get);
+    let flooded = flood_parity(triangulation, roles, reading);
+    if std::env::var("TRUCK_PROBE_PARITY").is_ok() {
+        let repeated = roles.traversals.values().filter(|n| **n > 1).count();
+        eprintln!(
+            "PARITY\treading={reading:?}\tconstraint_edges={}\trepeated_traversals={repeated}\t\
+             odd_legacy={}\todd_winding={}\toutcome={}",
+            roles.roles.len(),
+            odd_toggling_vertices(triangulation, roles, ParityReading::Legacy),
+            odd_toggling_vertices(triangulation, roles, ParityReading::TraversalParity),
+            match &flooded {
+                Ok(_) => "ok".to_string(),
+                Err(reason) => format!("{reason:?}"),
+            },
         );
     }
+    let face_parity = match flooded {
+        Ok(parity) => parity,
+        Err(reason) => return TessellationOutcome::Failed(reason.into()),
+    };
 
     // 2. Vertex positions, parameter coordinates, and roles
     let mut positions = Vec::<Point3>::new();

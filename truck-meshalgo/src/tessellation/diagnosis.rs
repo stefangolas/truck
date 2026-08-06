@@ -691,6 +691,21 @@ pub fn spline_seed_recovery_enabled() -> bool {
     formal_recovery_enabled() && recovery_route_enabled("TRUCK_FORMAL_RECOVERY_SEED")
 }
 
+/// Whether the winding-number reading of material parity is active.
+///
+/// The parity flood floods over the *set* of realized constraint edges, so an
+/// edge two boundary segments both traversed toggles once where mod 2 it
+/// should toggle not at all. That is the whole of `ContradictoryDualParity`:
+/// on `00009190` every one of the 126 contradicting faces has a repeated
+/// traversal and none of the 23,258 clean ones does.
+///
+/// Refinement-only in the same structural sense as the routes above: the
+/// second reading is asked for only after the set reading's flood contradicted
+/// itself, i.e. only on a face that already has no mesh.
+pub fn winding_parity_enabled() -> bool {
+    formal_recovery_enabled() && recovery_route_enabled("TRUCK_FORMAL_RECOVERY_PARITY")
+}
+
 /// Whether diagnostic capture is enabled.
 ///
 /// Enabled by `TRUCK_FACE_DIAG_JSONL`, and independently by the cylinder-band
