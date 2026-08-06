@@ -561,25 +561,29 @@ where
     let evidence_probe = std::env::var_os("TRUCK_PROBE_EVIDENCE").is_some();
     let ambient_probe = std::env::var_os("TRUCK_PROBE_AMBIENT").is_some();
     // The planar vertical slice. `TRUCK_PROBE_SLICE` runs it in shadow and
-    // reports; `TRUCK_FORMAL_RECOVERY` additionally lets a validated formal
-    // mesh replace a face the *legacy path lost*, and nothing else. Both are
-    // off by default, so production output is unchanged by construction.
+    // reports; the recovery gate additionally lets a validated formal mesh
+    // replace a face the *legacy path lost*, and nothing else.
+    //
+    // Every recovery gate below is **default-on with explicit opt-out** since
+    // `WAVE-2C` — see `diagnosis::recovery_route_enabled`. Each route is
+    // refinement-only (it is entered only where `failure.is_some()`), so
+    // enabling one cannot change a face that already meshed; the worst it can
+    // do is decline to recover. `TRUCK_FORMAL_RECOVERY=0` restores the pure
+    // legacy tessellation, and any single `_ROUTE=0` restores that route's.
     let slice_probe = std::env::var_os("TRUCK_PROBE_SLICE").is_some();
-    let recovery_gate = std::env::var_os("TRUCK_FORMAL_RECOVERY").is_some();
-    // The planar-holes expansion carries its own gate on top of the first, so
+    let recovery_gate = diagnosis::formal_recovery_enabled();
+    // The planar-holes expansion carries its own gate under the master, so
     // "rank-0 one-bound recovery" and "rank-0 one-bound + holes recovery" are
-    // separately measurable runs rather than one conflated population. Opening
-    // the holes gate without the base gate does nothing.
+    // separately measurable runs rather than one conflated population. Closing
+    // the master gate closes this one with it.
     let holes_recovery_gate =
-        recovery_gate && std::env::var_os("TRUCK_FORMAL_RECOVERY_HOLES").is_some();
+        recovery_gate && diagnosis::recovery_route_enabled("TRUCK_FORMAL_RECOVERY_HOLES");
     // The rank-1 cylinder route, on the identical two-tier pattern as the
     // holes route above: a stable route tag (`_CYLINDER`) under the same
-    // master `TRUCK_FORMAL_RECOVERY` gate, plus its own shadow probe. Not a
-    // parallel gate — opening `TRUCK_FORMAL_RECOVERY_CYLINDER` without the
-    // master gate does nothing, exactly like `_HOLES`.
+    // master gate, plus its own shadow probe.
     let cylinder_probe = std::env::var_os("TRUCK_PROBE_CYLINDER").is_some();
     let cylinder_recovery_gate =
-        recovery_gate && std::env::var_os("TRUCK_FORMAL_RECOVERY_CYLINDER").is_some();
+        recovery_gate && diagnosis::recovery_route_enabled("TRUCK_FORMAL_RECOVERY_CYLINDER");
     let run_cylinder_slice = cylinder_probe || cylinder_recovery_gate;
     let run_slice = slice_probe || recovery_gate;
     // The rank-1 cylinder *band* route: the two-bound annulus. Same two-tier
@@ -592,12 +596,25 @@ where
     // typed outcome without replacing the legacy mesh — the observer that
     // reproduces the census. `TRUCK_FORMAL_RECOVERY_TORUS` additionally lets
     // a validated torus annulus mesh replace a face the legacy path lost.
-    // Both are off by default, so production output is unchanged by
-    // construction. The torus gate is independent of `TRUCK_FORMAL_RECOVERY`
-    // and `TRUCK_FORMAL_RECOVERY_BAND`, so a torus run can be measured
-    // without conflating it with the planar, cylinder, or cone routes.
+    // Nested under the master gate since `WAVE-2C`: it used to stand outside
+    // it so a torus run could be measured without the planar route's
+    // recoveries mixed in, and under default-on that is instead done by
+    // setting `TRUCK_FORMAL_RECOVERY_TORUS=0` and diffing.
     let torus_probe = std::env::var_os("TRUCK_PROBE_TORUS").is_some();
-    let torus_recovery_gate = std::env::var_os("TRUCK_FORMAL_RECOVERY_TORUS").is_some();
+    let torus_recovery_gate =
+        recovery_gate && diagnosis::recovery_route_enabled("TRUCK_FORMAL_RECOVERY_TORUS");
+    // Whether a recovery announces itself on stderr.
+    //
+    // While the routes were opt-in, every recovery printed a `RECOVERED` line
+    // (and the planar route a `RECOVERED_VERTEX` line per vertex) because the
+    // only reason to have opened the gate was to read them. Default-on makes
+    // that an unconditional side effect of rendering: 525 lines on
+    // `00009190`, on a tool whose stderr an agent is expected to parse. The
+    // recovery is still fully reported — `MeshedShellOutcome`'s typed
+    // `band_attempts`, `cone_band_attempts` and `torus_band_attempts` carry it
+    // structurally, which is what the census reads — so the log is now opt-in
+    // behind its own probe rather than being the only channel.
+    let recovery_log = std::env::var_os("TRUCK_PROBE_RECOVERY").is_some();
     let run_torus = torus_probe || torus_recovery_gate;
     // A per-run shell ordinal, so a `FaceKey` is unique across shells:
     // `declared_face_index` is an index *within* a shell and collides between
@@ -920,27 +937,29 @@ where
             };
             match resolved_mesh {
                 Some((path, formal_mesh)) => {
-                    eprintln!(
-                        "RECOVERED\tsource_face_id={}\t\
-                         declared_face_index={declared_face_index}\ttriangles={}\tpath={path}",
-                        source_face_id
-                            .map(|id| id.to_string())
-                            .unwrap_or_else(|| "none".into()),
-                        formal_mesh.triangles.len(),
-                    );
-                    // The recovered geometry, so a corpus face can become a
-                    // regression fixture without shipping the 400 MB model it
-                    // came from.
-                    for position in &formal_mesh.positions {
+                    if recovery_log {
                         eprintln!(
-                            "RECOVERED_VERTEX	source_face_id={}	x={:?}	y={:?}	z={:?}",
+                            "RECOVERED\tsource_face_id={}\t\
+                             declared_face_index={declared_face_index}\ttriangles={}\tpath={path}",
                             source_face_id
                                 .map(|id| id.to_string())
                                 .unwrap_or_else(|| "none".into()),
-                            position.x,
-                            position.y,
-                            position.z,
+                            formal_mesh.triangles.len(),
                         );
+                        // The recovered geometry, so a corpus face can become a
+                        // regression fixture without shipping the 400 MB model
+                        // it came from.
+                        for position in &formal_mesh.positions {
+                            eprintln!(
+                                "RECOVERED_VERTEX\tsource_face_id={}\tx={:?}\ty={:?}\tz={:?}",
+                                source_face_id
+                                    .map(|id| id.to_string())
+                                    .unwrap_or_else(|| "none".into()),
+                                position.x,
+                                position.y,
+                                position.z,
+                            );
+                        }
                     }
                     (Some(planar_mesh_to_polygon(formal_mesh)), None)
                 }
@@ -977,14 +996,16 @@ where
                 &record.mesh,
             ) {
                 (true, true, true, Some(mesh)) => {
-                    eprintln!(
-                        "RECOVERED\tsource_face_id={}\t\
-                         declared_face_index={declared_face_index}\ttriangles={}\tpath=cylinder",
-                        source_face_id
-                            .map(|id| id.to_string())
-                            .unwrap_or_else(|| "none".into()),
-                        record.triangles,
-                    );
+                    if recovery_log {
+                        eprintln!(
+                            "RECOVERED\tsource_face_id={}\t\
+                             declared_face_index={declared_face_index}\ttriangles={}\tpath=cylinder",
+                            source_face_id
+                                .map(|id| id.to_string())
+                                .unwrap_or_else(|| "none".into()),
+                            record.triangles,
+                        );
+                    }
                     (Some(mesh.clone()), None)
                 }
                 _ => (polygon, failure),
@@ -1116,14 +1137,17 @@ where
                 Some(Ok((mesh, conformance))) => {
                     let triangles = mesh.tri_faces().len();
                     if torus_recovery_gate && failure.is_some() {
-                        eprintln!(
-                            "RECOVERED\tsource_face_id={}\t\
-                             declared_face_index={declared_face_index}\ttriangles={}\tpath=torus",
-                            source_face_id
-                                .map(|id| id.to_string())
-                                .unwrap_or_else(|| "none".into()),
-                            triangles,
-                        );
+                        if recovery_log {
+                            eprintln!(
+                                "RECOVERED\tsource_face_id={}\t\
+                                 declared_face_index={declared_face_index}\t\
+                                 triangles={}\tpath=torus",
+                                source_face_id
+                                    .map(|id| id.to_string())
+                                    .unwrap_or_else(|| "none".into()),
+                                triangles,
+                            );
+                        }
                         (
                             Some(mesh),
                             None,

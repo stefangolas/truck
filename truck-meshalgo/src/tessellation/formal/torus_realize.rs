@@ -606,7 +606,7 @@ fn is_connected(triangles: &[[usize; 3]], vertex_count: usize) -> bool {
 
 #[cfg(test)]
 mod realize_tests {
-    use super::super::torus::{identify_torus_world, TorusIdentification};
+    use super::super::torus::{identify_torus_world, CertifiedRankTwoDeck, TorusIdentification};
     use super::super::torus_cell::{
         certify_torus_annular_cell, BoundaryLoopPlacement, PrimitiveWinding,
         SourceBoundaryComposition,
@@ -614,7 +614,7 @@ mod realize_tests {
     use super::*;
     use truck_geometry::prelude::{Matrix4, Point3, Torus, Vector3};
 
-    fn deck() -> super::super::torus::CertifiedRankTwoDeck {
+    fn deck() -> CertifiedRankTwoDeck {
         match identify_torus_world(
             Point3::new(0.0, 0.0, 0.0),
             Vector3::new(0.0, 0.0, 1.0),

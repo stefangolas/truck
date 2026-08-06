@@ -12,11 +12,15 @@
 //! predicates, certified enclosures, authoritative source identity, segment
 //! origins, and the exact foreign-library refusal contract.
 //!
-//! # Opt-in
+//! # When capture runs
 //!
-//! All capture is gated behind the `TRUCK_FACE_DIAG_JSONL` environment
-//! variable. When unset, the diagnostic code paths are never entered and
-//! production behaviour is identical to before.
+//! Capture is requested explicitly by `TRUCK_FACE_DIAG_JSONL`, and is also
+//! turned on by any formal route that *consumes* a witness to decide what it
+//! may attempt — the cylinder-band and conical-band routes admit exactly the
+//! `SyntheticSyntheticCrossing` bucket, which is derived from these records.
+//! Since `WAVE-2C` made those routes default-on, a default run collects
+//! witnesses; `TRUCK_FORMAL_RECOVERY=0` turns the routes and the capture off
+//! together. See [`diag_enabled`].
 
 use serde::Serialize;
 
@@ -464,37 +468,75 @@ pub fn compute_deck_status(chart_rank: u8) -> ObservedDeckStatus {
 // Diagnostic sink (thread-local)
 // ---------------------------------------------------------------------------
 
+/// Whether a formal recovery route is enabled, by its environment variable.
+///
+/// **Default-on with explicit opt-out** (`WAVE-2C`). Every formal recovery
+/// route shipped off-by-default while it was being proven, so that production
+/// output was unchanged by construction and each route's contribution could be
+/// read as the delta between a run with its variable set and a run without.
+/// That discipline did its job: the routes are certified, validated, and
+/// refinement-only — each one replaces a mesh only where `failure.is_some()`,
+/// so it cannot un-render a face the legacy path already meshed. Shipping them
+/// switched off therefore no longer buys safety; it only withholds recovery
+/// that has already been proven.
+///
+/// The measurement property is preserved rather than lost. A route's own
+/// contribution is still one subtraction — set its variable to `0` and diff
+/// against the default — so the per-route population stays readable without
+/// any route having to stand outside the master gate to be measurable. That
+/// was the sole reason `_BAND` and `_TORUS` were not nested under
+/// `TRUCK_FORMAL_RECOVERY`, and it no longer applies, so they are nested now
+/// and the master variable is a single kill switch for the whole formal
+/// chain.
+///
+/// Only an explicit negative disables: `0`, `off`, `false`, or `no`, in any
+/// case. An unset variable, or one set to anything else, leaves the route on.
+pub fn recovery_route_enabled(variable: &str) -> bool {
+    match std::env::var(variable) {
+        Err(_) => true,
+        Ok(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "false" | "no"
+        ),
+    }
+}
+
+/// Whether the whole formal recovery chain is enabled.
+///
+/// The master kill switch. With `TRUCK_FORMAL_RECOVERY=0` every formal route
+/// is off and the tessellator produces exactly the legacy meshes, which is the
+/// bisect and rollback path.
+pub fn formal_recovery_enabled() -> bool {
+    recovery_route_enabled("TRUCK_FORMAL_RECOVERY")
+}
+
 /// Whether the formal cylinder-band fallback is active.
 ///
-/// Off by default, so production output is unchanged by construction — the
-/// same discipline as every other formal route.
-///
-/// **Not nested under `TRUCK_FORMAL_RECOVERY`**, unlike `_HOLES` and
-/// `_CYLINDER`, and the reason is measurement rather than taste. The master
-/// gate independently opens the planar rank-0 route, which recovers faces of
-/// its own (2, on `00009190`). A band run held under it would therefore report
-/// a face total containing both routes' recoveries, and the band's own
-/// contribution could not be read off it — which is the single number this
-/// gate exists to obtain. Standing alone, the delta between a run with it and a
-/// run without it *is* the band's recovery count.
+/// Nested under the master gate — see [`recovery_route_enabled`] for why it no
+/// longer stands outside it.
 ///
 /// It lives in this module, rather than beside the other gates, because
 /// [`diag_enabled`] has to agree with it — see there.
 pub fn cylinder_band_recovery_enabled() -> bool {
-    std::env::var_os("TRUCK_FORMAL_RECOVERY_BAND").is_some()
+    formal_recovery_enabled() && recovery_route_enabled("TRUCK_FORMAL_RECOVERY_BAND")
 }
 
 /// Whether diagnostic capture is enabled.
 ///
-/// Gated behind the `TRUCK_FACE_DIAG_JSONL` environment variable. When unset,
-/// no diagnostic code paths are entered and production behaviour is identical
-/// to before.
+/// Enabled by `TRUCK_FACE_DIAG_JSONL`, and independently by the cylinder-band
+/// fallback — not as a convenience: that route's admitted population *is* the
+/// `SyntheticSyntheticCrossing` bucket, and the bucket is derived from these
+/// witnesses. The sink is an input to a production decision, not only a
+/// report, so it must be filled whether or not anyone asked for the JSONL.
 ///
-/// The cylinder-band fallback turns it on too, and not as a convenience: that
-/// route's admitted population is the `SyntheticSyntheticCrossing` bucket, and
-/// the bucket is *derived from these witnesses*. With the gate open the sink is
-/// an input to a production decision rather than only a report, so it must be
-/// filled whether or not anyone asked for the JSONL.
+/// **Since the band route became default-on (`WAVE-2C`), this is true on a
+/// default run**, where it used to be false. That is a deliberate cost, and it
+/// is the price of the band and cone routes' admission rule rather than a
+/// diagnostic left switched on by accident: without the witnesses there is no
+/// certified way to tell a seam/seam crossing from any other insertion
+/// failure, and the routes would have to attempt every lost face instead of
+/// the population they are proven for. `TRUCK_FORMAL_RECOVERY=0` turns it back
+/// off along with the routes that need it.
 pub fn diag_enabled() -> bool {
     std::env::var_os("TRUCK_FACE_DIAG_JSONL").is_some() || cylinder_band_recovery_enabled()
 }
@@ -907,18 +949,57 @@ mod tests {
         );
     }
 
-    // Test 12: output disabled causing no observable production behavior change.
-    // When the env var is unset, diag_enabled returns false. The insert_to
-    // capture code is gated on this and never entered.
+    // Test 12: the diagnostic sink follows the routes that consume it.
+    //
+    // This used to assert that an unset `TRUCK_FACE_DIAG_JSONL` left the sink
+    // off, which was the whole no-observable-change argument while the formal
+    // routes were opt-in. `WAVE-2C` made the cylinder-band route default-on,
+    // and that route's admission rule *is* the derived witness bucket, so the
+    // sink is now filled on a default run by construction. The invariant that
+    // replaces it is the one that still carries weight: the sink is on exactly
+    // when something needs it, and the master kill switch turns both off
+    // together.
     #[test]
-    fn diag_disabled_when_env_unset() {
-        // This test verifies the gate function. The env var may be set by
-        // another test in the same process, so we check that the function
-        // returns a consistent bool rather than asserting false outright.
-        let _ = diag_enabled();
-        // The key invariant: when unset, it is false.
+    fn diag_follows_the_routes_that_consume_it() {
+        // These tests share a process, so the variables are set explicitly
+        // rather than assumed absent.
         std::env::remove_var("TRUCK_FACE_DIAG_JSONL");
+        std::env::remove_var("TRUCK_FORMAL_RECOVERY_BAND");
+        std::env::remove_var("TRUCK_FORMAL_RECOVERY");
+        // Default: the band route is on, so its witnesses are collected.
+        assert!(cylinder_band_recovery_enabled());
+        assert!(diag_enabled());
+
+        // Master kill switch: no route needs the sink, so it is off again and
+        // the legacy no-observable-change property is recovered in full.
+        std::env::set_var("TRUCK_FORMAL_RECOVERY", "0");
+        assert!(!cylinder_band_recovery_enabled());
         assert!(!diag_enabled());
+
+        // ...but an explicit request for the JSONL still turns it on, with
+        // every route switched off.
+        std::env::set_var("TRUCK_FACE_DIAG_JSONL", "diag.jsonl");
+        assert!(diag_enabled());
+
+        std::env::remove_var("TRUCK_FACE_DIAG_JSONL");
+        std::env::remove_var("TRUCK_FORMAL_RECOVERY");
+    }
+
+    /// Only an explicit negative disables a route; anything else leaves it on.
+    #[test]
+    fn recovery_route_opt_out_is_explicit() {
+        const VAR: &str = "TRUCK_TEST_ROUTE_GATE";
+        std::env::remove_var(VAR);
+        assert!(recovery_route_enabled(VAR), "unset means on");
+        for off in ["0", "off", "false", "no", "OFF", "False", " no "] {
+            std::env::set_var(VAR, off);
+            assert!(!recovery_route_enabled(VAR), "{off:?} must disable");
+        }
+        for on in ["1", "yes", "on", "true", ""] {
+            std::env::set_var(VAR, on);
+            assert!(recovery_route_enabled(VAR), "{on:?} must not disable");
+        }
+        std::env::remove_var(VAR);
     }
 
     // Test 5: realized constraint chain preserving one semantic segment identity.
