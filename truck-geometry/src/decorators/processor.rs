@@ -635,7 +635,9 @@ mod hint_axis_tests {
         )
     }
 
-    fn swap((u, v): (f64, f64)) -> (f64, f64) { (v, u) }
+    fn swap((u, v): (f64, f64)) -> (f64, f64) {
+        (v, u)
+    }
 
     /// The property that must hold, stated as a commuting square rather than as
     /// hint-invariance.
@@ -657,11 +659,7 @@ mod hint_axis_tests {
         // A point on the cylinder, named in the entity's own axes, and a hint
         // deliberately near a *different* period copy so the branch matters.
         let point = entity.subs(0.4, 2.0);
-        for hint in [
-            (0.35, 2.1),
-            (0.35, 2.1 + 2.0 * PI),
-            (0.35, 2.1 - 2.0 * PI),
-        ] {
+        for hint in [(0.35, 2.1), (0.35, 2.1 + 2.0 * PI), (0.35, 2.1 - 2.0 * PI)] {
             // The caller states the hint in the caller's axes.
             let caller_hint = swap(hint);
             let through_processor = processor.search_parameter(point, caller_hint, 100);

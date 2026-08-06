@@ -22,9 +22,9 @@
 //! appear only as representative evaluation hints; identity is the span id and
 //! source occurrence, never a point.
 
+use super::super::source_evidence::EdgeUseId;
 use super::bezier::RationalBezierSpan2;
 use super::curve2d::{CurveOccurrenceProvenance, DirectedCircularArc2, LineSegment2, SourceEdgeId};
-use super::super::source_evidence::EdgeUseId;
 
 /// The stable identity of one curve-span family instance.
 ///
@@ -194,9 +194,9 @@ impl CurveSpan2 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::curve2d::{SourceEdgeId, SourceEntityId, SourceFaceId};
     use super::super::super::source_evidence::{BoundId, EdgeUseId, SourceVertexKey};
+    use super::super::curve2d::{SourceEdgeId, SourceEntityId, SourceFaceId};
+    use super::*;
     use truck_geometry::prelude::{Point2, Vector2};
 
     fn provenance() -> CurveOccurrenceProvenance {
@@ -247,7 +247,10 @@ mod tests {
     #[test]
     fn germ_resolves_only_for_known_order() {
         assert!(BranchGerm::Regular.is_resolved());
-        assert!(BranchGerm::StationaryRegular { first_nonzero_order: 3 }.is_resolved());
+        assert!(BranchGerm::StationaryRegular {
+            first_nonzero_order: 3
+        }
+        .is_resolved());
         assert!(!BranchGerm::CuspCandidate.is_resolved());
         assert!(!BranchGerm::Singular.is_resolved());
         assert!(!BranchGerm::Unresolved.is_resolved());

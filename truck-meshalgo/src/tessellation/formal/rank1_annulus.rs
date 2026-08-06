@@ -76,7 +76,7 @@ use super::numeric::NonNegativeFinite;
 use super::planar_slice::{
     bounded_material_region_of, certified_polygonal_region, final_validity, jordan_arrangement_of,
     CertificateRoute, CertifiedPlanarCurveOccurrence, CertifiedPolygonalRegion,
-    FinalValidityReport, Rank0Displacement, Rank0DevelopedBoundary, SliceCategory, SliceExit,
+    FinalValidityReport, Rank0DevelopedBoundary, Rank0Displacement, SliceCategory, SliceExit,
     TriangulatedRegion,
 };
 use truck_geometry::prelude::{Point2, Point3};
@@ -447,7 +447,10 @@ fn verify_contract(annulus: &RankOnePeriodicAnnulus<'_>) -> Result<(), AnnulusEx
     // Opposite primitive homology, read off the chains themselves rather than
     // taken on the caller's word. `±1` each and summing to zero is the whole
     // statement: `0` is contractible and `|h| > 1` is multiply wound.
-    let (a, b) = (annulus.first.parallel.homology, annulus.second.parallel.homology);
+    let (a, b) = (
+        annulus.first.parallel.homology,
+        annulus.second.parallel.homology,
+    );
     if a.abs() != 1 || b.abs() != 1 || a + b != 0 {
         return refuse(AnnulusObligation::OppositePrimitiveHomology);
     }
@@ -658,12 +661,8 @@ fn chain_occurrences(
                 true => shifted(parallel.terminal),
                 false => shifted(parallel.starts[index + 1]),
             };
-            let segments = arc_segment_count(
-                end.y - start.y,
-                radius,
-                tolerance,
-                minimum_per_occurrence,
-            );
+            let segments =
+                arc_segment_count(end.y - start.y, radius, tolerance, minimum_per_occurrence);
             CertifiedPlanarCurveOccurrence {
                 edge_use: parallel.edge_uses[index],
                 start_vertex: parallel.start_vertices[index],
@@ -727,12 +726,8 @@ pub fn cut_open(
     let first_shift = plan.first_shift as f64 * magnitude;
     let second_shift = plan.second_shift as f64 * magnitude;
 
-    let first_chain = chain_occurrences(
-        first,
-        first_shift,
-        annulus.first.carrier_radius,
-        tolerance,
-    );
+    let first_chain =
+        chain_occurrences(first, first_shift, annulus.first.carrier_radius, tolerance);
     let second_chain = chain_occurrences(
         second,
         second_shift,
@@ -1035,8 +1030,8 @@ pub fn reglue(
         });
     }
 
-    let characteristic = vertices.len() as i64 - (boundary.len() + interior_edges) as i64
-        + triangles.len() as i64;
+    let characteristic =
+        vertices.len() as i64 - (boundary.len() + interior_edges) as i64 + triangles.len() as i64;
     if characteristic != 0 {
         return Err(AnnulusExit::RegluedEulerCharacteristic { characteristic });
     }
@@ -1256,8 +1251,7 @@ fn solve_join(
     // The developed convention is (aperiodic = First, periodic = Second); see
     // `super::cylinder`'s and `super::cone`'s module docs.
     let aperiodic_tolerance = certified_join_tolerance(b.x, a.x, 1.0);
-    let periodic_tolerance =
-        certified_join_tolerance(b.y, a.y, generator.period_magnitude().get());
+    let periodic_tolerance = certified_join_tolerance(b.y, a.y, generator.period_magnitude().get());
     let aperiodic = DeckInterval::from_f64(
         b.x - a.x - aperiodic_tolerance,
         b.x - a.x + aperiodic_tolerance,

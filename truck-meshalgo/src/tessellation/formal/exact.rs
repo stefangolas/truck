@@ -392,7 +392,8 @@ mod tests {
     #[test]
     fn a_negative_value_is_negative() {
         // 1.0*1.0 - 2.0*2.0 = -3.0 exactly
-        let e = Expansion::from_product(1.0, 1.0).merge(&Expansion::from_product(2.0, 2.0).negate());
+        let e =
+            Expansion::from_product(1.0, 1.0).merge(&Expansion::from_product(2.0, 2.0).negate());
         assert_eq!(e.sign(), CertifiedSign::Negative);
     }
 
@@ -432,7 +433,10 @@ mod tests {
         let b = CertifiedInterval::point(3.0);
         let s = a.add(&b);
         assert!(s.contains(5.0), "2 + 3 = 5 must lie in the enclosure");
-        assert!(!s.is_degenerate(), "directed rounding widens even exact sums");
+        assert!(
+            !s.is_degenerate(),
+            "directed rounding widens even exact sums"
+        );
         let p = a.mul(&b);
         assert!(p.contains(6.0));
         let q = a.div(&b).unwrap();
@@ -475,8 +479,14 @@ mod tests {
     #[test]
     fn cross_exp_sign_is_exact() {
         // (1,0) × (0,1) = +1 exactly; (0,1) × (1,0) = −1 exactly.
-        assert_eq!(cross_exp([1.0, 0.0], [0.0, 1.0]).sign(), CertifiedSign::Positive);
-        assert_eq!(cross_exp([0.0, 1.0], [1.0, 0.0]).sign(), CertifiedSign::Negative);
+        assert_eq!(
+            cross_exp([1.0, 0.0], [0.0, 1.0]).sign(),
+            CertifiedSign::Positive
+        );
+        assert_eq!(
+            cross_exp([0.0, 1.0], [1.0, 0.0]).sign(),
+            CertifiedSign::Negative
+        );
     }
 
     #[test]
@@ -486,7 +496,10 @@ mod tests {
         assert_eq!(t.sign(), CertifiedSign::Positive);
         assert!(CertifiedInterval::from_expansion(&t).contains(25.0));
         // A point is exactly distance zero from itself.
-        assert_eq!(exact_sq_dist([0.1, 0.2], [0.1, 0.2]).sign(), CertifiedSign::Zero);
+        assert_eq!(
+            exact_sq_dist([0.1, 0.2], [0.1, 0.2]).sign(),
+            CertifiedSign::Zero
+        );
         // 0.1² + 0.2² is positive and not representable: the expansion still
         // decides the sign.
         let u = exact_sq_dist([0.1, 0.2], [0.0, 0.0]);

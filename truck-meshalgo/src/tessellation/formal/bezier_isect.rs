@@ -205,7 +205,10 @@ fn rational_interval(num: u128, den: u128) -> CertifiedInterval {
     }
     let v = (num as f64) / (den as f64);
     if !v.is_finite() {
-        return CertifiedInterval { lo: 0.0, hi: f64::MAX };
+        return CertifiedInterval {
+            lo: 0.0,
+            hi: f64::MAX,
+        };
     }
     CertifiedInterval {
         lo: v.next_down().next_down(),
@@ -1331,9 +1334,7 @@ pub fn intersect_bezier_pair(
     let lhs_span = super::span::CurveSpan2::RationalBezier(lhs.clone());
     let rhs_span = super::span::CurveSpan2::RationalBezier(rhs.clone());
     match super::common_arc::common_arc_for_pair(&lhs_span, &rhs_span) {
-        Ok(arc) => {
-            return PairContactResult::Components(vec![ContactComponent2::CommonArc(arc)])
-        }
+        Ok(arc) => return PairContactResult::Components(vec![ContactComponent2::CommonArc(arc)]),
         // Any other precheck outcome: no admitted positive-dimensional
         // CommonArc was certified, so the isolated-contact solver decides the
         // pair (it may find endpoint meetings, self-intersections, tangencies,
@@ -1356,11 +1357,11 @@ pub fn intersect_bezier_pair(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::super::super::source_evidence::{BoundId, EdgeUseId, SourceVertexKey};
     use super::super::curve2d::{
         CurveOccurrenceProvenance, SourceEdgeId, SourceEntityId, SourceFaceId,
     };
-    use super::super::super::source_evidence::{BoundId, EdgeUseId, SourceVertexKey};
+    use super::*;
 
     fn provenance(edge_index: usize) -> CurveOccurrenceProvenance {
         CurveOccurrenceProvenance {
@@ -1535,7 +1536,10 @@ mod tests {
         assert_eq!(keys.len(), 2);
         keys.sort_by_key(|k| k.ordinal);
         assert_eq!((keys[0].ordinal, keys[1].ordinal), (0, 1));
-        assert_ne!(keys[0], keys[1], "distinct roots must have distinct identities");
+        assert_ne!(
+            keys[0], keys[1],
+            "distinct roots must have distinct identities"
+        );
         // Participants are canonical and identical for both roots of the pair.
         assert_eq!(keys[0].participants, keys[1].participants);
         // The ordinals follow the certified source-parameter order on the
@@ -1753,8 +1757,14 @@ mod tests {
         // Disjoint s isolators certify the order regardless of t.
         let c = dummy_record(0.1, 0.2, 0.0, 1.0);
         let d = dummy_record(0.3, 0.4, 0.0, 1.0);
-        assert_eq!(certified_primary_cmp(&c, &d).unwrap(), std::cmp::Ordering::Less);
-        assert_eq!(certified_primary_cmp(&d, &c).unwrap(), std::cmp::Ordering::Greater);
+        assert_eq!(
+            certified_primary_cmp(&c, &d).unwrap(),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            certified_primary_cmp(&d, &c).unwrap(),
+            std::cmp::Ordering::Greater
+        );
     }
 
     #[test]
@@ -1772,7 +1782,10 @@ mod tests {
         let op2 = canonicalize(&line);
         let sys = System::new(&op1, &op2);
         let (mut records, pending) = isolate(&sys);
-        assert!(pending.is_empty(), "the two roots must be certified, not pending");
+        assert!(
+            pending.is_empty(),
+            "the two roots must be certified, not pending"
+        );
         let contains_s = |r: &RootRecord, s: f64| r.image.s_lo <= s && s <= r.image.s_hi;
 
         assign_ordinals(&mut records, &sys).expect("two separated roots order");
@@ -1877,7 +1890,10 @@ mod tests {
         let before = roots.clone();
         let err = assign_ordinals(&mut roots, &sys).unwrap_err();
         assert_eq!(err, GenericUnresolved::UnresolvedIdentityOrdering);
-        assert_eq!(roots, before, "a failed assignment must not mutate any record");
+        assert_eq!(
+            roots, before,
+            "a failed assignment must not mutate any record"
+        );
     }
 
     #[test]
@@ -2012,7 +2028,10 @@ mod tests {
         assert_eq!(c.len(), 4);
         let expects = [0.0, 0.0, 1.0 / 3.0, 1.0];
         for (ci, e) in c.iter().zip(expects.iter()) {
-            assert!(ci.lo <= *e && *e <= ci.hi, "coeff must enclose {e}, got {ci:?}");
+            assert!(
+                ci.lo <= *e && *e <= ci.hi,
+                "coeff must enclose {e}, got {ci:?}"
+            );
         }
     }
 }

@@ -63,11 +63,11 @@
 //! pieces whose start and end points coincide (the same geometric point
 //! on the circle, but with the sweep that completes the traversal).
 
+use super::super::source_evidence::{EdgeUseId, SourceVertexKey};
 use super::curve2d::{
     CurveOccurrenceProvenance, DevelopedCurve2D, DirectedCircularArc2, LineSegment2,
 };
 use super::numeric::FiniteF64;
-use super::super::source_evidence::{EdgeUseId, SourceVertexKey};
 use std::f64::consts::PI;
 use truck_geometry::prelude::{InnerSpace, Point2, Vector2};
 
@@ -593,21 +593,13 @@ fn build_critical_point(
 
 /// Whether the parameter enclosure proves the exact critical is strictly
 /// inside `(t_min, t_max)`.
-fn enclosure_is_definitely_interior(
-    enclosure: (f64, f64),
-    t_min: f64,
-    t_max: f64,
-) -> bool {
+fn enclosure_is_definitely_interior(enclosure: (f64, f64), t_min: f64, t_max: f64) -> bool {
     enclosure.0 > t_min && enclosure.1 < t_max
 }
 
 /// Whether the parameter enclosure proves the exact critical is strictly
 /// outside `[t_min, t_max]`.
-fn enclosure_is_definitely_exterior(
-    enclosure: (f64, f64),
-    t_min: f64,
-    t_max: f64,
-) -> bool {
+fn enclosure_is_definitely_exterior(enclosure: (f64, f64), t_min: f64, t_max: f64) -> bool {
     enclosure.1 < t_min || enclosure.0 > t_max
 }
 
@@ -651,10 +643,7 @@ fn make_arc_x_monotone(
         t1: arc.t1,
     };
     let ascending = arc.t0 < arc.t1;
-    let (t_min, t_max) = (
-        occurrence_interval.min(),
-        occurrence_interval.max(),
-    );
+    let (t_min, t_max) = (occurrence_interval.min(), occurrence_interval.max());
 
     let a = arc.cos_basis.x;
     let b = arc.sin_basis.x;
@@ -770,12 +759,15 @@ fn make_arc_x_monotone(
     let start_point = arc.start_point();
     let end_point = arc.end_point();
 
-    let ordered_criticals: Vec<(i64, CertifiedCriticalPoint)> =
-        if ascending {
-            interior.iter().map(|&(k, ref c)| (k, c.clone())).collect()
-        } else {
-            interior.iter().rev().map(|&(k, ref c)| (k, c.clone())).collect()
-        };
+    let ordered_criticals: Vec<(i64, CertifiedCriticalPoint)> = if ascending {
+        interior.iter().map(|&(k, ref c)| (k, c.clone())).collect()
+    } else {
+        interior
+            .iter()
+            .rev()
+            .map(|&(k, ref c)| (k, c.clone()))
+            .collect()
+    };
 
     let mut endpoints: Vec<(f64, ArcPieceEndpoint)> =
         Vec::with_capacity(ordered_criticals.len() + 2);
@@ -917,9 +909,9 @@ fn source_endpoint_is_structurally_at_critical(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::curve2d::{SourceEdgeId, SourceEntityId, SourceFaceId};
     use super::super::super::source_evidence::{BoundId, EdgeUseId, SourceVertexKey};
+    use super::super::curve2d::{SourceEdgeId, SourceEntityId, SourceFaceId};
+    use super::*;
     use truck_geometry::prelude::{Point2, Vector2};
 
     const PI: f64 = std::f64::consts::PI;
@@ -1090,7 +1082,8 @@ mod tests {
             (&pieces[0], &pieces[1])
         {
             assert_eq!(
-                p0.end.point(), p1.start.point(),
+                p0.end.point(),
+                p1.start.point(),
                 "adjacent pieces share the same critical point"
             );
             // Check the critical point is analytically correct: for the
@@ -1331,7 +1324,8 @@ mod tests {
         let arc = unit_arc(0.3, 0.3 + TAU);
         let pieces = decompose(&DevelopedCurve2D::CircularArc(arc));
         assert_eq!(
-            pieces.len(), 3,
+            pieces.len(),
+            3,
             "offset full turn has two interior x-criticals → three pieces"
         );
         assert_eq!(
@@ -1478,15 +1472,9 @@ mod tests {
         let pieces = decompose(&DevelopedCurve2D::CircularArc(arc));
         assert_eq!(pieces.len(), 2);
         match (&pieces[0], &pieces[1]) {
-            (
-                XMonotonePiece2::CircularArc(p0),
-                XMonotonePiece2::CircularArc(p1),
-            ) => {
+            (XMonotonePiece2::CircularArc(p0), XMonotonePiece2::CircularArc(p1)) => {
                 match (&p0.end, &p1.start) {
-                    (
-                        ArcPieceEndpoint::Critical(c0),
-                        ArcPieceEndpoint::Critical(c1),
-                    ) => {
+                    (ArcPieceEndpoint::Critical(c0), ArcPieceEndpoint::Critical(c1)) => {
                         assert_eq!(
                             c0.identity, c1.identity,
                             "adjacent pieces share the same critical identity"
@@ -1759,10 +1747,13 @@ mod tests {
         let pieces = decompose(&DevelopedCurve2D::CircularArc(arc));
         assert_eq!(pieces.len(), 2, "full circle reversed should have 2 pieces");
         // Piece 0: 2π→π (decreasing), Piece 1: π→0 (increasing)
-        assert_eq!(piece_kinds(&pieces), vec![
-            MonotoneKind::StrictlyDecreasingX,
-            MonotoneKind::StrictlyIncreasingX,
-        ]);
+        assert_eq!(
+            piece_kinds(&pieces),
+            vec![
+                MonotoneKind::StrictlyDecreasingX,
+                MonotoneKind::StrictlyIncreasingX,
+            ]
+        );
     }
 
     // -- ULP-proximity tests -----------------------------------------------
@@ -1780,7 +1771,10 @@ mod tests {
             &DevelopedCurve2D::CircularArc(arc),
             &NumericalPolicy::standard(),
         );
-        assert_eq!(result.unwrap_err(), MonotoneDecompositionFailure::InteriorClassificationUndecided);
+        assert_eq!(
+            result.unwrap_err(),
+            MonotoneDecompositionFailure::InteriorClassificationUndecided
+        );
     }
 
     #[test]
@@ -1805,9 +1799,13 @@ mod tests {
         let pieces = make_x_monotone(
             &DevelopedCurve2D::CircularArc(arc),
             &NumericalPolicy::standard(),
-        ).expect("t0 at critical boundary should decompose");
+        )
+        .expect("t0 at critical boundary should decompose");
         assert_eq!(pieces.len(), 1);
-        assert_eq!(pieces[0].identity().decomposition_kind, DecompositionKind::WholeOccurrence);
+        assert_eq!(
+            pieces[0].identity().decomposition_kind,
+            DecompositionKind::WholeOccurrence
+        );
     }
 
     #[test]
@@ -1818,7 +1816,8 @@ mod tests {
         let pieces = make_x_monotone(
             &DevelopedCurve2D::CircularArc(arc),
             &NumericalPolicy::standard(),
-        ).expect("zero-angle critical at boundary should decompose");
+        )
+        .expect("zero-angle critical at boundary should decompose");
         assert_eq!(pieces.len(), 1);
     }
 
@@ -1849,8 +1848,10 @@ mod tests {
                 );
                 // The parameter midpoint is an evaluation convenience:
                 let t_join = p0.identity.parameter_hint_interval.t1;
-                assert_eq!(t_join, p1.identity.parameter_hint_interval.t0,
-                    "parameter midpoints match by construction");
+                assert_eq!(
+                    t_join, p1.identity.parameter_hint_interval.t0,
+                    "parameter midpoints match by construction"
+                );
                 // But the sweep will deduplicate by identity, not by
                 // coordinate or midpoint proximity.
             }

@@ -124,8 +124,7 @@ impl Cplx {
     }
     /// Whether both parts strictly exclude zero (a certified nonzero).
     fn strictly_nonzero(&self) -> bool {
-        (self.re.lo > 0.0 || self.re.hi < 0.0)
-            || (self.im.lo > 0.0 || self.im.hi < 0.0)
+        (self.re.lo > 0.0 || self.re.hi < 0.0) || (self.im.lo > 0.0 || self.im.hi < 0.0)
     }
     /// Classify both parts against a roundoff floor.
     fn classify_floor(&self, floor: f64) -> IntervalClass {
@@ -295,15 +294,18 @@ pub struct OnTorusWitness {
 pub enum CircleOnTorusStatus {
     /// The entire circle is certified to lie on the torus, with its winding.
     CertifiedOnTorus {
+        /// The certified winding and family witness.
         witness: OnTorusWitness,
     },
     /// At least one Fourier coefficient of `F(P(t))` is provably nonzero.
     ProvedNotOnTorus {
+        /// The largest coefficient magnitude observed.
         max_residual: f64,
     },
     /// No coefficient is provably nonzero, but the intervals are too wide to
-        /// certify exact zero.
+    /// certify exact zero.
     OnTorusUnresolved {
+        /// The largest coefficient magnitude observed.
         max_residual: f64,
     },
     /// The circle parameters are degenerate (non-unit normal, zero radius, etc.)
@@ -334,8 +336,8 @@ pub fn certify_circle_on_torus(
         return CircleOnTorusStatus::OperationalFailure;
     }
     let u = placement.normal / n_mag; // unit plane normal
-    // Build an orthonormal in-plane basis (û, v̂) with û × v̂ = û_plane_normal.
-    // Pick û = any unit vector not parallel to u; v̂ = u × û; re-orthonormalize.
+                                      // Build an orthonormal in-plane basis (û, v̂) with û × v̂ = û_plane_normal.
+                                      // Pick û = any unit vector not parallel to u; v̂ = u × û; re-orthonormalize.
     let seed = if u.x.abs() < 0.9 {
         Vector3::new(1.0, 0.0, 0.0)
     } else {
@@ -398,17 +400,23 @@ pub fn certify_circle_on_torus(
         max_abs = max_abs.max(c.max_abs());
     }
     if worst == IntervalClass::Beyond {
-        return CircleOnTorusStatus::ProvedNotOnTorus { max_residual: max_abs };
+        return CircleOnTorusStatus::ProvedNotOnTorus {
+            max_residual: max_abs,
+        };
     }
     if worst == IntervalClass::Straddles {
-        return CircleOnTorusStatus::OnTorusUnresolved { max_residual: max_abs };
+        return CircleOnTorusStatus::OnTorusUnresolved {
+            max_residual: max_abs,
+        };
     }
 
     // Certified on the torus. Compute the winding.
     let winding = match lift_circle_winding(deck, placement) {
         WindingResult::Certified(w) => w.winding,
         WindingResult::Unresolved { .. } => {
-            return CircleOnTorusStatus::OnTorusUnresolved { max_residual: max_abs };
+            return CircleOnTorusStatus::OnTorusUnresolved {
+                max_residual: max_abs,
+            };
         }
         WindingResult::OperationalFailure => {
             return CircleOnTorusStatus::OperationalFailure;
@@ -633,14 +641,7 @@ fn sign_of(ci: &CertifiedInterval) -> Option<CertifiedSign2> {
 
 /// `p`: signed crossings of `y(t) = cy + ay cos t + by sin t = 0` with
 /// `x(t) = cx + ax cos t + bx sin t > 0`.
-fn signed_azimuthal_crossings(
-    cx: f64,
-    ax: f64,
-    bx: f64,
-    cy: f64,
-    ay: f64,
-    by: f64,
-) -> Option<i8> {
+fn signed_azimuthal_crossings(cx: f64, ax: f64, bx: f64, cy: f64, ay: f64, by: f64) -> Option<i8> {
     let zeros = sinusoid_zeros_ci(cy, ay, by)?;
     let mut winding: i8 = 0;
     for (cos_t, sin_t, dir) in zeros {
@@ -752,8 +753,8 @@ pub fn normalize_to_canonical(p: i64, q: i64) -> Option<Gl2zNormalization> {
     // Row 1: a p + b q = 1.  Row 2: c p + d q = 0  with  det = a d - b c = ±1.
     // Solve a p + b q = 1 via the extended Euclidean algorithm.
     let (a, b) = ext_gcd(p, q); // a p + b q = 1
-    // Row 2 must satisfy c p + d q = 0  =>  (c, d) = (-q, p) works (up to scale).
-    // det = a p - b (-q) = a p + b q = 1.  So M = [[a, b], [-q, p]], det = a p + b q = 1.
+                                // Row 2 must satisfy c p + d q = 0  =>  (c, d) = (-q, p) works (up to scale).
+                                // det = a p - b (-q) = a p + b q = 1.  So M = [[a, b], [-q, p]], det = a p + b q = 1.
     let c = -q;
     let d = p;
     let det = a * d - b * c; // = a p + b q = 1
@@ -780,11 +781,7 @@ fn ext_gcd(p: i64, q: i64) -> (i64, i64) {
         old_s = -old_s;
     }
     let _ = old_r; // = gcd (positive), used only to fix the sign of old_s
-    let b = if q != 0 {
-        (old_r - old_s * p) / q
-    } else {
-        0
-    };
+    let b = if q != 0 { (old_r - old_s * p) / q } else { 0 };
     (old_s, b)
 }
 
@@ -871,15 +868,10 @@ mod tests {
         let beta = (r / large).asin();
         let nb = beta.cos(); // sqrt(R²-r²)/R
         let sb = beta.sin(); // r/R
-        // The two Villarceau families: plane normal ±(-sb, 0, nb) won't both
-        // work; use the derived geometry: center (0, r, 0), plane through O.
+                             // The two Villarceau families: plane normal ±(-sb, 0, nb) won't both
+                             // work; use the derived geometry: center (0, r, 0), plane through O.
         let normal = Vector3::new(-sb, 0.0, nb).normalize();
-        let lp = placement(
-            Point3::new(0.0, r, 0.0),
-            normal,
-            large,
-            1,
-        );
+        let lp = placement(Point3::new(0.0, r, 0.0), normal, large, 1);
         match certify_circle_on_torus(&deck(), &lp) {
             CircleOnTorusStatus::CertifiedOnTorus { witness } => {
                 assert_eq!(witness.winding[0].abs(), 1);
@@ -971,8 +963,14 @@ mod tests {
         // winding computation (which is unsigned over the geometry).
         let s_pos = certify_circle_on_torus(&deck(), &lp_pos);
         let s_neg = certify_circle_on_torus(&deck(), &lp_neg);
-        assert!(matches!(s_pos, CircleOnTorusStatus::CertifiedOnTorus { .. }));
-        assert!(matches!(s_neg, CircleOnTorusStatus::CertifiedOnTorus { .. }));
+        assert!(matches!(
+            s_pos,
+            CircleOnTorusStatus::CertifiedOnTorus { .. }
+        ));
+        assert!(matches!(
+            s_neg,
+            CircleOnTorusStatus::CertifiedOnTorus { .. }
+        ));
     }
 
     // ---- reflected / scaled / world-transformed placements ----------------
@@ -1057,12 +1055,7 @@ mod tests {
             other => panic!("need a deck, got {other:?}"),
         };
         let v = 0.6_f64;
-        let lp = placement(
-            center + axis * v.sin(),
-            axis,
-            5.0 + v.cos(),
-            1,
-        );
+        let lp = placement(center + axis * v.sin(), axis, 5.0 + v.cos(), 1);
         assert!(matches!(
             certify_circle_on_torus(&d, &lp),
             CircleOnTorusStatus::CertifiedOnTorus { .. }
@@ -1094,7 +1087,10 @@ mod tests {
         let sa = certify_circle_on_torus(&deck(), &la);
         let sb = certify_circle_on_torus(&deck(), &lb);
         let (wa, wb) = match (sa, sb) {
-            (CircleOnTorusStatus::CertifiedOnTorus { witness: wa }, CircleOnTorusStatus::CertifiedOnTorus { witness: wb }) => (wa, wb),
+            (
+                CircleOnTorusStatus::CertifiedOnTorus { witness: wa },
+                CircleOnTorusStatus::CertifiedOnTorus { witness: wb },
+            ) => (wa, wb),
             other => panic!("expected both CertifiedOnTorus, got {other:?}"),
         };
         assert_eq!(wa.winding[0].abs(), wb.winding[0].abs());
@@ -1138,7 +1134,12 @@ mod tests {
         // therefore never refuses a genuine single-trace circle. A reported
         // gcd > 1 would indicate a repeated traversal, not a different loop.
         for lp in [
-            placement(Point3::new(0.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 1.0), 6.0, 1),
+            placement(
+                Point3::new(0.0, 0.0, 0.0),
+                Vector3::new(0.0, 0.0, 1.0),
+                6.0,
+                1,
+            ),
             villarceau_placement(0.3, 1),
             villarceau_placement(2.0, -1),
         ] {

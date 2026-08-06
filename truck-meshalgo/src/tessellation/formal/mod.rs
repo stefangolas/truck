@@ -66,10 +66,8 @@
 pub mod ambient;
 pub mod cone;
 pub mod cone_band;
-pub mod torus;
-pub mod torus_cell;
-pub mod torus_circle;
-pub mod torus_realize;
+pub mod curve2d;
+pub mod curve_witness;
 pub mod cylinder;
 pub mod cylinder_arrangement;
 pub mod cylinder_band;
@@ -77,26 +75,29 @@ pub mod cylinder_cover;
 pub mod cylinder_face;
 pub mod cylinder_lift;
 pub mod cylinder_mesh;
-pub mod curve2d;
-pub mod curve_witness;
+pub mod torus;
+pub mod torus_cell;
+pub mod torus_circle;
+pub mod torus_outcome;
+pub mod torus_realize;
 // GEN-001 generic arrangement substrate.
 pub mod bezier;
 
 pub mod bezier_isect;
 pub mod common_arc;
 pub mod contact;
-pub mod quotient;
-pub mod span;
-pub mod intersection;
 pub mod deck;
 pub mod envelope;
-pub mod exact;
 pub mod evidence;
+pub mod exact;
+pub mod intersection;
 pub mod numeric;
 pub mod outcome;
 pub mod planar_holes;
 pub mod planar_slice;
+pub mod quotient;
 pub mod rank1_annulus;
+pub mod span;
 pub mod support;
 pub mod xmonotone;
 
@@ -116,6 +117,16 @@ pub use ambient::{
     PeriodContradictionWitness, PeriodHintSet, PeriodHintSource, QuotientIdentificationAuthority,
     UncertifiedPeriodValue,
 };
+pub use bezier::{BezierSpanError, RationalBezierSpan2};
+pub use bezier_isect::intersect_bezier_pair;
+pub use common_arc::{
+    common_arc_for_pair, AnalyticSupportClass, AnalyticSupportCorrespondenceCertificate,
+    ArcParticipant, AuthoritativeParameterKey, AxisSide, CanonicalSourceAxis, CertifiedAffineMap,
+    CertifiedIntervalOverlap, CertifiedParameterCorrespondence, CommonArc2, CommonArcBoundaries,
+    CommonArcBoundary, CommonArcBoundaryKey, CommonArcCertificate, CommonArcEnd, CommonArcError,
+    CommonArcIdentity, CommonSupportBasis, CommonSupportFragment, CommonSupportIdentity,
+    OrientationAlongSupport, SharedParentCertificate, SupportIdentityCertificate,
+};
 pub use cone::{
     identify_cone, CertifiedEmbeddedCone, ConeIdentification, ConeIdentificationFailure,
     ConeSchema, ConeValidityCertificate, Nappe, MINIMUM_CONE_AXIAL_COMPONENT,
@@ -129,10 +140,19 @@ pub use cone_band::{
     ConeWitnessFailure, ConicalBandExit, ConicalBandMaterialAuthority, ConicalSourceStanding,
     NappeRelation,
 };
-pub use rank1_annulus::{
-    realize as realize_rank_one_annulus, AnnulusBoundary, AnnulusCell, AnnulusExit,
-    AnnulusObligation, AnnulusValidityReport, CarrierOrder, CompleteParallel, FreeDeckAction,
-    RankOnePeriodicAnnulus, RealizedAnnulus,
+pub use contact::{
+    label_branch_from_placement, lift_pair_result, AggregatedQuotientEventKey, BranchIncidence,
+    ContactComponent2, CrossingClassification, EventIdentity, GenericUnresolved, IsolatedEvent2,
+    IsolatedRootKey, IsolatedRootParticipant, PairContactLiftKey, PairContactResult,
+};
+pub use curve2d::{
+    CurveOccurrenceProvenance, DevelopedCurve2D, DirectedCircularArc2, LineSegment2, SourceEdgeId,
+    SourceEntityId, SourceFaceId,
+};
+pub use curve_witness::{
+    axial_line_witness, circumferential_arc_witness, complete_circle_witness,
+    identify_source_curve_witness, CompleteCirclePlacement, CurveOnCylinderWitness,
+    SourceCurveFamily, WitnessClass, WitnessFailure,
 };
 pub use cylinder::{
     identify_cylinder, CertifiedEmbeddedCylinder, CylinderIdentification,
@@ -144,17 +164,12 @@ pub use cylinder_arrangement::{
 };
 pub use cylinder_cover::{build_working_cover, CylinderCoverExit, WorkingCoverResult};
 pub use cylinder_face::{build_cylinder_face, CylinderFaceRecord};
-pub use curve_witness::{
-    axial_line_witness, circumferential_arc_witness, complete_circle_witness,
-    identify_source_curve_witness, CompleteCirclePlacement, CurveOnCylinderWitness,
-    SourceCurveFamily, WitnessClass, WitnessFailure,
-};
-pub use cylinder_mesh::{
-    certify_cylinder_mesh, certify_cylinder_polygon, lift_to_cylinder, CertifiedCylinderMesh,
-};
 pub use cylinder_lift::{
     develop_traversal, develop_traversal_from_source, propagate_and_classify_holonomy,
     CylinderLiftExit, DevelopedCylinderBoundary, WitnessSpec, ZeroHolonomyLift,
+};
+pub use cylinder_mesh::{
+    certify_cylinder_mesh, certify_cylinder_polygon, lift_to_cylinder, CertifiedCylinderMesh,
 };
 pub use deck::{
     deck_cover_interval, solve_axis_aligned, CertifiedDeckInterval, DeckBudget,
@@ -172,6 +187,12 @@ pub use evidence::{
     SemanticStage, SourceEntityKey, ANALYTIC_ONLY, ANALYTIC_OR_CERTIFIED_NUMERICAL,
     ANY_AUTHORITATIVE, SOURCE_DECLARATION,
 };
+pub use exact::{cross_exp, exact_dot2, CertifiedInterval, CertifiedSign, Expansion};
+pub use intersection::{
+    intersect_x_monotone, CertifiedIntersection2, ContactKind, IntersectionIdentity,
+    IntersectionPolicy, LocationOnPiece, NumericalCause, PairIntersectionResult, PairUnresolved,
+    PairUnsupported, ParameterEnclosure, ParameterLocation,
+};
 pub use outcome::{
     Ambiguity, AmbiguityReport, ContradictionWitness, DocumentKey, DocumentScope, FaceKey,
     Inconsistency, InconsistencyReport, OperationalFailure, RealizationOutcome, SemanticOutcome,
@@ -187,44 +208,44 @@ pub use planar_slice::{
     run_planar_slice, CertificateRoute, FinalValidityReport, PlanarMesh, SliceCategory, SliceExit,
     SliceRecord, SliceStage,
 };
-pub use support::{
-    identify_line_segment, identify_plane, identify_polyline, CurveSchema, CurveSchemaFailure,
-    PlaneGram, PlaneSchema, SchemaIdentificationFailure, SupportSurfaceSchema,
-    MINIMUM_NORMALISED_GRAM_DETERMINANT,
-};
-pub use curve2d::{
-    CurveOccurrenceProvenance, DevelopedCurve2D, DirectedCircularArc2, LineSegment2, SourceEdgeId,
-    SourceEntityId, SourceFaceId,
-};
-pub use xmonotone::{
-    make_x_monotone, ClosedInterval, CriticalIdentity, DecompositionKind, MonotoneDecompositionFailure,
-    MonotoneKind, NumericalPolicy, PieceIdentity, XMonotoneCircularArc2, XMonotoneLine2,
-    XMonotonePiece2,
-};
-pub use exact::{cross_exp, exact_dot2, CertifiedInterval, CertifiedSign, Expansion};
-pub use intersection::{
-    intersect_x_monotone, CertifiedIntersection2, ContactKind, IntersectionIdentity,
-    IntersectionPolicy, LocationOnPiece, NumericalCause, PairIntersectionResult, PairUnresolved,
-    PairUnsupported, ParameterEnclosure, ParameterLocation,
-};
-pub use contact::{
-    label_branch_from_placement, lift_pair_result, AggregatedQuotientEventKey,
-    BranchIncidence, ContactComponent2, CrossingClassification, EventIdentity, GenericUnresolved,
-    IsolatedEvent2, IsolatedRootKey, IsolatedRootParticipant, PairContactLiftKey, PairContactResult,
-};
-pub use common_arc::{
-    common_arc_for_pair, AnalyticSupportClass, AnalyticSupportCorrespondenceCertificate,
-    ArcParticipant, AuthoritativeParameterKey, AxisSide, CanonicalSourceAxis, CertifiedAffineMap,
-    CertifiedIntervalOverlap, CertifiedParameterCorrespondence, CommonArc2, CommonArcBoundaries,
-    CommonArcBoundary, CommonArcBoundaryKey, CommonArcCertificate, CommonArcEnd, CommonArcError,
-    CommonArcIdentity, CommonSupportBasis, CommonSupportFragment, CommonSupportIdentity,
-    OrientationAlongSupport, SharedParentCertificate, SupportIdentityCertificate,
-};
 pub use quotient::{
     adapt_axis_aligned_placement, certify_rank2_placement, AmbientLatticeId, CanonicalBranchSide,
     CanonicalIncidenceId, CertifiedDeckLabel, DeckContext, DeckLabel, DeckLabelBasis,
     DeckLabelError, DeckPlacementResult, DeckPlacementUnsupported, DeckRank, DeckSignature,
 };
-pub use bezier::{BezierSpanError, RationalBezierSpan2};
-pub use bezier_isect::intersect_bezier_pair;
+pub use rank1_annulus::{
+    realize as realize_rank_one_annulus, AnnulusBoundary, AnnulusCell, AnnulusExit,
+    AnnulusObligation, AnnulusValidityReport, CarrierOrder, CompleteParallel, FreeDeckAction,
+    RankOnePeriodicAnnulus, RealizedAnnulus,
+};
 pub use span::{BranchGerm, CurveSpan2, FastPath, SpanId};
+pub use support::{
+    identify_line_segment, identify_plane, identify_polyline, CurveSchema, CurveSchemaFailure,
+    PlaneGram, PlaneSchema, SchemaIdentificationFailure, SupportSurfaceSchema,
+    MINIMUM_NORMALISED_GRAM_DETERMINANT,
+};
+pub use torus::{
+    identify_torus, identify_torus_world, CertifiedEmbeddedTorus, CertifiedRankTwoDeck,
+    TorusIdentification, TorusIdentificationFailure, TorusSchema, TorusValidityCertificate,
+    MINIMUM_TORUS_PERIOD_RESIDUAL,
+};
+pub use torus_cell::{
+    certify_torus_annular_cell, certify_torus_annular_cell_with_witnesses, BoundaryLoopPlacement,
+    CertifiedEssentialLoop, CertifiedMaterialAuthority, CertifiedTorusAnnularCell, ConformanceTag,
+    PrimitiveWinding, SourceBoundaryComposition, TorusCellFailure, TwoOuterBoundMalformation,
+};
+pub use torus_circle::{
+    certify_circle_on_torus, lift_circle_winding, normalize_to_canonical, CertifiedWinding,
+    CircleFamily, CircleOnTorusStatus, Gl2zNormalization, OnTorusWitness, WindingResult,
+};
+pub use torus_outcome::TorusAnnulusExit;
+pub use torus_realize::{
+    develop_torus_annulus, realize_torus_annulus, DevelopedSide, DevelopedTorusAnnulus,
+    Gl2zBasisChange, RealizationFailure as TorusRealizationFailure, RealizeFailure,
+    RealizedTorusAnnulus,
+};
+pub use xmonotone::{
+    make_x_monotone, ClosedInterval, CriticalIdentity, DecompositionKind,
+    MonotoneDecompositionFailure, MonotoneKind, NumericalPolicy, PieceIdentity,
+    XMonotoneCircularArc2, XMonotoneLine2, XMonotonePiece2,
+};

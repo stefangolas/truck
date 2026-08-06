@@ -15,7 +15,9 @@ use super::super::super::source_evidence::{
 use super::super::ambient::{ambient_evidence_from_plane_schema, resolve_ambient_periods};
 use super::super::envelope::{FormalEnvelope, PolicyInstanceId};
 use super::super::outcome::{DocumentScope, FaceKey, ShellKey, StageOutcome};
-use super::super::support::{identify_line_segment, identify_plane, CurveSchema, CurveSchemaFailure};
+use super::super::support::{
+    identify_line_segment, identify_plane, CurveSchema, CurveSchemaFailure,
+};
 use super::*;
 use truck_geometry::prelude::{Line, Plane};
 
@@ -221,7 +223,8 @@ fn edge_use(
                 mechanism: ErasedOrientationMechanism::EdgeCurveSenseFoldedIntoConvertedCurve,
             },
             selected_curve_direction: OrientationEvidence::HistoryErased {
-                mechanism: ErasedOrientationMechanism::SelectedCurveDirectionFoldedIntoConvertedCurve,
+                mechanism:
+                    ErasedOrientationMechanism::SelectedCurveDirectionFoldedIntoConvertedCurve,
             },
         },
     }
@@ -471,16 +474,12 @@ fn a_degenerate_inner_bound_is_outside_the_subset() {
 #[test]
 fn an_unsupported_curve_in_an_inner_bound_is_refused() {
     let mut fixture = HoleFixture::new(&[outer_square(), square(3.0, 3.0, 7.0, 7.0)]);
-    fixture.curves[5] = CurveSchema::not_structurally_identified(
-        CurveSchemaFailure::NoStructuralReader {
+    fixture.curves[5] =
+        CurveSchema::not_structurally_identified(CurveSchemaFailure::NoStructuralReader {
             representation: "b_spline_curve_with_knots",
-        },
-    );
+        });
     let record = fixture.run(declared_outer());
-    assert_eq!(
-        record.exit,
-        Some(SliceExit::UnsupportedCurveRepresentation)
-    );
+    assert_eq!(record.exit, Some(SliceExit::UnsupportedCurveRepresentation));
     assert_eq!(record.category, SliceCategory::Unsupported);
     // Attributed to the bound that carries it. "an inner bound has an
     // unsupported curve" and "the outer bound has one" name different work.
@@ -490,16 +489,12 @@ fn an_unsupported_curve_in_an_inner_bound_is_refused() {
 #[test]
 fn an_unsupported_curve_in_the_outer_bound_is_attributed_to_the_outer_bound() {
     let mut fixture = HoleFixture::new(&[outer_square(), square(3.0, 3.0, 7.0, 7.0)]);
-    fixture.curves[1] = CurveSchema::not_structurally_identified(
-        CurveSchemaFailure::NoStructuralReader {
+    fixture.curves[1] =
+        CurveSchema::not_structurally_identified(CurveSchemaFailure::NoStructuralReader {
             representation: "b_spline_curve_with_knots",
-        },
-    );
+        });
     let record = fixture.run(declared_outer());
-    assert_eq!(
-        record.exit,
-        Some(SliceExit::UnsupportedCurveRepresentation)
-    );
+    assert_eq!(record.exit, Some(SliceExit::UnsupportedCurveRepresentation));
     assert_eq!(record.obstruction_bound, Some(BoundRole::Outer));
 }
 
@@ -679,9 +674,18 @@ fn point_containment_is_exact_and_refuses_the_boundary() {
         Point2::new(4.0, 4.0),
         Point2::new(0.0, 4.0),
     ];
-    assert_eq!(point_strictly_inside(Point2::new(2.0, 2.0), &square), Some(true));
-    assert_eq!(point_strictly_inside(Point2::new(9.0, 2.0), &square), Some(false));
-    assert_eq!(point_strictly_inside(Point2::new(-1.0, 2.0), &square), Some(false));
+    assert_eq!(
+        point_strictly_inside(Point2::new(2.0, 2.0), &square),
+        Some(true)
+    );
+    assert_eq!(
+        point_strictly_inside(Point2::new(9.0, 2.0), &square),
+        Some(false)
+    );
+    assert_eq!(
+        point_strictly_inside(Point2::new(-1.0, 2.0), &square),
+        Some(false)
+    );
     // On an edge and on a vertex: no answer, rather than a side.
     assert_eq!(point_strictly_inside(Point2::new(2.0, 0.0), &square), None);
     assert_eq!(point_strictly_inside(Point2::new(0.0, 0.0), &square), None);
@@ -698,9 +702,18 @@ fn point_containment_is_exact_and_refuses_the_boundary() {
         Point2::new(1.0, 4.0),
         Point2::new(0.0, 4.0),
     ];
-    assert_eq!(point_strictly_inside(Point2::new(0.5, 3.0), &ell), Some(true));
-    assert_eq!(point_strictly_inside(Point2::new(3.0, 3.0), &ell), Some(false));
-    assert_eq!(point_strictly_inside(Point2::new(3.0, 0.5), &ell), Some(true));
+    assert_eq!(
+        point_strictly_inside(Point2::new(0.5, 3.0), &ell),
+        Some(true)
+    );
+    assert_eq!(
+        point_strictly_inside(Point2::new(3.0, 3.0), &ell),
+        Some(false)
+    );
+    assert_eq!(
+        point_strictly_inside(Point2::new(3.0, 0.5), &ell),
+        Some(true)
+    );
 }
 
 #[test]
@@ -731,7 +744,10 @@ fn component_relations_are_classified_distinctly() {
         Point2::new(3.0, 0.0),
         Point2::new(3.0, -2.0),
     ];
-    assert_eq!(classify_components(&a, &disjoint), ComponentRelation::Disjoint);
+    assert_eq!(
+        classify_components(&a, &disjoint),
+        ComponentRelation::Disjoint
+    );
     assert_eq!(classify_components(&a, &crossing), ComponentRelation::Cross);
     assert_eq!(classify_components(&a, &touching), ComponentRelation::Touch);
     assert_eq!(

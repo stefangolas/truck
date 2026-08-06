@@ -51,6 +51,7 @@
 //! cell is the parallel-parallel annulus only.
 
 use super::torus::CertifiedRankTwoDeck;
+use super::torus_circle::{CircleFamily, OnTorusWitness};
 use std::f64::consts::TAU;
 use truck_geometry::prelude::{InnerSpace, Point3, Vector3};
 
@@ -299,6 +300,112 @@ pub fn certify_torus_annular_cell(
     })
 }
 
+/// Certify a torus annular cell from pre-certified circle witnesses, skipping
+/// the cell's own scale-relative on-torus check.
+///
+/// The whole-interval Fourier test ([`super::torus_circle::certify_circle_on_torus`])
+/// is scale-invariant and more robust than the cell's `certify_loop` check
+/// (`cos²v + sin²v - 1 > 1e-9`), which falsely rejects parallels of small-radius
+/// tori. When both circles have already been certified on the torus, this
+/// function uses the witnesses' winding to determine the primitive class and
+/// computes the constant coordinate from the placement geometry, without
+/// re-checking on-torus membership.
+///
+/// The disjointness and material authority checks are identical to
+/// [`certify_torus_annular_cell`].
+pub fn certify_torus_annular_cell_with_witnesses(
+    deck: &CertifiedRankTwoDeck,
+    loop_a: BoundaryLoopPlacement,
+    loop_b: BoundaryLoopPlacement,
+    witness_a: OnTorusWitness,
+    witness_b: OnTorusWitness,
+    composition: &SourceBoundaryComposition,
+) -> Result<CertifiedTorusAnnularCell, TorusCellFailure> {
+    if composition.component_count != 2 {
+        return Err(TorusCellFailure::WrongSourceBoundaryComponentCount);
+    }
+    if composition.extra_source_edge {
+        return Err(TorusCellFailure::ExtraSourceEdgePresent);
+    }
+
+    let schema = deck.schema();
+    let axis = schema.axis();
+    let center = schema.center();
+    let large = schema.large_radius().get();
+    let small = schema.small_radius().get();
+    let scale = large + small;
+
+    let cert_a = certify_loop_with_witness(loop_a, witness_a, axis, center, large, small, scale)?;
+    let cert_b = certify_loop_with_witness(loop_b, witness_b, axis, center, large, small, scale)?;
+
+    if cert_a.primitive != cert_b.primitive {
+        return Err(TorusCellFailure::InhomologousLoops);
+    }
+    let dv = (cert_a.constant_coordinate - cert_b.constant_coordinate).abs();
+    let dv_mod = dv % TAU;
+    let dv_wrapped = dv_mod.min(TAU - dv_mod);
+    if dv_wrapped < MINIMUM_TORUS_CELL_PARALLELISM * scale.max(1.0) {
+        return Err(TorusCellFailure::IntersectingBoundaries);
+    }
+
+    let (s_a, s_b) = match cert_a.primitive {
+        PrimitiveWinding::Parallel => (cert_a.winding[0], cert_b.winding[0]),
+        PrimitiveWinding::Meridian => (cert_a.winding[1], cert_b.winding[1]),
+    };
+    let authority = resolve_material_authority(s_a, s_b, composition.outer_bound_malformation)?;
+
+    Ok(CertifiedTorusAnnularCell {
+        deck: deck.clone(),
+        boundary_a: cert_a,
+        boundary_b: cert_b,
+        primitive_class: cert_a.primitive,
+        material_authority: authority,
+    })
+}
+
+/// Certify one boundary loop from a pre-certified witness, skipping the
+/// on-torus check. The primitive class comes from the witness's family, and
+/// the constant coordinate is computed from the placement geometry.
+fn certify_loop_with_witness(
+    lp: BoundaryLoopPlacement,
+    witness: OnTorusWitness,
+    axis: Vector3,
+    center: Point3,
+    large: f64,
+    small: f64,
+    scale: f64,
+) -> Result<CertifiedEssentialLoop, TorusCellFailure> {
+    let primitive = match witness.family {
+        CircleFamily::Parallel => PrimitiveWinding::Parallel,
+        CircleFamily::Meridian => PrimitiveWinding::Meridian,
+        _ => return Err(TorusCellFailure::NonprimitiveWinding),
+    };
+    let rel = lp.center - center;
+    let height = rel.dot(axis);
+    let radial_offset = rel - height * axis;
+    let (winding, constant_coordinate) = match primitive {
+        PrimitiveWinding::Parallel => {
+            if radial_offset.magnitude() > MINIMUM_TORUS_CELL_PARALLELISM * scale.max(1.0) {
+                return Err(TorusCellFailure::NonprimitiveWinding);
+            }
+            let cos_v = (lp.radius - large) / small;
+            let sin_v = height / small;
+            let v = sin_v.atan2(cos_v).rem_euclid(TAU);
+            ([lp.effective_orientation_sign as i64, 0], v)
+        }
+        PrimitiveWinding::Meridian => {
+            let u = radial_offset.y.atan2(radial_offset.x).rem_euclid(TAU);
+            ([0, lp.effective_orientation_sign as i64], u)
+        }
+    };
+    Ok(CertifiedEssentialLoop {
+        placement: lp,
+        primitive,
+        winding,
+        constant_coordinate,
+    })
+}
+
 /// Resolve the material authority from the two loops' effective winding signs.
 ///
 /// Both loops are parallels with winding `(s_a, 0)` and `(s_b, 0)` where
@@ -431,7 +538,13 @@ mod tests {
     #[test]
     fn opposite_effective_orientations_resolve_a_unique_annulus() {
         let d = deck();
-        let cell = certify_torus_annular_cell(&d, parallel(0.0, 1), parallel(1.2, -1), &clean_composition()).unwrap();
+        let cell = certify_torus_annular_cell(
+            &d,
+            parallel(0.0, 1),
+            parallel(1.2, -1),
+            &clean_composition(),
+        )
+        .unwrap();
         assert_eq!(cell.primitive_class(), PrimitiveWinding::Parallel);
         assert_eq!(cell.boundary_a().winding(), [1, 0]);
         assert_eq!(cell.boundary_b().winding(), [-1, 0]);
@@ -444,7 +557,12 @@ mod tests {
     #[test]
     fn same_effective_orientations_are_inconsistent_not_ambiguous() {
         let d = deck();
-        let err = certify_torus_annular_cell(&d, parallel(0.0, 1), parallel(1.2, 1), &clean_composition());
+        let err = certify_torus_annular_cell(
+            &d,
+            parallel(0.0, 1),
+            parallel(1.2, 1),
+            &clean_composition(),
+        );
         assert_eq!(err, Err(TorusCellFailure::InconsistentBoundaryHomology));
     }
 
@@ -452,7 +570,12 @@ mod tests {
     fn unavailable_orientation_is_unresolved() {
         let d = deck();
         // One loop's effective orientation undecidable (sign = 0).
-        let err = certify_torus_annular_cell(&d, parallel(0.0, 0), parallel(1.2, -1), &clean_composition());
+        let err = certify_torus_annular_cell(
+            &d,
+            parallel(0.0, 0),
+            parallel(1.2, -1),
+            &clean_composition(),
+        );
         assert_eq!(err, Err(TorusCellFailure::UnresolvedMaterialAuthority));
     }
 
@@ -462,7 +585,13 @@ mod tests {
         // FACE_OUTER_BOUND qualifiers. The malformation is discarded; the
         // unique annulus is still proved from orientation.
         let d = deck();
-        let cell = certify_torus_annular_cell(&d, parallel(0.0, 1), parallel(1.2, -1), &double_outer_composition()).unwrap();
+        let cell = certify_torus_annular_cell(
+            &d,
+            parallel(0.0, 1),
+            parallel(1.2, -1),
+            &double_outer_composition(),
+        )
+        .unwrap();
         assert_eq!(
             cell.material_authority().conformance(),
             ConformanceTag::MalformedTwoOuterBoundsOnCertifiedTorusAnnulus
@@ -478,21 +607,36 @@ mod tests {
         // Same orientations + double-outer is still inconsistent: the
         // malformation never implies "material lies between the loops."
         let d = deck();
-        let err = certify_torus_annular_cell(&d, parallel(0.0, 1), parallel(1.2, 1), &double_outer_composition());
+        let err = certify_torus_annular_cell(
+            &d,
+            parallel(0.0, 1),
+            parallel(1.2, 1),
+            &double_outer_composition(),
+        );
         assert_eq!(err, Err(TorusCellFailure::InconsistentBoundaryHomology));
     }
 
     #[test]
     fn coincident_parallels_are_intersecting() {
         let d = deck();
-        let err = certify_torus_annular_cell(&d, parallel(0.7, 1), parallel(0.7, -1), &clean_composition());
+        let err = certify_torus_annular_cell(
+            &d,
+            parallel(0.7, 1),
+            parallel(0.7, -1),
+            &clean_composition(),
+        );
         assert_eq!(err, Err(TorusCellFailure::IntersectingBoundaries));
     }
 
     #[test]
     fn a_full_turn_apart_parallels_are_coincident_mod_two_pi() {
         let d = deck();
-        let err = certify_torus_annular_cell(&d, parallel(0.4, 1), parallel(0.4 + TAU, -1), &clean_composition());
+        let err = certify_torus_annular_cell(
+            &d,
+            parallel(0.4, 1),
+            parallel(0.4 + TAU, -1),
+            &clean_composition(),
+        );
         assert_eq!(err, Err(TorusCellFailure::IntersectingBoundaries));
     }
 

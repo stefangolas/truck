@@ -95,11 +95,9 @@
 use super::super::source_evidence::{
     BoundId, EdgeUseId, SourceBoundInput, SourceFaceInput, SourceVertexKey,
 };
-use super::cylinder::{CertifiedEmbeddedCylinder, CylinderSchema};
 use super::curve_witness::{SourceCurveFamily, WitnessClass};
-use super::cylinder_lift::{
-    develop_traversal_from_source, propagate_placements, CylinderLiftExit,
-};
+use super::cylinder::{CertifiedEmbeddedCylinder, CylinderSchema};
+use super::cylinder_lift::{develop_traversal_from_source, propagate_placements, CylinderLiftExit};
 use super::cylinder_mesh::lift_to_cylinder;
 use super::planar_slice::{
     traverse_bound, FinalValidityReport, SliceCategory, SliceExit, TriangulatedRegion,
@@ -485,9 +483,8 @@ pub fn develop_complete_parallel(
     let id = bound.id();
     let traversal = traverse_bound(bound, curves)
         .map_err(|exit| BandExit::BoundTraversal { bound: id, exit })?;
-    let developed =
-        develop_traversal_from_source(&traversal, schema, vertex_position, family_of)
-            .map_err(|exit| BandExit::BoundDevelopment { bound: id, exit })?;
+    let developed = develop_traversal_from_source(&traversal, schema, vertex_position, family_of)
+        .map_err(|exit| BandExit::BoundDevelopment { bound: id, exit })?;
 
     // A parallel is a circle at constant axial coordinate. An axial line in
     // the bound proves the component is not one, before any placement is
@@ -635,7 +632,11 @@ pub fn carrier_of(parallel: &CompleteParallel, schema: &CylinderSchema) -> Cylin
     let bound = axial_enclosure_bound(schema);
     let mut low = f64::INFINITY;
     let mut high = f64::NEG_INFINITY;
-    for point in parallel.starts.iter().chain(std::iter::once(&parallel.terminal)) {
+    for point in parallel
+        .starts
+        .iter()
+        .chain(std::iter::once(&parallel.terminal))
+    {
         low = low.min(point.x);
         high = high.max(point.x);
     }
@@ -748,9 +749,7 @@ pub fn classify_carriers(
 /// verdict is [`classify_carriers`]'s.
 pub fn carriers_share_source_cycle(first: &CompleteParallel, second: &CompleteParallel) -> bool {
     let (first, second) = (first.source_vertices(), second.source_vertices());
-    !first.is_empty()
-        && first.iter().all(|vertex| vertex.is_identified())
-        && first == second
+    !first.is_empty() && first.iter().all(|vertex| vertex.is_identified()) && first == second
 }
 
 // ---------------------------------------------------------------------------

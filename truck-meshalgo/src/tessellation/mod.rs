@@ -429,7 +429,8 @@ pub trait LatticeMeshableShape<S, C> {
         lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
         schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
         curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
-        cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str> + Parallelizable,
+        cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str>
+            + Parallelizable,
         cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
         cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
     ) -> MeshedShellOutcome;
@@ -455,10 +456,42 @@ pub trait LatticeMeshableShape<S, C> {
         lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
         schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
         curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
-        cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str> + Parallelizable,
+        cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str>
+            + Parallelizable,
         cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
         cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
-        cone_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCone, &'static str> + Parallelizable,
+        cone_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCone, &'static str>
+            + Parallelizable,
+    ) -> MeshedShellOutcome;
+
+    /// As [`Self::robust_triangulation_with_cone_outcome`], additionally
+    /// supplying the torus-surface adapter the torus annulus route needs.
+    ///
+    /// A sixth entry point rather than a widened fifth one, for the same
+    /// reason every previous one was added: a caller with no torus evidence
+    /// to offer keeps compiling against the cone form, and that form's
+    /// output is unchanged by this route's existence because it supplies a
+    /// `torus_of` that refuses every surface.
+    ///
+    /// Only one new closure. The torus route reads its complete source circles
+    /// through the same two curve readers the cylinder and cone routes do;
+    /// what differs is what the cell then requires of the circle it was
+    /// handed — on-torus membership and `Z²` winding.
+    #[allow(clippy::too_many_arguments)]
+    fn robust_triangulation_with_torus_outcome(
+        &self,
+        tol: f64,
+        lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
+        schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
+        curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
+        cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str>
+            + Parallelizable,
+        cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
+        cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
+        cone_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCone, &'static str>
+            + Parallelizable,
+        torus_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedTorus, &'static str>
+            + Parallelizable,
     ) -> MeshedShellOutcome;
 }
 
@@ -529,7 +562,8 @@ impl<C: PolylineableCurve, S: RobustMeshableSurface> LatticeMeshableShape<S, C>
         lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
         schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
         curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
-        cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str> + Parallelizable,
+        cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str>
+            + Parallelizable,
         cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
         cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
     ) -> MeshedShellOutcome {
@@ -553,10 +587,12 @@ impl<C: PolylineableCurve, S: RobustMeshableSurface> LatticeMeshableShape<S, C>
         lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
         schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
         curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
-        cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str> + Parallelizable,
+        cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str>
+            + Parallelizable,
         cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
         cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
-        cone_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCone, &'static str> + Parallelizable,
+        cone_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCone, &'static str>
+            + Parallelizable,
     ) -> MeshedShellOutcome {
         nonpositive_tolerance!(tol);
         triangulation::cshell_tessellation_with_outcomes_and_cone(
@@ -570,6 +606,37 @@ impl<C: PolylineableCurve, S: RobustMeshableSurface> LatticeMeshableShape<S, C>
             cylinder_curve_schema_of,
             cylinder_curve_family_of,
             cone_of,
+        )
+    }
+
+    fn robust_triangulation_with_torus_outcome(
+        &self,
+        tol: f64,
+        lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
+        schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
+        curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
+        cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str>
+            + Parallelizable,
+        cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
+        cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
+        cone_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCone, &'static str>
+            + Parallelizable,
+        torus_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedTorus, &'static str>
+            + Parallelizable,
+    ) -> MeshedShellOutcome {
+        nonpositive_tolerance!(tol);
+        triangulation::cshell_tessellation_with_outcomes_and_torus(
+            self,
+            tol,
+            triangulation::by_search_nearest_parameter,
+            lattice_of,
+            schema_of,
+            curve_schema_of,
+            cylinder_of,
+            cylinder_curve_schema_of,
+            cylinder_curve_family_of,
+            cone_of,
+            torus_of,
         )
     }
 }
@@ -609,8 +676,7 @@ mod triangulation;
 use domain::lattice::CertifiedLattice;
 pub use triangulation::{
     ConeBandAttempt, ConstraintRole, CylinderBandAttempt, MeshedShellOutcome, SegmentOrigin,
-    TessellationFailure,
-    TessellationFailureReason,
+    TessellationFailure, TessellationFailureReason, TorusAnnulusAttempt,
 };
 
 /// The lattice a surface reports through its bare accessors, with no evidence.

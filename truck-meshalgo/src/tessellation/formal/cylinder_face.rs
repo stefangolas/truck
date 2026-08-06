@@ -77,14 +77,14 @@ pub fn build_cylinder_face(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::cylinder::identify_cylinder;
-    use super::super::support::identify_line_segment;
     use super::super::super::source_evidence::{
         BoundId, ErasedOrientationMechanism, OrientationEvidence, OrientationOrigin,
         SourceBoundInput, SourceEdgeOrientationEvidence, SourceEdgeUseInput,
         SourceFaceOrientationEvidence, SourceVertexKey,
     };
+    use super::super::cylinder::identify_cylinder;
+    use super::super::support::identify_line_segment;
+    use super::*;
     use truck_geometry::prelude::{Line, Point3, RevolutedCurve, Vector3};
 
     fn z_cylinder(radius: f64, h: f64) -> CertifiedEmbeddedCylinder {
@@ -103,7 +103,10 @@ mod tests {
     /// `i`-th edge use running forward exactly when `forward(i)` says so — the
     /// same construction the planar slice tests use, so this test exercises
     /// only the pairing this module adds, not a re-derived traversal.
-    fn cycle_input(points: &[Point3], forward: impl Fn(usize) -> bool) -> (SourceFaceInput, Vec<CurveSchema>) {
+    fn cycle_input(
+        points: &[Point3],
+        forward: impl Fn(usize) -> bool,
+    ) -> (SourceFaceInput, Vec<CurveSchema>) {
         let n = points.len();
         let mut edge_uses = Vec::with_capacity(n);
         let mut curves = Vec::with_capacity(n);
@@ -114,7 +117,10 @@ mod tests {
                 true => (i, j),
                 false => (j, i),
             };
-            curves.push(identify_line_segment(&Line(points[edge_from], points[edge_to])));
+            curves.push(identify_line_segment(&Line(
+                points[edge_from],
+                points[edge_to],
+            )));
             let source_vertices = (
                 SourceVertexKey::ShellVertex(edge_from),
                 SourceVertexKey::ShellVertex(edge_to),
@@ -195,7 +201,9 @@ mod tests {
         let ids = record.edge_use_ids();
         assert_eq!(
             ids,
-            (0..4).map(|i| EdgeUseId::new(BoundId(0), i)).collect::<Vec<_>>()
+            (0..4)
+                .map(|i| EdgeUseId::new(BoundId(0), i))
+                .collect::<Vec<_>>()
         );
 
         // Source vertex identities and the cyclic join they establish.
@@ -206,7 +214,10 @@ mod tests {
         // traversal direction is still 1 -> 2, matching edge use 0's end.
         assert_eq!(occurrences[1].start_vertex, SourceVertexKey::ShellVertex(1));
         assert_eq!(occurrences[1].end_vertex, SourceVertexKey::ShellVertex(2));
-        assert!(!occurrences[1].forward, "the declared reversal is retained, not erased");
+        assert!(
+            !occurrences[1].forward,
+            "the declared reversal is retained, not erased"
+        );
         assert_eq!(occurrences[2].start_vertex, SourceVertexKey::ShellVertex(2));
         assert_eq!(occurrences[2].end_vertex, SourceVertexKey::ShellVertex(3));
         assert_eq!(occurrences[3].start_vertex, SourceVertexKey::ShellVertex(3));

@@ -407,20 +407,20 @@ impl CertifiedDeckLabel {
     /// reinterpretation); overflow is a typed arithmetic failure.
     pub fn checked_add(self, other: Self) -> Result<Self, DeckLabelError> {
         self.ensure_compatible(other)?;
-        let u = self
-            .vector
-            .u
-            .checked_add(other.vector.u)
-            .ok_or(DeckLabelError::ArithmeticOverflow(
-                ResourceOperation::DeckVectorAddition,
-            ))?;
-        let v = self
-            .vector
-            .v
-            .checked_add(other.vector.v)
-            .ok_or(DeckLabelError::ArithmeticOverflow(
-                ResourceOperation::DeckVectorAddition,
-            ))?;
+        let u =
+            self.vector
+                .u
+                .checked_add(other.vector.u)
+                .ok_or(DeckLabelError::ArithmeticOverflow(
+                    ResourceOperation::DeckVectorAddition,
+                ))?;
+        let v =
+            self.vector
+                .v
+                .checked_add(other.vector.v)
+                .ok_or(DeckLabelError::ArithmeticOverflow(
+                    ResourceOperation::DeckVectorAddition,
+                ))?;
         Ok(Self {
             context: self.context,
             vector: DeckLabel { u, v },
@@ -432,20 +432,20 @@ impl CertifiedDeckLabel {
     /// [`CertifiedDeckLabel::checked_add`].
     pub fn checked_sub(self, other: Self) -> Result<Self, DeckLabelError> {
         self.ensure_compatible(other)?;
-        let u = self
-            .vector
-            .u
-            .checked_sub(other.vector.u)
-            .ok_or(DeckLabelError::ArithmeticOverflow(
-                ResourceOperation::DeckVectorSubtraction,
-            ))?;
-        let v = self
-            .vector
-            .v
-            .checked_sub(other.vector.v)
-            .ok_or(DeckLabelError::ArithmeticOverflow(
-                ResourceOperation::DeckVectorSubtraction,
-            ))?;
+        let u =
+            self.vector
+                .u
+                .checked_sub(other.vector.u)
+                .ok_or(DeckLabelError::ArithmeticOverflow(
+                    ResourceOperation::DeckVectorSubtraction,
+                ))?;
+        let v =
+            self.vector
+                .v
+                .checked_sub(other.vector.v)
+                .ok_or(DeckLabelError::ArithmeticOverflow(
+                    ResourceOperation::DeckVectorSubtraction,
+                ))?;
         Ok(Self {
             context: self.context,
             vector: DeckLabel { u, v },
@@ -586,9 +586,7 @@ impl DeckPlacementUnsupported {
     /// A short stable tag, for diagnostics.
     pub fn tag(self) -> &'static str {
         match self {
-            Self::GeneralRank2PlacementNotImplemented => {
-                "deck_placement_rank2_not_implemented"
-            }
+            Self::GeneralRank2PlacementNotImplemented => "deck_placement_rank2_not_implemented",
         }
     }
 }
@@ -666,9 +664,7 @@ pub fn adapt_axis_aligned_placement(
 /// [`DeckPlacementResult::Unsupported`]. A future solver replaces the body
 /// without changing the contract.
 pub fn certify_rank2_placement() -> DeckPlacementResult {
-    DeckPlacementResult::Unsupported(
-        DeckPlacementUnsupported::GeneralRank2PlacementNotImplemented,
-    )
+    DeckPlacementResult::Unsupported(DeckPlacementUnsupported::GeneralRank2PlacementNotImplemented)
 }
 
 // ---------------------------------------------------------------------------
@@ -747,12 +743,12 @@ impl DeckSignature {
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::source_evidence::{BoundId, EdgeUseId};
     use super::super::curve2d::SourceEdgeId;
     use super::super::deck::{
-        solve_axis_aligned, DeckGenerator, DevelopedAxis, DevelopedBox, DeckInterval,
+        solve_axis_aligned, DeckGenerator, DeckInterval, DevelopedAxis, DevelopedBox,
     };
     use super::super::numeric::FiniteF64;
-    use super::super::super::source_evidence::{BoundId, EdgeUseId};
     use super::*;
 
     /// A synthetic rank-1 lattice id, for tests. Distinct generators get
@@ -786,7 +782,10 @@ mod tests {
         assert!(CertifiedDeckLabel::zero(DeckContext::rank0()).is_zero());
         assert!(CertifiedDeckLabel::zero(rank1_context(6.28)).is_zero());
         assert!(CertifiedDeckLabel::zero(rank2_context()).is_zero());
-        assert_eq!(CertifiedDeckLabel::zero(DeckContext::rank0()).get(), DeckLabel::ZERO);
+        assert_eq!(
+            CertifiedDeckLabel::zero(DeckContext::rank0()).get(),
+            DeckLabel::ZERO
+        );
     }
 
     #[test]
@@ -813,15 +812,13 @@ mod tests {
     fn checked_overflow_is_a_typed_arithmetic_failure() {
         let context = rank1_context(6.28);
         assert_eq!(
-            placement_label(context, i64::MAX, 0)
-                .checked_add(placement_label(context, 1, 0)),
+            placement_label(context, i64::MAX, 0).checked_add(placement_label(context, 1, 0)),
             Err(DeckLabelError::ArithmeticOverflow(
                 ResourceOperation::DeckVectorAddition
             ))
         );
         assert_eq!(
-            placement_label(context, i64::MIN, 0)
-                .checked_sub(placement_label(context, 1, 0)),
+            placement_label(context, i64::MIN, 0).checked_sub(placement_label(context, 1, 0)),
             Err(DeckLabelError::ArithmeticOverflow(
                 ResourceOperation::DeckVectorSubtraction
             ))
@@ -833,8 +830,11 @@ mod tests {
             ))
         );
         assert_eq!(
-            placement_label(rank2_context(), i64::MAX, 0)
-                .checked_add(placement_label(rank2_context(), 1, 0)),
+            placement_label(rank2_context(), i64::MAX, 0).checked_add(placement_label(
+                rank2_context(),
+                1,
+                0
+            )),
             Err(DeckLabelError::ArithmeticOverflow(
                 ResourceOperation::DeckVectorAddition
             ))
@@ -844,8 +844,11 @@ mod tests {
     #[test]
     fn cross_rank_algebra_is_rejected() {
         assert!(matches!(
-            placement_label(rank1_context(6.28), 1, 0)
-                .checked_add(placement_label(rank2_context(), 1, 1)),
+            placement_label(rank1_context(6.28), 1, 0).checked_add(placement_label(
+                rank2_context(),
+                1,
+                1
+            )),
             Err(DeckLabelError::RankMismatch { .. })
         ));
     }
@@ -855,8 +858,11 @@ mod tests {
         // Two different rank-1 lattices (different periods): adding their labels
         // is a LatticeMismatch, never a silent reinterpretation.
         assert!(matches!(
-            placement_label(rank1_context(6.28), 1, 0)
-                .checked_add(placement_label(rank1_context(3.14), 2, 0)),
+            placement_label(rank1_context(6.28), 1, 0).checked_add(placement_label(
+                rank1_context(3.14),
+                2,
+                0
+            )),
             Err(DeckLabelError::LatticeMismatch { .. })
         ));
     }
@@ -869,7 +875,9 @@ mod tests {
         // reinterprets components across ranks.
         assert_eq!(placement_label(context, 7, 0).get().v, 0);
         assert_eq!(CertifiedDeckLabel::zero(context).rank(), DeckRank::Rank1);
-        assert!(CertifiedDeckLabel::zero(DeckContext::rank0()).get().is_zero());
+        assert!(CertifiedDeckLabel::zero(DeckContext::rank0())
+            .get()
+            .is_zero());
     }
 
     #[test]
@@ -894,10 +902,7 @@ mod tests {
             Err(DeckLabelError::LatticeMismatch { .. })
         ));
         // Its own lattice: accepted.
-        assert_eq!(
-            a.validate_for(rank1_context(6.28)).unwrap().get(),
-            a.get()
-        );
+        assert_eq!(a.validate_for(rank1_context(6.28)).unwrap().get(), a.get());
     }
 
     #[test]
@@ -931,8 +936,7 @@ mod tests {
         assert_eq!(inherited.basis(), DeckLabelBasis::InheritedFromParent);
         assert_eq!(inherited.get(), placed.get());
         assert_eq!(inherited.context(), placed.context());
-        let transported =
-            CertifiedDeckLabel::explicit_transport(context, DeckLabel::rank1(4));
+        let transported = CertifiedDeckLabel::explicit_transport(context, DeckLabel::rank1(4));
         assert_eq!(transported.basis(), DeckLabelBasis::ExplicitTransport);
         assert_eq!(transported.get(), DeckLabel::rank1(4));
     }
@@ -956,31 +960,38 @@ mod tests {
 
     #[test]
     fn multiple_compatible_integers_never_become_an_arbitrary_label() {
-        let result =
-            adapt_axis_aligned_placement(rank1_context(6.28), Ok(DeckSolveResult::MultipleCompatibleIntegers));
+        let result = adapt_axis_aligned_placement(
+            rank1_context(6.28),
+            Ok(DeckSolveResult::MultipleCompatibleIntegers),
+        );
         assert_eq!(result, DeckPlacementResult::Ambiguous);
         assert_eq!(result.tag(), "deck_placement_ambiguous");
     }
 
     #[test]
     fn indeterminate_evidence_remains_unresolved() {
-        let result = adapt_axis_aligned_placement(rank1_context(6.28), Ok(DeckSolveResult::Indeterminate));
+        let result =
+            adapt_axis_aligned_placement(rank1_context(6.28), Ok(DeckSolveResult::Indeterminate));
         assert_eq!(result, DeckPlacementResult::Unresolved);
         assert_eq!(result.tag(), "deck_placement_unresolved");
     }
 
     #[test]
     fn no_compatible_integer_is_a_certified_incompatibility() {
-        let result =
-            adapt_axis_aligned_placement(rank1_context(6.28), Ok(DeckSolveResult::NoCompatibleInteger));
+        let result = adapt_axis_aligned_placement(
+            rank1_context(6.28),
+            Ok(DeckSolveResult::NoCompatibleInteger),
+        );
         assert_eq!(result, DeckPlacementResult::Incompatible);
         assert_eq!(result.tag(), "deck_placement_incompatible");
     }
 
     #[test]
     fn arithmetic_overflow_is_operational_failure_not_unsupported() {
-        let result =
-            adapt_axis_aligned_placement(rank1_context(6.28), Err(DeckOperationalFailure::ArithmeticOverflow));
+        let result = adapt_axis_aligned_placement(
+            rank1_context(6.28),
+            Err(DeckOperationalFailure::ArithmeticOverflow),
+        );
         assert_eq!(
             result,
             DeckPlacementResult::OperationalFailure(DeckOperationalFailure::ArithmeticOverflow)
@@ -994,9 +1005,11 @@ mod tests {
         // full period is Unique(1); a broad enclosure spanning several periods
         // is Ambiguous, never an arbitrary pick.
         let context = rank1_context(std::f64::consts::TAU);
-        let generator =
-            DeckGenerator::new(DevelopedAxis::First, FiniteF64::new(std::f64::consts::TAU).unwrap())
-                .unwrap();
+        let generator = DeckGenerator::new(
+            DevelopedAxis::First,
+            FiniteF64::new(std::f64::consts::TAU).unwrap(),
+        )
+        .unwrap();
         let one_period = DevelopedBox {
             first: DeckInterval::from_f64(std::f64::consts::TAU, std::f64::consts::TAU).unwrap(),
             second: DeckInterval::from_f64(0.0, 0.0).unwrap(),
@@ -1073,8 +1086,14 @@ mod tests {
     #[test]
     fn signature_rejects_a_cross_lattice_label() {
         let entries = [
-            (an_id(0, CanonicalBranchSide::First), placement_label(rank1_context(6.28), 0, 0)),
-            (an_id(1, CanonicalBranchSide::First), placement_label(rank1_context(3.14), 1, 0)),
+            (
+                an_id(0, CanonicalBranchSide::First),
+                placement_label(rank1_context(6.28), 0, 0),
+            ),
+            (
+                an_id(1, CanonicalBranchSide::First),
+                placement_label(rank1_context(3.14), 1, 0),
+            ),
         ];
         assert!(matches!(
             DeckSignature::normalize(rank1_context(6.28), &entries),
@@ -1088,15 +1107,28 @@ mod tests {
         // Insertion order is not the canonical order: span 0 is the anchor
         // wherever it appears.
         let entries = [
-            (an_id(1, CanonicalBranchSide::First), placement_label(context, 5, 0)),
-            (an_id(0, CanonicalBranchSide::First), placement_label(context, 3, 0)),
-            (an_id(2, CanonicalBranchSide::First), placement_label(context, 8, 0)),
+            (
+                an_id(1, CanonicalBranchSide::First),
+                placement_label(context, 5, 0),
+            ),
+            (
+                an_id(0, CanonicalBranchSide::First),
+                placement_label(context, 3, 0),
+            ),
+            (
+                an_id(2, CanonicalBranchSide::First),
+                placement_label(context, 8, 0),
+            ),
         ];
         let signature = DeckSignature::normalize(context, &entries).unwrap();
         assert_eq!(signature.rank(), DeckRank::Rank1);
         assert_eq!(
             signature.relative(),
-            &[DeckLabel::rank1(0), DeckLabel::rank1(2), DeckLabel::rank1(5)]
+            &[
+                DeckLabel::rank1(0),
+                DeckLabel::rank1(2),
+                DeckLabel::rank1(5)
+            ]
         );
     }
 
@@ -1104,14 +1136,32 @@ mod tests {
     fn signature_is_translation_invariant() {
         let context = rank1_context(6.28);
         let base = [
-            (an_id(0, CanonicalBranchSide::First), placement_label(context, 3, 0)),
-            (an_id(1, CanonicalBranchSide::First), placement_label(context, 5, 0)),
-            (an_id(2, CanonicalBranchSide::First), placement_label(context, 8, 0)),
+            (
+                an_id(0, CanonicalBranchSide::First),
+                placement_label(context, 3, 0),
+            ),
+            (
+                an_id(1, CanonicalBranchSide::First),
+                placement_label(context, 5, 0),
+            ),
+            (
+                an_id(2, CanonicalBranchSide::First),
+                placement_label(context, 8, 0),
+            ),
         ];
         let translated = [
-            (an_id(0, CanonicalBranchSide::First), placement_label(context, -7, 0)),
-            (an_id(1, CanonicalBranchSide::First), placement_label(context, -5, 0)),
-            (an_id(2, CanonicalBranchSide::First), placement_label(context, -2, 0)),
+            (
+                an_id(0, CanonicalBranchSide::First),
+                placement_label(context, -7, 0),
+            ),
+            (
+                an_id(1, CanonicalBranchSide::First),
+                placement_label(context, -5, 0),
+            ),
+            (
+                an_id(2, CanonicalBranchSide::First),
+                placement_label(context, -2, 0),
+            ),
         ];
         assert_eq!(
             DeckSignature::normalize(context, &base).unwrap(),

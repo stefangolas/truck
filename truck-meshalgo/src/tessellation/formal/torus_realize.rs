@@ -188,8 +188,14 @@ fn ordered_v(
     Ok((
         lo,
         hi,
-        DevelopedSide::Boundary { loop_index: lo_idx, v: lo },
-        DevelopedSide::Boundary { loop_index: hi_idx, v: hi },
+        DevelopedSide::Boundary {
+            loop_index: lo_idx,
+            v: lo,
+        },
+        DevelopedSide::Boundary {
+            loop_index: hi_idx,
+            v: hi,
+        },
     ))
 }
 
@@ -333,9 +339,15 @@ pub enum RealizeFailure {
     /// disagree — a non-periodic or inconsistent torus).
     MismatchedCutPair,
     /// The realized mesh's Euler characteristic is not 0 (not an annulus).
-    WrongEulerCharacteristic { computed: i64 },
+    WrongEulerCharacteristic {
+        /// The computed Euler characteristic (should be 0 for an annulus).
+        computed: i64,
+    },
     /// The mesh does not have exactly two boundary components.
-    WrongBoundaryComponentCount { count: usize },
+    WrongBoundaryComponentCount {
+        /// The boundary component count found.
+        count: usize,
+    },
     /// The mesh is not connected.
     Disconnected,
 }
@@ -384,9 +396,7 @@ pub fn realize_torus_annulus(
         }
     };
 
-    let map = |u: f64, v: f64| -> Point3 {
-        transform.transform_point(torus.subs(u, v))
-    };
+    let map = |u: f64, v: f64| -> Point3 { transform.transform_point(torus.subs(u, v)) };
 
     // Grid vertices: (nu+1) x (nv+1). Index idx(k, l) = k * (nv + 1) + l.
     let idx = |k: usize, l: usize| -> usize { k * (nv + 1) + l };
@@ -470,7 +480,13 @@ pub fn realize_torus_annulus(
     }
     let tri3: Vec<[usize; 3]> = triangles
         .iter()
-        .map(|t| [compact_idx[remap[t[0]]], compact_idx[remap[t[1]]], compact_idx[remap[t[2]]]])
+        .map(|t| {
+            [
+                compact_idx[remap[t[0]]],
+                compact_idx[remap[t[1]]],
+                compact_idx[remap[t[2]]],
+            ]
+        })
         .collect();
 
     // Euler characteristic: V - E + F (unique edges).
@@ -490,7 +506,8 @@ pub fn realize_torus_annulus(
     }
 
     // Boundary components: edges with exactly one incident triangle.
-    let mut incident: std::collections::HashMap<[usize; 2], usize> = std::collections::HashMap::new();
+    let mut incident: std::collections::HashMap<[usize; 2], usize> =
+        std::collections::HashMap::new();
     for t in &tri3 {
         for &(a, b) in &[(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
             let e = if a < b { [a, b] } else { [b, a] };
@@ -658,8 +675,12 @@ mod realize_tests {
 
     #[test]
     fn narrow_and_wide_annuli_both_realize() {
-        let narrow = certify_torus_annular_cell(&deck(), parallel(0.0, 1), parallel(0.05, -1), &clean()).unwrap();
-        let wide = certify_torus_annular_cell(&deck(), parallel(0.0, 1), parallel(3.0, -1), &clean()).unwrap();
+        let narrow =
+            certify_torus_annular_cell(&deck(), parallel(0.0, 1), parallel(0.05, -1), &clean())
+                .unwrap();
+        let wide =
+            certify_torus_annular_cell(&deck(), parallel(0.0, 1), parallel(3.0, -1), &clean())
+                .unwrap();
         for c in [narrow, wide] {
             let r = realize_torus_annulus(&c, &torus(), &Matrix4::from_scale(1.0), 10, 4).unwrap();
             assert_eq!(r.euler_characteristic, 0);
@@ -670,7 +691,9 @@ mod realize_tests {
     fn seam_adjacent_boundary_realizes() {
         // One boundary near the seam (v ≈ 0) — the cut is at u=0~2π, the
         // boundary at v≈0 is adjacent to it but distinct.
-        let c = certify_torus_annular_cell(&deck(), parallel(0.001, 1), parallel(1.5, -1), &clean()).unwrap();
+        let c =
+            certify_torus_annular_cell(&deck(), parallel(0.001, 1), parallel(1.5, -1), &clean())
+                .unwrap();
         let r = realize_torus_annulus(&c, &torus(), &Matrix4::from_scale(1.0), 8, 4).unwrap();
         assert_eq!(r.euler_characteristic, 0);
     }

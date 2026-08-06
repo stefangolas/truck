@@ -226,6 +226,16 @@ pub struct MeshedShellOutcome {
     /// would force a reconciliation to guess which cell a shared tag came from.
     /// Both are `None` on any face neither route was eligible for.
     pub cone_band_attempts: Vec<Option<ConeBandAttempt>>,
+    /// What the torus annulus route did on each face, positionally aligned
+    /// with `shell.faces`.
+    ///
+    /// A third vector rather than a widened first two, for the same reason:
+    /// the torus route has its own vocabulary of typed exits
+    /// ([`formal::TorusAnnulusExit`]) and its own conformance tag
+    /// ([`formal::torus_cell::ConformanceTag`]), neither of which is
+    /// reconcilable with the cylinder or cone cell's exit types. `None` on
+    /// any face the torus route was not eligible for.
+    pub torus_band_attempts: Vec<Option<TorusAnnulusAttempt>>,
 }
 
 /// What the cylinder-band fallback did on one eligible face.
@@ -277,6 +287,31 @@ pub enum ConeBandAttempt {
     /// `run_conical_essential_band` returned a typed exit, and the original
     /// legacy failure was preserved unchanged.
     Refused(formal::cone_band::ConicalBandExit),
+}
+
+/// What the torus annulus route did on one eligible face.
+///
+/// The same shape as [`CylinderBandAttempt`] and [`ConeBandAttempt`], and
+/// deliberately a separate type: the unrecovered arm carries
+/// [`formal::TorusAnnulusExit`], which names this route's own typed
+/// distinctions (on-torus, winding, homology, material authority, realization),
+/// and the recovered arm carries the [`formal::ConformanceTag`] that records
+/// whether the certified cell relied on a malformed-source normalization.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TorusAnnulusAttempt {
+    /// The torus annulus was certified and realized, and the validated mesh
+    /// replaced the preserved legacy failure.
+    Recovered {
+        /// Triangles in the validated annulus.
+        triangles: usize,
+        /// Whether the source that produced it was well-formed, or carried
+        /// the double-outer-bound malformation. A recovery from a malformed
+        /// source is still a recovery, and is still not a clean read.
+        conformance: formal::torus_cell::ConformanceTag,
+    },
+    /// The torus annulus route returned a typed exit, and the original legacy
+    /// failure was preserved unchanged.
+    Refused(formal::TorusAnnulusExit),
 }
 
 /// Tessellates faces, discarding why any of them failed.
@@ -338,11 +373,13 @@ where
         |_: &S| -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str> {
             Err("cylinder_evidence_not_provided")
         },
-        |_: &C| formal::CurveSchema::not_structurally_identified(
-            formal::CurveSchemaFailure::NoStructuralReader {
-                representation: "cylinder_evidence_not_provided",
-            },
-        ),
+        |_: &C| {
+            formal::CurveSchema::not_structurally_identified(
+                formal::CurveSchemaFailure::NoStructuralReader {
+                    representation: "cylinder_evidence_not_provided",
+                },
+            )
+        },
         |_: &C| None,
     )
 }
@@ -368,10 +405,12 @@ pub(super) fn cshell_tessellation_with_outcomes_and_cone<'a, C, S>(
     lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
     schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
     curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
-    cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str> + Parallelizable,
+    cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str>
+        + Parallelizable,
     cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
     cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
-    cone_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCone, &'static str> + Parallelizable,
+    cone_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCone, &'static str>
+        + Parallelizable,
 ) -> MeshedShellOutcome
 where
     C: PolylineableCurve + 'a,
@@ -388,6 +427,59 @@ where
         cylinder_curve_schema_of,
         cylinder_curve_family_of,
         cone_of,
+        |_: &S| -> std::result::Result<formal::CertifiedEmbeddedTorus, &'static str> {
+            Err("torus_evidence_not_provided")
+        },
+    )
+}
+
+/// [`cshell_tessellation_with_outcomes_and_cone`], additionally threading
+/// the torus-surface adapter the torus annulus route needs.
+///
+/// A sixth entry point rather than a widened fifth one, for the same reason
+/// every previous one was added: a caller with no torus evidence to offer
+/// keeps compiling against the cone form, and that form's output is unchanged
+/// by this route's existence because it supplies a `torus_of` that refuses
+/// every surface.
+///
+/// Only one new closure. The torus route reads its complete source circles
+/// through the same two curve readers the cylinder and cone routes do; what
+/// differs is what the cell then requires of the circle it was handed —
+/// on-torus membership and `Z²` winding, not constant-coordinate or nappe
+/// obligations.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn cshell_tessellation_with_outcomes_and_torus<'a, C, S>(
+    shell: &CompressedShell<Point3, C, S>,
+    tol: f64,
+    sp: impl SP<S>,
+    lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
+    schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
+    curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
+    cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str>
+        + Parallelizable,
+    cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
+    cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
+    cone_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCone, &'static str>
+        + Parallelizable,
+    torus_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedTorus, &'static str>
+        + Parallelizable,
+) -> MeshedShellOutcome
+where
+    C: PolylineableCurve + 'a,
+    S: PreMeshableSurface + 'a,
+{
+    cshell_tessellation_inner(
+        shell,
+        tol,
+        sp,
+        lattice_of,
+        schema_of,
+        curve_schema_of,
+        cylinder_of,
+        cylinder_curve_schema_of,
+        cylinder_curve_family_of,
+        cone_of,
+        torus_of,
     )
 }
 
@@ -411,7 +503,8 @@ pub(super) fn cshell_tessellation_with_outcomes_and_cylinder<'a, C, S>(
     lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
     schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
     curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
-    cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str> + Parallelizable,
+    cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str>
+        + Parallelizable,
     cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
     cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
 ) -> MeshedShellOutcome
@@ -435,6 +528,9 @@ where
         |_: &S| -> std::result::Result<formal::CertifiedEmbeddedCone, &'static str> {
             Err("cone_evidence_not_provided")
         },
+        |_: &S| -> std::result::Result<formal::CertifiedEmbeddedTorus, &'static str> {
+            Err("torus_evidence_not_provided")
+        },
     )
 }
 
@@ -447,10 +543,14 @@ fn cshell_tessellation_inner<'a, C, S>(
     lattice_of: impl Fn(&S) -> CertifiedLattice + Parallelizable,
     schema_of: impl Fn(&S) -> formal::SupportSurfaceSchema + Parallelizable,
     curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
-    cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str> + Parallelizable,
+    cylinder_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCylinder, &'static str>
+        + Parallelizable,
     cylinder_curve_schema_of: impl Fn(&C) -> formal::CurveSchema + Parallelizable,
     cylinder_curve_family_of: impl Fn(&C) -> Option<formal::SourceCurveFamily> + Parallelizable,
-    cone_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCone, &'static str> + Parallelizable,
+    cone_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedCone, &'static str>
+        + Parallelizable,
+    torus_of: impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedTorus, &'static str>
+        + Parallelizable,
 ) -> MeshedShellOutcome
 where
     C: PolylineableCurve + 'a,
@@ -470,8 +570,8 @@ where
     // "rank-0 one-bound recovery" and "rank-0 one-bound + holes recovery" are
     // separately measurable runs rather than one conflated population. Opening
     // the holes gate without the base gate does nothing.
-    let holes_recovery_gate = recovery_gate
-        && std::env::var_os("TRUCK_FORMAL_RECOVERY_HOLES").is_some();
+    let holes_recovery_gate =
+        recovery_gate && std::env::var_os("TRUCK_FORMAL_RECOVERY_HOLES").is_some();
     // The rank-1 cylinder route, on the identical two-tier pattern as the
     // holes route above: a stable route tag (`_CYLINDER`) under the same
     // master `TRUCK_FORMAL_RECOVERY` gate, plus its own shadow probe. Not a
@@ -487,6 +587,18 @@ where
     // is reported through `MeshedShellOutcome::band_attempts`, which is typed
     // and needs no parsing, rather than through another stderr channel.
     let band_recovery_gate = diagnosis::cylinder_band_recovery_enabled();
+    // The rank-2 torus annulus route. Two modes under one gate:
+    // `TRUCK_PROBE_TORUS` runs the certification in shadow and records the
+    // typed outcome without replacing the legacy mesh — the observer that
+    // reproduces the census. `TRUCK_FORMAL_RECOVERY_TORUS` additionally lets
+    // a validated torus annulus mesh replace a face the legacy path lost.
+    // Both are off by default, so production output is unchanged by
+    // construction. The torus gate is independent of `TRUCK_FORMAL_RECOVERY`
+    // and `TRUCK_FORMAL_RECOVERY_BAND`, so a torus run can be measured
+    // without conflating it with the planar, cylinder, or cone routes.
+    let torus_probe = std::env::var_os("TRUCK_PROBE_TORUS").is_some();
+    let torus_recovery_gate = std::env::var_os("TRUCK_FORMAL_RECOVERY_TORUS").is_some();
+    let run_torus = torus_probe || torus_recovery_gate;
     // A per-run shell ordinal, so a `FaceKey` is unique across shells:
     // `declared_face_index` is an index *within* a shell and collides between
     // them. Assigned once per shell here, before the parallel face loop, so
@@ -775,14 +887,20 @@ where
             let resolved_mesh = match legacy_failed {
                 false => None,
                 true => {
-                    let planar = slice_record.as_ref().filter(|_| recovery_gate).and_then(
-                        |record| match record.stage == formal::SliceStage::FinalValidity
-                            && record.category == formal::SliceCategory::Resolved
-                        {
-                            true => record.mesh.as_ref().map(|mesh| ("rank0_one_bound", mesh)),
-                            false => None,
-                        },
-                    );
+                    let planar =
+                        slice_record
+                            .as_ref()
+                            .filter(|_| recovery_gate)
+                            .and_then(|record| {
+                                match record.stage == formal::SliceStage::FinalValidity
+                                    && record.category == formal::SliceCategory::Resolved
+                                {
+                                    true => {
+                                        record.mesh.as_ref().map(|mesh| ("rank0_one_bound", mesh))
+                                    }
+                                    false => None,
+                                }
+                            });
                     let holes = || {
                         holes_record
                             .as_ref()
@@ -792,9 +910,7 @@ where
                                     && record.stage == formal::SliceStage::FinalValidity
                                     && record.category == formal::SliceCategory::Resolved
                                 {
-                                    true => {
-                                        record.mesh.as_ref().map(|mesh| ("rank0_holes", mesh))
-                                    }
+                                    true => record.mesh.as_ref().map(|mesh| ("rank0_holes", mesh)),
                                     false => None,
                                 }
                             })
@@ -919,9 +1035,7 @@ where
                             }),
                         )
                     }
-                    Some(Err(exit)) => {
-                        (polygon, failure, Some(CylinderBandAttempt::Refused(exit)))
-                    }
+                    Some(Err(exit)) => (polygon, failure, Some(CylinderBandAttempt::Refused(exit))),
                 }
             }
             _ => (polygon, failure, None),
@@ -969,6 +1083,73 @@ where
             }
             _ => (polygon, failure, None),
         };
+        // The torus annulus route. Two modes:
+        //
+        //   shadow (TRUCK_PROBE_TORUS):  always runs on a torus face, records
+        //       the typed outcome in `torus_band_attempts`, and does NOT
+        //       replace the legacy mesh. This is the observer that reproduces
+        //       the corrected census.
+        //
+        //   recovery (TRUCK_FORMAL_RECOVERY_TORUS): runs only on a face that
+        //       still has no mesh (legacy failed, and no earlier formal route
+        //       recovered it), and replaces the failure with the validated
+        //       torus annulus mesh. Production recovery is gated separately
+        //       from the observer so the census can be confirmed before any
+        //       mesh is changed.
+        //
+        // The torus route runs after the cone route and only on a face that
+        // is a toroidal surface — `torus_of` refuses every non-torus surface
+        // by name, so `cylinder_of`, `cone_of`, and `torus_of` are mutually
+        // exclusive on any one surface.
+        let (polygon, failure, torus_band_attempt) = if run_torus {
+            match run_torus_annulus_for_face(
+                declared_face_index,
+                source_face_id,
+                face,
+                &shell.edges,
+                &shell.vertices,
+                &torus_of,
+                &cylinder_curve_family_of,
+                tol,
+            ) {
+                None => (polygon, failure, None),
+                Some(Ok((mesh, conformance))) => {
+                    let triangles = mesh.tri_faces().len();
+                    if torus_recovery_gate && failure.is_some() {
+                        eprintln!(
+                            "RECOVERED\tsource_face_id={}\t\
+                             declared_face_index={declared_face_index}\ttriangles={}\tpath=torus",
+                            source_face_id
+                                .map(|id| id.to_string())
+                                .unwrap_or_else(|| "none".into()),
+                            triangles,
+                        );
+                        (
+                            Some(mesh),
+                            None,
+                            Some(TorusAnnulusAttempt::Recovered {
+                                triangles,
+                                conformance,
+                            }),
+                        )
+                    } else {
+                        // Shadow mode: record the outcome but preserve the
+                        // legacy mesh and failure unchanged.
+                        (
+                            polygon,
+                            failure,
+                            Some(TorusAnnulusAttempt::Recovered {
+                                triangles,
+                                conformance,
+                            }),
+                        )
+                    }
+                }
+                Some(Err(exit)) => (polygon, failure, Some(TorusAnnulusAttempt::Refused(exit))),
+            }
+        } else {
+            (polygon, failure, None)
+        };
         let result = CompressedFace {
             boundaries,
             orientation: face.orientation,
@@ -1012,6 +1193,7 @@ where
             face_diagnosis,
             band_attempt,
             cone_band_attempt,
+            torus_band_attempt,
         )
     };
     #[cfg(not(target_arch = "wasm32"))]
@@ -1033,12 +1215,14 @@ where
     let mut face_diagnoses = Vec::with_capacity(results.len());
     let mut band_attempts = Vec::with_capacity(results.len());
     let mut cone_band_attempts = Vec::with_capacity(results.len());
-    for (f, ff, fd, ba, cba) in results {
+    let mut torus_band_attempts = Vec::with_capacity(results.len());
+    for (f, ff, fd, ba, cba, tba) in results {
         faces.push(f);
         face_failures.push(ff);
         face_diagnoses.push(fd);
         band_attempts.push(ba);
         cone_band_attempts.push(cba);
+        torus_band_attempts.push(tba);
     }
     MeshedShellOutcome {
         shell: MeshedCShell {
@@ -1050,6 +1234,7 @@ where
         face_diagnoses,
         band_attempts,
         cone_band_attempts,
+        torus_band_attempts,
     }
 }
 
@@ -1598,7 +1783,8 @@ fn run_cylinder_slice_for_face<S, C>(
     // gate below, so a face that fails traversal for an unrelated reason
     // (a second declared outer bound, a broken cyclic join) still reports
     // what its edges structurally *were*.
-    let (mut line_edge_uses, mut arc_edge_uses, mut unsupported_edge_uses) = (0usize, 0usize, 0usize);
+    let (mut line_edge_uses, mut arc_edge_uses, mut unsupported_edge_uses) =
+        (0usize, 0usize, 0usize);
     for wire in &face.boundaries {
         for edge_idx in wire {
             match edges
@@ -1703,8 +1889,7 @@ fn run_cylinder_slice_for_face<S, C>(
         }
     };
 
-    let lift = match formal::propagate_and_classify_holonomy(&developed, schema.deck_generator())
-    {
+    let lift = match formal::propagate_and_classify_holonomy(&developed, schema.deck_generator()) {
         Ok(lift) => lift,
         Err(exit) => {
             return CylinderSliceRecord::exit(
@@ -2065,6 +2250,317 @@ fn run_conical_band_for_face<S, C>(
             )
         }),
     )
+}
+
+/// Build a `PolygonMesh` from a realized torus annulus, with per-vertex normals
+/// recomputed from the certified torus surface (not averaged from adjacent
+/// facets).
+fn torus_polygon_from_realized(
+    realized: &formal::torus_realize::RealizedTorusAnnulus,
+    deck: &formal::torus::CertifiedRankTwoDeck,
+) -> PolygonMesh {
+    let schema = deck.schema();
+    let center = schema.center();
+    let axis = schema.axis();
+    let large = schema.large_radius().get();
+    let small = schema.small_radius().get();
+    let positions = realized.vertices.clone();
+    let normals: Vec<Vector3> = positions
+        .iter()
+        .map(|p| {
+            let rel = *p - center;
+            let h = rel.dot(axis);
+            let radial = rel - h * axis;
+            let magnitude = radial.magnitude();
+            match magnitude > 0.0 {
+                true => {
+                    let radial_dir = radial / magnitude;
+                    let cos_v = (magnitude - large) / small;
+                    let sin_v = h / small;
+                    let n = cos_v * radial_dir + sin_v * axis;
+                    let n_mag = n.magnitude();
+                    if n_mag > 0.0 {
+                        n / n_mag
+                    } else {
+                        axis
+                    }
+                }
+                false => axis,
+            }
+        })
+        .collect();
+    let tri_faces: Vec<[StandardVertex; 3]> = realized
+        .triangles
+        .iter()
+        .map(|indices| {
+            array![i => StandardVertex {
+                pos: indices[i],
+                uv: None,
+                nor: Some(indices[i]),
+            }; 3]
+        })
+        .collect();
+    PolygonMesh::debug_new(
+        StandardAttributes {
+            positions,
+            uv_coords: Vec::new(),
+            normals,
+        },
+        Faces::from_tri_and_quad_faces(tri_faces, Vec::new()),
+    )
+}
+
+/// Run the torus annulus route for one face, when it is eligible.
+///
+/// `None` is "not eligible, nothing was attempted": no certified torus support.
+/// `Some` means the certification pipeline was actually run and the value is
+/// its verdict — `Ok` for a certified and realized annulus, `Err` for a typed
+/// refusal.
+///
+/// This adapter mirrors [`run_cylinder_band_for_face`] and
+/// [`run_conical_band_for_face`]: it identifies the surface, extracts the
+/// boundary loop placements from the source edges, certifies each circle on the
+/// torus via the whole-interval Fourier test, checks homology and material
+/// authority, and realizes the annulus mesh. The typed exit maps each formal
+/// stage's refusal to one category of the corrected torus census.
+#[allow(clippy::too_many_arguments)]
+fn run_torus_annulus_for_face<S, C>(
+    _declared_face_index: usize,
+    _source_face_id: Option<u64>,
+    face: &CompressedFace<S>,
+    edges: &[CompressedEdge<C>],
+    _vertices: &[Point3],
+    torus_of: &impl Fn(&S) -> std::result::Result<formal::CertifiedEmbeddedTorus, &'static str>,
+    cylinder_curve_family_of: &impl Fn(&C) -> Option<formal::SourceCurveFamily>,
+    tol: f64,
+) -> Option<
+    std::result::Result<
+        (PolygonMesh, formal::torus_cell::ConformanceTag),
+        formal::TorusAnnulusExit,
+    >,
+>
+where
+    C: PolylineableCurve,
+    S: PreMeshableSurface,
+{
+    use formal::torus_cell::{
+        BoundaryLoopPlacement, ConformanceTag, SourceBoundaryComposition, TorusCellFailure,
+        TwoOuterBoundMalformation,
+    };
+    use formal::{CircleFamily, CircleOnTorusStatus};
+    use truck_topology::compress::OuterBoundStanding;
+
+    // 1. Identify the torus. `None` (not eligible) when the surface is not a
+    //    certified toroidal surface.
+    let embedded = torus_of(&face.surface).ok()?;
+    let deck = embedded.deck();
+    let schema = deck.schema();
+    let torus_center = schema.center();
+    let torus_axis = schema.axis();
+    let large = schema.large_radius().get();
+    let small = schema.small_radius().get();
+
+    // 2. Extract boundary loop placements. Each wire must reduce to exactly one
+    //    complete source circle; any other edge or a multi-circle wire marks
+    //    `extra` and the face is not a two-complete-circle annulus.
+    let mut circle_placements: Vec<(formal::CompleteCirclePlacement, bool)> = Vec::new();
+    let mut extra = false;
+    for wire in &face.boundaries {
+        let mut wire_circles: Vec<(formal::CompleteCirclePlacement, bool)> = Vec::new();
+        for edge_ref in wire {
+            let Some(edge) = edges.get(edge_ref.index) else {
+                extra = true;
+                continue;
+            };
+            match cylinder_curve_family_of(&edge.curve) {
+                Some(formal::SourceCurveFamily::CompleteCircle { placement }) => {
+                    wire_circles.push((placement, edge_ref.orientation));
+                }
+                _ => {
+                    extra = true;
+                }
+            }
+        }
+        if wire_circles.len() == 1 {
+            circle_placements.push(wire_circles[0]);
+        } else {
+            extra = true;
+        }
+    }
+    if circle_placements.len() != 2 {
+        return Some(Err(formal::TorusAnnulusExit::NotEligible));
+    }
+
+    // 3. Source boundary composition: the double-outer-bound malformation is
+    //    detected from the face's provenance, not inferred from bound count.
+    let outer_bound_malformation = match face.provenance.outer_bound {
+        OuterBoundStanding::Declared { declared_count, .. } if declared_count >= 2 => {
+            Some(TwoOuterBoundMalformation)
+        }
+        _ => None,
+    };
+    let composition = SourceBoundaryComposition {
+        component_count: face.boundaries.len(),
+        extra_source_edge: extra,
+        outer_bound_malformation,
+    };
+
+    // 4. Build BoundaryLoopPlacement with a placeholder sign for the on-torus
+    //    certification. The sign is not read by `certify_circle_on_torus`; it
+    //    is only needed by `certify_torus_annular_cell` for the material
+    //    authority check, and is filled in after the winding is certified.
+    let (pa, orient_a) = circle_placements[0];
+    let (pb, orient_b) = circle_placements[1];
+    let placement_a = BoundaryLoopPlacement {
+        center: pa.center,
+        normal: pa.sweep_axis,
+        radius: pa.radius,
+        effective_orientation_sign: 0,
+    };
+    let placement_b = BoundaryLoopPlacement {
+        center: pb.center,
+        normal: pb.sweep_axis,
+        radius: pb.radius,
+        effective_orientation_sign: 0,
+    };
+
+    // 5. Certify each circle on the torus via the whole-interval Fourier test.
+    //    This is scale-invariant, unlike the cell's own `certify_loop` check.
+    let status_a = formal::certify_circle_on_torus(deck, &placement_a);
+    let status_b = formal::certify_circle_on_torus(deck, &placement_b);
+
+    let witness_a = match &status_a {
+        CircleOnTorusStatus::CertifiedOnTorus { witness } => *witness,
+        CircleOnTorusStatus::ProvedNotOnTorus { .. } => {
+            return Some(Err(formal::TorusAnnulusExit::CircleNotOnTorus));
+        }
+        CircleOnTorusStatus::OnTorusUnresolved { .. } => {
+            return Some(Err(formal::TorusAnnulusExit::CertificationFailure));
+        }
+        CircleOnTorusStatus::OperationalFailure => {
+            return Some(Err(formal::TorusAnnulusExit::OperationalFailure));
+        }
+    };
+    let witness_b = match &status_b {
+        CircleOnTorusStatus::CertifiedOnTorus { witness } => *witness,
+        CircleOnTorusStatus::ProvedNotOnTorus { .. } => {
+            return Some(Err(formal::TorusAnnulusExit::CircleNotOnTorus));
+        }
+        CircleOnTorusStatus::OnTorusUnresolved { .. } => {
+            return Some(Err(formal::TorusAnnulusExit::CertificationFailure));
+        }
+        CircleOnTorusStatus::OperationalFailure => {
+            return Some(Err(formal::TorusAnnulusExit::OperationalFailure));
+        }
+    };
+
+    // 6. Primitivity: only parallel `(±1, 0)` and meridian `(0, ±1)` windings
+    //    are admitted — the two-complete-circle parallel/meridian annulus
+    //    theorem. Diagonal `(±1, ±1)` and other primitive windings are refused.
+    let family_a = witness_a.family;
+    let family_b = witness_b.family;
+    if !matches!(family_a, CircleFamily::Parallel | CircleFamily::Meridian)
+        || !matches!(family_b, CircleFamily::Parallel | CircleFamily::Meridian)
+    {
+        return Some(Err(formal::TorusAnnulusExit::IncompatibleLoopWindings));
+    }
+
+    // 7. Homology: the two loops must have the same unsigned winding.
+    let wa = witness_a.winding;
+    let wb = witness_b.winding;
+    if wa[0].unsigned_abs() != wb[0].unsigned_abs() || wa[1].unsigned_abs() != wb[1].unsigned_abs()
+    {
+        return Some(Err(formal::TorusAnnulusExit::IncompatibleLoopWindings));
+    }
+
+    // 8. Effective orientation sign. The winding from `lift_circle_winding`
+    //    includes the `Processor`'s curve orientation (folded into
+    //    `sweep_axis`), but the material-authority check must use the sign
+    //    WITHOUT the curve orientation — the curve orientation is a property
+    //    of the curve's parameterization, not of the loop's traversal in the
+    //    face's boundary. The edge use orientation (already folded in
+    //    `CompressedEdgeIndex::orientation`) is the correct place for the
+    //    traversal direction.
+    //
+    //    `sign_c` (without curve orientation) = `winding_sign / curve_orientation`
+    //    = `winding_sign * curve_orientation` (since orientation is ±1).
+    let curve_orient_a = if pa.curve_orientation { 1 } else { -1 };
+    let curve_orient_b = if pb.curve_orientation { 1 } else { -1 };
+    let sign_a = (if family_a == CircleFamily::Parallel {
+        wa[0]
+    } else {
+        wa[1]
+    }) * curve_orient_a;
+    let sign_b = (if family_b == CircleFamily::Parallel {
+        wb[0]
+    } else {
+        wb[1]
+    }) * curve_orient_b;
+    let eff_a = (sign_a * if orient_a { 1 } else { -1 }) as i8;
+    let eff_b = (sign_b * if orient_b { 1 } else { -1 }) as i8;
+
+    let placement_a = BoundaryLoopPlacement {
+        effective_orientation_sign: eff_a,
+        ..placement_a
+    };
+    let placement_b = BoundaryLoopPlacement {
+        effective_orientation_sign: eff_b,
+        ..placement_b
+    };
+
+    // 9. Certify the annular cell using the pre-certified witnesses, which
+    //    skips the cell's scale-relative on-torus check (already discharged
+    //    by the Fourier test). The disjointness and material authority checks
+    //    are identical to `certify_torus_annular_cell`.
+    let cell = match formal::certify_torus_annular_cell_with_witnesses(
+        deck,
+        placement_a,
+        placement_b,
+        witness_a,
+        witness_b,
+        &composition,
+    ) {
+        Ok(cell) => cell,
+        Err(TorusCellFailure::InconsistentBoundaryHomology) => {
+            return Some(Err(formal::TorusAnnulusExit::InconsistentBoundaryHomology));
+        }
+        Err(TorusCellFailure::IntersectingBoundaries) => {
+            return Some(Err(formal::TorusAnnulusExit::IntersectingBoundaries));
+        }
+        Err(TorusCellFailure::NonprimitiveWinding) | Err(TorusCellFailure::InhomologousLoops) => {
+            return Some(Err(formal::TorusAnnulusExit::IncompatibleLoopWindings));
+        }
+        Err(TorusCellFailure::SourceContradiction) => {
+            return Some(Err(formal::TorusAnnulusExit::CircleNotOnTorus));
+        }
+        Err(TorusCellFailure::WrongSourceBoundaryComponentCount)
+        | Err(TorusCellFailure::ExtraSourceEdgePresent) => {
+            return Some(Err(formal::TorusAnnulusExit::NotEligible));
+        }
+        Err(TorusCellFailure::UnresolvedMaterialAuthority) => {
+            return Some(Err(formal::TorusAnnulusExit::CertificationFailure));
+        }
+    };
+
+    // 10. Realize the annulus mesh. Grid resolution is derived from the
+    //     tolerance and the torus radii, so chord deviation stays below `tol`.
+    let nu = ((std::f64::consts::TAU * (large + small) / tol).sqrt() as usize)
+        .max(8)
+        .min(256);
+    let nv = ((std::f64::consts::TAU * small / tol).sqrt() as usize)
+        .max(4)
+        .min(128);
+    let realized =
+        match formal::realize_torus_annulus(&cell, embedded.entity(), embedded.transform(), nu, nv)
+        {
+            Ok(r) => r,
+            Err(_) => return Some(Err(formal::TorusAnnulusExit::RealizationFailure)),
+        };
+
+    // 11. Convert to PolygonMesh with per-vertex normals from the torus surface.
+    let mesh = torus_polygon_from_realized(&realized, deck);
+    let conformance = cell.material_authority().conformance();
+    Some(Ok((mesh, conformance)))
 }
 
 /// `CYLINDER\t...` diagnostic probe, one line per candidate face. Emitted

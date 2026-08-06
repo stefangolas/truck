@@ -41,7 +41,7 @@
 use super::deck::{DeckConstructorFailure, DeckGenerator, DevelopedAxis};
 use super::numeric::{FiniteF64, NumericDomainError, PositiveFinite};
 use std::f64::consts::TAU;
-use truck_geometry::prelude::{InnerSpace, ParametricSurface, Point3, Torus, Vector3};
+use truck_geometry::prelude::{InnerSpace, Matrix4, ParametricSurface, Point3, Torus, Vector3};
 
 /// Dimensionless residual below which the `2π` period is certified by
 /// evaluation. `sin`/`cos` of `t + 2π` disagree with `sin`/`cos` of `t` at the
@@ -166,6 +166,54 @@ impl CertifiedRankTwoDeck {
     }
 }
 
+/// A certified embedded torus carrying the entity and placement needed for
+/// cut-open realization.
+///
+/// The rank-2 analogue of [`super::cylinder::CertifiedEmbeddedCylinder`] and
+/// [`super::cone::CertifiedEmbeddedCone`]. The [`CertifiedRankTwoDeck`] is
+/// certified in world space (via [`identify_torus_world`]); the `entity` and
+/// `transform` are the untransformed `Torus` and its `Matrix4` placement, kept
+/// so that [`super::torus_realize::realize_torus_annulus`] can evaluate
+/// `transform.transform_point(torus.subs(u, v))` during mesh realization.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CertifiedEmbeddedTorus {
+    deck: CertifiedRankTwoDeck,
+    entity: Torus,
+    transform: Matrix4,
+}
+
+impl CertifiedEmbeddedTorus {
+    /// Construct from the certified deck, the untransformed entity, and the
+    /// placement transform.
+    pub fn new(deck: CertifiedRankTwoDeck, entity: Torus, transform: Matrix4) -> Self {
+        Self {
+            deck,
+            entity,
+            transform,
+        }
+    }
+
+    /// The certified rank-two deck (world space).
+    pub fn deck(&self) -> &CertifiedRankTwoDeck {
+        &self.deck
+    }
+
+    /// The untransformed `Torus` entity, for `subs(u, v)` evaluation.
+    pub fn entity(&self) -> &Torus {
+        &self.entity
+    }
+
+    /// The placement transform, for `transform_point(torus.subs(u, v))`.
+    pub fn transform(&self) -> &Matrix4 {
+        &self.transform
+    }
+
+    /// A short stable tag, for probe records.
+    pub fn tag(&self) -> &'static str {
+        "certified_embedded_torus"
+    }
+}
+
 /// The result of reading a `Torus` structurally.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TorusIdentification {
@@ -206,11 +254,13 @@ pub fn identify_torus_world(
 ) -> TorusIdentification {
     // --- finiteness -------------------------------------------------------
     let finite = |v: f64| FiniteF64::new(v);
-    for coordinate in [center.x, center.y, center.z, large, small, axis.x, axis.y, axis.z] {
+    for coordinate in [
+        center.x, center.y, center.z, large, small, axis.x, axis.y, axis.z,
+    ] {
         if let Err(cause) = finite(coordinate) {
-            return TorusIdentification::NotATorus(TorusIdentificationFailure::NonFiniteCoordinate {
-                cause,
-            });
+            return TorusIdentification::NotATorus(
+                TorusIdentificationFailure::NonFiniteCoordinate { cause },
+            );
         }
     }
 

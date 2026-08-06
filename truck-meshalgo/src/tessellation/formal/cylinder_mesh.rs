@@ -31,7 +31,7 @@ use super::cylinder::CylinderSchema;
 use super::cylinder_arrangement::CertifiedCylinderDisk;
 use super::planar_slice::{
     certified_polygonal_region, final_validity, triangulate, CertifiedPolygonalRegion,
-    FinalValidityReport, Rank0Displacement, Rank0DevelopedBoundary, SliceExit, TriangulatedRegion,
+    FinalValidityReport, Rank0DevelopedBoundary, Rank0Displacement, SliceExit, TriangulatedRegion,
 };
 use truck_geometry::prelude::{Point2, Point3, Vector3};
 
@@ -107,18 +107,18 @@ pub fn lift_to_cylinder(mesh: &TriangulatedRegion, schema: &CylinderSchema) -> V
 
 fn point_on_cylinder(schema: &CylinderSchema, axial: f64, angular: f64) -> Point3 {
     let radius = schema.radius().get();
-    let radial: Vector3 = radius * angular.cos() * schema.radial_x()
-        + radius * angular.sin() * schema.radial_y();
+    let radial: Vector3 =
+        radius * angular.cos() * schema.radial_x() + radius * angular.sin() * schema.radial_y();
     schema.origin() + axial * schema.axis() + radial
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::super::super::source_evidence::{BoundId, EdgeUseId};
+    use super::super::curve_witness::{axial_line_witness, circumferential_arc_witness};
     use super::super::cylinder::{identify_cylinder, CylinderIdentification};
     use super::super::cylinder_arrangement::{certify_cylinder_disk, placed_occurrences};
-    use super::super::curve_witness::{axial_line_witness, circumferential_arc_witness};
-    use super::super::super::source_evidence::{BoundId, EdgeUseId};
+    use super::*;
     use truck_geometry::prelude::{InnerSpace, Line, RevolutedCurve};
     use truck_topology::compress::OuterBoundStanding;
 
@@ -183,7 +183,10 @@ mod tests {
             .expect("a narrow quad's disk triangulates and validates");
 
         assert_eq!(mesh.validity.triangles, mesh.developed.triangles.len());
-        assert_eq!(mesh.developed.triangles.len() + 2, mesh.developed.vertices.len());
+        assert_eq!(
+            mesh.developed.triangles.len() + 2,
+            mesh.developed.vertices.len()
+        );
         assert_eq!(mesh.physical_vertices.len(), mesh.developed.vertices.len());
 
         let radius = schema.radius().get();

@@ -45,13 +45,13 @@
 //! source traversal reversal, subdivision depth and common deck translation.
 //! It never derives from rounded interval endpoints or a representative point.
 
+use super::super::source_evidence::SourceVertexKey;
 use super::curve2d::{CurveOccurrenceProvenance, DirectedCircularArc2, LineSegment2};
 use super::exact::{exact_dot2, exact_sq_dist, CertifiedInterval, CertifiedSign, Expansion};
 use super::intersection::ParameterEnclosure;
 use super::outcome::ResourceOperation;
 use super::quotient::{CertifiedDeckLabel, DeckContext, DeckLabel, DeckLabelError};
 use super::span::{CurveSpan2, SpanId};
-use super::super::source_evidence::SourceVertexKey;
 use truck_geometry::prelude::Point2;
 
 /// Why a CommonArc could not be certified. Every variant is a distinct typed
@@ -217,10 +217,7 @@ impl CertifiedAffineMap {
     /// The certified image of an interval, outward-rounded. `None` when the
     /// image is non-finite (operational failure).
     pub fn eval(&self, t: &ParameterEnclosure) -> Option<ParameterEnclosure> {
-        let t_iv = CertifiedInterval {
-            lo: t.lo,
-            hi: t.hi,
-        };
+        let t_iv = CertifiedInterval { lo: t.lo, hi: t.hi };
         let r = self.slope.mul(&t_iv).add(&self.intercept);
         if r.is_finite() {
             Some(ParameterEnclosure { lo: r.lo, hi: r.hi })
@@ -350,7 +347,8 @@ impl CertifiedParameterCorrespondence {
     /// The certified orientation of this participant along the shared support.
     pub fn orientation(&self) -> Result<OrientationAlongSupport, CommonArcError> {
         let map = self.to_canonical_map()?;
-        map.orientation().ok_or(CommonArcError::UnresolvedCorrespondence)
+        map.orientation()
+            .ok_or(CommonArcError::UnresolvedCorrespondence)
     }
 
     /// Whether the correspondence map is invertible (certified nonzero slope).
@@ -664,14 +662,8 @@ impl PartialEq for CommonArcBoundaryKey {
                 },
             ) => a == b && sa == sb && pa == pb && la == lb,
             (
-                Self::MappedEndpoint {
-                    span: a,
-                    side: sa,
-                },
-                Self::MappedEndpoint {
-                    span: b,
-                    side: sb,
-                },
+                Self::MappedEndpoint { span: a, side: sa },
+                Self::MappedEndpoint { span: b, side: sb },
             ) => a == b && sa == sb,
             _ => false,
         }
@@ -961,11 +953,7 @@ impl CommonArc2 {
             _ => {}
         }
         // 2. multiplicities positive.
-        if self
-            .participants
-            .iter()
-            .any(|p| p.multiplicity == 0)
-        {
+        if self.participants.iter().any(|p| p.multiplicity == 0) {
             return Err(CommonArcError::NonPositiveMultiplicity);
         }
         // 3. participant intervals have positive certified extent.
@@ -1037,7 +1025,8 @@ impl CommonArc2 {
                 ..
             } = &b.key
             {
-                lift.validate_for(self.deck_context).map_err(CommonArcError::Deck)?;
+                lift.validate_for(self.deck_context)
+                    .map_err(CommonArcError::Deck)?;
             }
         }
         // 6. relative deck displacement matches the participants.
@@ -1073,8 +1062,9 @@ impl CommonArc2 {
         // 9. orientation agrees with the map.
         for participant in &self.participants {
             let map = participant.correspondence.to_canonical_map()?;
-            let map_orientation =
-                map.orientation().ok_or(CommonArcError::UnresolvedCorrespondence)?;
+            let map_orientation = map
+                .orientation()
+                .ok_or(CommonArcError::UnresolvedCorrespondence)?;
             if map_orientation != participant.orientation {
                 return Err(CommonArcError::InconsistentOrientation);
             }
@@ -1110,29 +1100,21 @@ impl CommonArc2 {
         match (&self.support.identity, &self.certificate.support) {
             (
                 CommonSupportIdentity::SameSourceOccurrence(span),
-                SupportIdentityCertificate::IdenticalSourceProvenance {
-                    span_id: certified,
-                },
+                SupportIdentityCertificate::IdenticalSourceProvenance { span_id: certified },
             ) if span == certified => {}
             (
                 CommonSupportIdentity::IdenticalAnalyticSupport {
                     class: AnalyticSupportClass::Line,
                     anchor,
                 },
-                SupportIdentityCertificate::CertifiedCollinearLines {
-                    first,
-                    second: _,
-                },
+                SupportIdentityCertificate::CertifiedCollinearLines { first, second: _ },
             ) if anchor == first => {}
             (
                 CommonSupportIdentity::IdenticalAnalyticSupport {
                     class: AnalyticSupportClass::Circle,
                     anchor,
                 },
-                SupportIdentityCertificate::CertifiedEqualCircles {
-                    first,
-                    second: _,
-                },
+                SupportIdentityCertificate::CertifiedEqualCircles { first, second: _ },
             ) if anchor == first => {}
             _ => return Err(CommonArcError::InconsistentSupportCertificate),
         }
@@ -1184,14 +1166,14 @@ fn assemble(
     if !map_a.slope_is_nonzero() || !map_b.slope_is_nonzero() {
         return Err(CommonArcError::NonInvertibleCorrespondence);
     }
-    let inverse_a = map_a.inverse().ok_or(CommonArcError::NonInvertibleCorrespondence)?;
-    let inverse_b = map_b.inverse().ok_or(CommonArcError::NonInvertibleCorrespondence)?;
-    let interval_a = inverse_a
-        .eval(&overlap)
-        .ok_or(CommonArcError::NonFinite)?;
-    let interval_b = inverse_b
-        .eval(&overlap)
-        .ok_or(CommonArcError::NonFinite)?;
+    let inverse_a = map_a
+        .inverse()
+        .ok_or(CommonArcError::NonInvertibleCorrespondence)?;
+    let inverse_b = map_b
+        .inverse()
+        .ok_or(CommonArcError::NonInvertibleCorrespondence)?;
+    let interval_a = inverse_a.eval(&overlap).ok_or(CommonArcError::NonFinite)?;
+    let interval_b = inverse_b.eval(&overlap).ok_or(CommonArcError::NonFinite)?;
     if interval_a.lo >= interval_a.hi || interval_b.lo >= interval_b.hi {
         return Err(CommonArcError::ZeroExtentParticipant);
     }
@@ -1257,7 +1239,10 @@ fn assemble(
     );
     let certificate = CommonArcCertificate {
         support: support.certificate,
-        correspondence: [participants[0].correspondence, participants[1].correspondence],
+        correspondence: [
+            participants[0].correspondence,
+            participants[1].correspondence,
+        ],
         // Derived from the exact expansion sign passed by the caller.
         boundaries_certified_distinct,
     };
@@ -1331,10 +1316,7 @@ pub fn common_arc_for_pair(
 /// the two source-axis intervals. Subdivision inherits the occurrence's span
 /// identity and lift context; it never mints a new common-support claim from
 /// coordinates.
-fn provenance_common_arc(
-    lhs: &CurveSpan2,
-    rhs: &CurveSpan2,
-) -> Result<CommonArc2, CommonArcError> {
+fn provenance_common_arc(lhs: &CurveSpan2, rhs: &CurveSpan2) -> Result<CommonArc2, CommonArcError> {
     let span_id = lhs.span_id();
     let (first, second) = if lhs.span_id() <= rhs.span_id() {
         (lhs, rhs)
@@ -1490,8 +1472,8 @@ fn orient_three(a: Point2, b: Point2, c: Point2) -> Expansion {
 /// This is certified support equality over the declared `f64` coordinates —
 /// never an epsilon cross-product, never approximate collinearity.
 fn certified_collinear(lhs: &LineSegment2, rhs: &LineSegment2) -> bool {
-    let parallel = cross_of_segments(lhs.start, lhs.end, rhs.start, rhs.end).sign()
-        == CertifiedSign::Zero;
+    let parallel =
+        cross_of_segments(lhs.start, lhs.end, rhs.start, rhs.end).sign() == CertifiedSign::Zero;
     let on_line = orient_three(lhs.start, lhs.end, rhs.start).sign() == CertifiedSign::Zero;
     parallel && on_line
 }
@@ -1507,7 +1489,10 @@ fn certified_collinear(lhs: &LineSegment2, rhs: &LineSegment2) -> bool {
 /// vertices, so the canonical orientation cannot be certified from provenance
 /// alone.
 fn source_forward_axis(line: &LineSegment2) -> Option<(Point2, Point2)> {
-    match (line.provenance.start_vertex_id, line.provenance.end_vertex_id) {
+    match (
+        line.provenance.start_vertex_id,
+        line.provenance.end_vertex_id,
+    ) {
         (SourceVertexKey::ShellVertex(a), SourceVertexKey::ShellVertex(b)) if a != b => {
             if a < b {
                 Some((line.start, line.end))
@@ -1524,7 +1509,10 @@ fn source_forward_axis(line: &LineSegment2) -> Option<(Point2, Point2)> {
 /// vertex to its greater, `Opposed` otherwise. `None` when the provenance does
 /// not identify both vertices.
 fn occurrence_source_orientation(line: &LineSegment2) -> Option<OrientationAlongSupport> {
-    match (line.provenance.start_vertex_id, line.provenance.end_vertex_id) {
+    match (
+        line.provenance.start_vertex_id,
+        line.provenance.end_vertex_id,
+    ) {
         (SourceVertexKey::ShellVertex(a), SourceVertexKey::ShellVertex(b)) if a != b => {
             Some(if a < b {
                 OrientationAlongSupport::Codirected
@@ -1584,7 +1572,10 @@ fn line_projection_enclosure(
     let den_iv = CertifiedInterval::from_expansion(&den);
     let iv = num_iv.div(&den_iv).ok_or(CommonArcError::NonFinite)?;
     if iv.is_finite() {
-        Ok(ParameterEnclosure { lo: iv.lo, hi: iv.hi })
+        Ok(ParameterEnclosure {
+            lo: iv.lo,
+            hi: iv.hi,
+        })
     } else {
         Err(CommonArcError::NonFinite)
     }
@@ -1686,16 +1677,16 @@ fn analytic_line_common_arc(
     let axis_ctx = CanonicalSourceAxis { span_id: anchor };
     // The canonical occurrence reads the axis directly: Identity when it
     // traverses source-forward, Reversal when source-backward.
-    let orientation_a = occurrence_source_orientation(line1)
-        .unwrap_or(OrientationAlongSupport::Codirected);
+    let orientation_a =
+        occurrence_source_orientation(line1).unwrap_or(OrientationAlongSupport::Codirected);
     let corr_a = correspondence_for_orientation(axis_ctx, orientation_a, 0.0, 1.0)?;
     let (corr_b, orientation_b, boundaries, extent_sign) = if same_occurrence {
         // Two pieces of one authoritative occurrence share the source axis; the
         // second reads it in its own authoritative direction. The overlap is
         // the whole canonical axis `[0, 1]`, bounded by the axis's own
         // authoritative source endpoints.
-        let orientation_b = occurrence_source_orientation(line2)
-            .unwrap_or(OrientationAlongSupport::Codirected);
+        let orientation_b =
+            occurrence_source_orientation(line2).unwrap_or(OrientationAlongSupport::Codirected);
         let corr_b = correspondence_for_orientation(axis_ctx, orientation_b, 0.0, 1.0)?;
         let boundaries = CommonArcBoundaries {
             start: CommonArcBoundary {
@@ -1729,9 +1720,7 @@ fn analytic_line_common_arc(
         let (lower_pt, upper_pt) = match diff.sign() {
             CertifiedSign::Positive => (line2.end, line2.start), // λ(start) > λ(end)
             CertifiedSign::Negative => (line2.start, line2.end), // λ(start) < λ(end)
-            CertifiedSign::Zero => {
-                return Err(CommonArcError::NonInvertibleCorrespondence)
-            }
+            CertifiedSign::Zero => return Err(CommonArcError::NonInvertibleCorrespondence),
         };
         let den = proj_den(&axis);
         // Lower boundary: max(axis.Lower@0, other.Lower@λ(lower_pt)).
@@ -1804,8 +1793,14 @@ fn analytic_line_common_arc(
         let extent_num = upper_num.merge(&lower_num.negate());
         let extent_sign = extent_num.sign();
         let boundaries = CommonArcBoundaries {
-            start: CommonArcBoundary { key: lower_key, enclosure: lower_enc },
-            end: CommonArcBoundary { key: upper_key, enclosure: upper_enc },
+            start: CommonArcBoundary {
+                key: lower_key,
+                enclosure: lower_enc,
+            },
+            end: CommonArcBoundary {
+                key: upper_key,
+                enclosure: upper_enc,
+            },
         };
         let map = line_axis_map(line2, &axis)?;
         let orientation_b = map
@@ -1851,7 +1846,10 @@ fn same_source_occurrence(a: &CurveSpan2, b: &CurveSpan2) -> bool {
 
 /// The exact squared radius of a support circle.
 fn radius_squared(arc: &DirectedCircularArc2) -> Expansion {
-    exact_dot2([arc.cos_basis.x, arc.cos_basis.y], [arc.cos_basis.x, arc.cos_basis.y])
+    exact_dot2(
+        [arc.cos_basis.x, arc.cos_basis.y],
+        [arc.cos_basis.x, arc.cos_basis.y],
+    )
 }
 
 /// Whether two circular arcs share a certified identical support and the same
@@ -1861,13 +1859,10 @@ fn radius_squared(arc: &DirectedCircularArc2) -> Expansion {
 /// No approximate center/radius equality and no principal-angle phase
 /// recovery: a different basis is an unresolved phase, not a certified
 /// correspondence.
-fn certified_equal_circle_support(
-    lhs: &DirectedCircularArc2,
-    rhs: &DirectedCircularArc2,
-) -> bool {
-    let center_equal =
-        exact_sq_dist([lhs.center.x, lhs.center.y], [rhs.center.x, rhs.center.y]).sign()
-            == CertifiedSign::Zero;
+fn certified_equal_circle_support(lhs: &DirectedCircularArc2, rhs: &DirectedCircularArc2) -> bool {
+    let center_equal = exact_sq_dist([lhs.center.x, lhs.center.y], [rhs.center.x, rhs.center.y])
+        .sign()
+        == CertifiedSign::Zero;
     let radius_equal = radius_squared(lhs)
         .merge(&radius_squared(rhs).negate())
         .sign()
@@ -1937,9 +1932,7 @@ fn analytic_circle_common_arc(
                 let upper_occ = if a_hi <= b_hi { anchor } else { other_span };
                 (lo, hi, CertifiedSign::Positive, lower_occ, upper_occ)
             }
-            CertifiedIntervalOverlap::Unresolved => {
-                return Err(CommonArcError::UnresolvedOverlap)
-            }
+            CertifiedIntervalOverlap::Unresolved => return Err(CommonArcError::UnresolvedOverlap),
         };
     // Same parameterization: both participants read the shared t-axis, so a
     // Codirected traversal is identity and an Opposed traversal is reversal in
@@ -2023,11 +2016,11 @@ fn correspondence_for_orientation(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::super::super::source_evidence::{BoundId, EdgeUseId, SourceVertexKey};
     use super::super::bezier::RationalBezierSpan2;
     use super::super::curve2d::{SourceEdgeId, SourceEntityId, SourceFaceId};
     use super::super::quotient::{AmbientLatticeId, DeckRank};
-    use super::super::super::source_evidence::{BoundId, EdgeUseId, SourceVertexKey};
+    use super::*;
     use truck_geometry::prelude::{Point2, Vector2};
 
     const PI: f64 = std::f64::consts::PI;
@@ -2153,8 +2146,7 @@ mod tests {
             CommonSupportBasis::IdenticalAnalyticSupport
         );
         assert!(
-            repr(&arc.boundaries.start) > 0.4
-                && repr(&arc.boundaries.start) < 0.6,
+            repr(&arc.boundaries.start) > 0.4 && repr(&arc.boundaries.start) < 0.6,
             "the overlap starts at the second span's mapped start (~0.5), got {:?}",
             repr(&arc.boundaries.start)
         );
@@ -2172,14 +2164,10 @@ mod tests {
         let b = line_span(Point2::new(0.5, 0.0), Point2::new(1.5, 0.0), 1);
         let arc = pair(&a, &b);
         assert!(
-            repr(&arc.boundaries.start) > 0.2
-                && repr(&arc.boundaries.start) < 0.3,
+            repr(&arc.boundaries.start) > 0.2 && repr(&arc.boundaries.start) < 0.3,
             "contained span maps to [0.25, 0.75] on the canonical axis"
         );
-        assert!(
-            repr(&arc.boundaries.end) > 0.7
-                && repr(&arc.boundaries.end) < 0.8
-        );
+        assert!(repr(&arc.boundaries.end) > 0.7 && repr(&arc.boundaries.end) < 0.8);
         arc.validate().unwrap();
     }
 
@@ -2260,10 +2248,7 @@ mod tests {
         let a = arc_span(Point2::new(0.0, 0.0), 1.0, 0.0, PI / 2.0, 0);
         let b = arc_span(Point2::new(0.0, 0.0), 1.0, PI / 2.0, 0.0, 1);
         let arc = pair(&a, &b);
-        assert_eq!(
-            arc.identity.orientation,
-            OrientationAlongSupport::Opposed
-        );
+        assert_eq!(arc.identity.orientation, OrientationAlongSupport::Opposed);
         arc.validate().unwrap();
     }
 
@@ -2395,10 +2380,7 @@ mod tests {
         let arc = pair(&child, &rev);
         assert_eq!(repr(&arc.boundaries.start), 0.0);
         assert_eq!(repr(&arc.boundaries.end), 0.5);
-        assert_eq!(
-            arc.identity.orientation,
-            OrientationAlongSupport::Opposed
-        );
+        assert_eq!(arc.identity.orientation, OrientationAlongSupport::Opposed);
         arc.validate().unwrap();
     }
 
@@ -2524,10 +2506,8 @@ mod tests {
         let base = pair(&a, &b);
         // A rank-1 label in the rank-0 context: typed RankMismatch.
         let mut bad = base.clone();
-        bad.participants[0].deck = CertifiedDeckLabel::certified_placement(
-            rank1_context(),
-            DeckLabel::rank1(1),
-        );
+        bad.participants[0].deck =
+            CertifiedDeckLabel::certified_placement(rank1_context(), DeckLabel::rank1(1));
         assert!(matches!(
             bad.validate(),
             Err(CommonArcError::Deck(DeckLabelError::RankMismatch { .. }))
@@ -2602,11 +2582,7 @@ mod tests {
         // keeping `edge_use_id` and `source_edge_id`, so `SpanId` is preserved.
         let span = bezier_span(0);
         let rev = CurveSpan2::RationalBezier(parabola(0).reverse_occurrence());
-        assert_eq!(
-            span.span_id(),
-            rev.span_id(),
-            "reversal preserves SpanId"
-        );
+        assert_eq!(span.span_id(), rev.span_id(), "reversal preserves SpanId");
         // Subdivision: `RationalBezierSpan2::subdivide` copies provenance
         // verbatim, so a child carries the parent's SpanId.
         let (left, _right) = parabola(0).subdivide(0.5);
@@ -2633,12 +2609,10 @@ mod tests {
         let rev = span.reverse_occurrence();
         // The lower source-domain bound is `min(domain.0, domain.1)`; reversal
         // swaps the ordered pair but not the min, so the key is identical.
-        let lo_forward = AuthoritativeParameterKey::from_authoritative(
-            span.domain().0.min(span.domain().1),
-        );
-        let lo_reversed = AuthoritativeParameterKey::from_authoritative(
-            rev.domain().0.min(rev.domain().1),
-        );
+        let lo_forward =
+            AuthoritativeParameterKey::from_authoritative(span.domain().0.min(span.domain().1));
+        let lo_reversed =
+            AuthoritativeParameterKey::from_authoritative(rev.domain().0.min(rev.domain().1));
         assert_eq!(lo_forward, lo_reversed);
     }
 
@@ -2648,12 +2622,10 @@ mod tests {
         let (left, _right) = parent.subdivide(0.5);
         // The source start (0.0) is the lower bound of both parent and left
         // child; both retain it verbatim, so the key is identical.
-        let parent_lo = AuthoritativeParameterKey::from_authoritative(
-            parent.domain().0.min(parent.domain().1),
-        );
-        let child_lo = AuthoritativeParameterKey::from_authoritative(
-            left.domain().0.min(left.domain().1),
-        );
+        let parent_lo =
+            AuthoritativeParameterKey::from_authoritative(parent.domain().0.min(parent.domain().1));
+        let child_lo =
+            AuthoritativeParameterKey::from_authoritative(left.domain().0.min(left.domain().1));
         assert_eq!(parent_lo, child_lo);
     }
 
@@ -2666,16 +2638,14 @@ mod tests {
         // left2's upper bound is the split 0.75 (retained in its domain.1).
         // Each is the authoritative value the subdivision stored, not a
         // recomputed projection.
-        let split_025 = AuthoritativeParameterKey::from_authoritative(
-            right.domain().0.min(right.domain().1),
-        );
+        let split_025 =
+            AuthoritativeParameterKey::from_authoritative(right.domain().0.min(right.domain().1));
         assert_eq!(
             split_025,
             AuthoritativeParameterKey::from_authoritative(0.25)
         );
-        let split_075 = AuthoritativeParameterKey::from_authoritative(
-            left2.domain().0.max(left2.domain().1),
-        );
+        let split_075 =
+            AuthoritativeParameterKey::from_authoritative(left2.domain().0.max(left2.domain().1));
         assert_eq!(
             split_075,
             AuthoritativeParameterKey::from_authoritative(0.75)

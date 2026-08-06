@@ -109,8 +109,14 @@ fn union_cover(a: CertifiedDeckInterval, b: CertifiedDeckInterval) -> CertifiedD
         }
         (CertifiedDeckInterval::Empty, other) | (other, CertifiedDeckInterval::Empty) => other,
         (
-            CertifiedDeckInterval::Finite { min: a_min, max: a_max },
-            CertifiedDeckInterval::Finite { min: b_min, max: b_max },
+            CertifiedDeckInterval::Finite {
+                min: a_min,
+                max: a_max,
+            },
+            CertifiedDeckInterval::Finite {
+                min: b_min,
+                max: b_max,
+            },
         ) => CertifiedDeckInterval::Finite {
             min: a_min.min(b_min),
             max: a_max.max(b_max),
@@ -239,9 +245,9 @@ pub fn build_working_cover(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::cylinder::{identify_cylinder, CylinderIdentification};
     use super::super::curve_witness::{axial_line_witness, circumferential_arc_witness};
+    use super::super::cylinder::{identify_cylinder, CylinderIdentification};
+    use super::*;
     use truck_geometry::prelude::{Line, Point3, RevolutedCurve, Vector3};
 
     fn z_cylinder(radius: f64, h: f64) -> super::super::cylinder::CylinderSchema {
@@ -316,7 +322,10 @@ mod tests {
 
         let exit = build_working_cover(&witnesses, &placements, schema.deck_generator(), starved)
             .expect_err("zero budget cannot materialize even one copy");
-        assert!(matches!(exit, CylinderCoverExit::CoverBudgetExceeded { .. }));
+        assert!(matches!(
+            exit,
+            CylinderCoverExit::CoverBudgetExceeded { .. }
+        ));
         assert_eq!(exit.category(), SliceCategory::OperationalFailure);
     }
 

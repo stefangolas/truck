@@ -37,11 +37,11 @@
 //! grants no authority and a production caller must not use it as one.
 
 use super::super::source_evidence::{EdgeUseId, SourceVertexKey};
-use super::cylinder::CylinderSchema;
 use super::curve_witness::{
     axial_line_witness, circumferential_arc_witness, identify_source_curve_witness,
     CurveOnCylinderWitness, SourceCurveFamily, WitnessFailure,
 };
+use super::cylinder::CylinderSchema;
 use super::deck::{DeckGenerator, DeckOperationalFailure};
 use super::planar_slice::{RegularClosedTraversal, SliceCategory};
 use super::rank1_annulus::{propagate_deck_placements, DeckJoinFailure, DeckPlacementWalk};
@@ -136,9 +136,7 @@ impl From<DeckJoinFailure> for CylinderLiftExit {
             DeckJoinFailure::MultipleCompatibleIntegers { join_index } => {
                 Self::JoinMultipleCompatibleIntegers { join_index }
             }
-            DeckJoinFailure::Indeterminate { join_index } => {
-                Self::JoinIndeterminate { join_index }
-            }
+            DeckJoinFailure::Indeterminate { join_index } => Self::JoinIndeterminate { join_index },
             DeckJoinFailure::OperationalFailure {
                 join_index,
                 failure,
@@ -377,7 +375,6 @@ pub fn propagate_and_classify_holonomy(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::super::source_evidence::{
         BoundId, ErasedOrientationMechanism, OrientationEvidence, OrientationOrigin,
         SourceBoundInput, SourceEdgeOrientationEvidence, SourceEdgeUseInput, SourceFaceInput,
@@ -390,6 +387,7 @@ mod tests {
     use super::super::cylinder_mesh::certify_cylinder_mesh;
     use super::super::deck::DeckBudget;
     use super::super::support::identify_line_segment;
+    use super::*;
     use truck_geometry::prelude::{InnerSpace, Line, RevolutedCurve, Vector3};
     use truck_topology::compress::OuterBoundStanding;
 
@@ -452,7 +450,10 @@ mod tests {
         let input = SourceFaceInput {
             source_face_id: Some(99),
             declared_face_index: 0,
-            bounds: vec![SourceBoundInput::EdgeUses { id: BoundId(0), edge_uses }],
+            bounds: vec![SourceBoundInput::EdgeUses {
+                id: BoundId(0),
+                edge_uses,
+            }],
             orientation: SourceFaceOrientationEvidence {
                 face_use_orientation: OrientationEvidence::Missing,
                 face_surface_same_sense: OrientationEvidence::Missing,
@@ -481,9 +482,13 @@ mod tests {
             on_cylinder(&schema, 3.0, 0.2),
         ];
         let specs = vec![
-            WitnessSpec::CircumferentialArc { declared_sweep: 1.2 },
+            WitnessSpec::CircumferentialArc {
+                declared_sweep: 1.2,
+            },
             WitnessSpec::AxialLine,
-            WitnessSpec::CircumferentialArc { declared_sweep: -1.2 },
+            WitnessSpec::CircumferentialArc {
+                declared_sweep: -1.2,
+            },
             WitnessSpec::AxialLine,
         ];
         let (input, positions) = quad_face(&points);
@@ -535,9 +540,13 @@ mod tests {
             on_cylinder(&schema, 3.0, 3.0),
         ];
         let specs = vec![
-            WitnessSpec::CircumferentialArc { declared_sweep: 0.5 },
+            WitnessSpec::CircumferentialArc {
+                declared_sweep: 0.5,
+            },
             WitnessSpec::AxialLine,
-            WitnessSpec::CircumferentialArc { declared_sweep: -0.5 },
+            WitnessSpec::CircumferentialArc {
+                declared_sweep: -0.5,
+            },
             WitnessSpec::AxialLine,
         ];
         let (input, positions) = quad_face(&points);

@@ -582,11 +582,8 @@ pub fn develop_complete_cone_parallel(
     family_of: &impl Fn(EdgeUseId) -> Option<SourceCurveFamily>,
 ) -> Result<CompleteParallel, ConicalBandExit> {
     let id = bound.id();
-    let traversal =
-        traverse_bound(bound, curves).map_err(|exit| ConicalBandExit::BoundTraversal {
-            bound: id,
-            exit,
-        })?;
+    let traversal = traverse_bound(bound, curves)
+        .map_err(|exit| ConicalBandExit::BoundTraversal { bound: id, exit })?;
     if traversal.occurrences.len() != 1 {
         return Err(ConicalBandExit::BoundNotOneOccurrence {
             bound: id,
@@ -621,10 +618,7 @@ pub fn develop_complete_cone_parallel(
         &[(witness.start, witness.end)],
         schema.deck_generator(),
     )
-    .map_err(|failure| ConicalBandExit::BoundDeckJoin {
-        bound: id,
-        failure,
-    })?;
+    .map_err(|failure| ConicalBandExit::BoundDeckJoin { bound: id, failure })?;
 
     if walk.holonomy != 1 && walk.holonomy != -1 {
         return Err(ConicalBandExit::BoundNotPrimitive {
@@ -1086,15 +1080,15 @@ pub fn certify_conical_essential_band(
         NappeRelation::Undecided => return Err(ConicalBandExit::ApexContactUndecided),
     };
 
-    let (first_is_lower, separation) =
-        match classify_cone_carriers(&first_carrier, &second_carrier) {
-            ConeCarrierRelation::DistinctCarrier {
-                first_is_lower,
-                separation,
-            } => (first_is_lower, separation),
-            ConeCarrierRelation::SameCarrier => return Err(ConicalBandExit::SameCarrier),
-            ConeCarrierRelation::Undecided => return Err(ConicalBandExit::CarrierOrderUndecided),
-        };
+    let (first_is_lower, separation) = match classify_cone_carriers(&first_carrier, &second_carrier)
+    {
+        ConeCarrierRelation::DistinctCarrier {
+            first_is_lower,
+            separation,
+        } => (first_is_lower, separation),
+        ConeCarrierRelation::SameCarrier => return Err(ConicalBandExit::SameCarrier),
+        ConeCarrierRelation::Undecided => return Err(ConicalBandExit::CarrierOrderUndecided),
+    };
 
     let (lower_boundary, upper_boundary, lower_carrier, upper_carrier) = match first_is_lower {
         true => (first, second, first_carrier, second_carrier),

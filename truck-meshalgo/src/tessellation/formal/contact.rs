@@ -51,18 +51,18 @@
 //! carries a certified [`super::span::BranchGerm`], and ARR-003 consumes
 //! germs and parameter enclosures — never representative coordinates.
 
+use super::super::source_evidence::{EdgeUseId, SourceVertexKey};
 use super::curve2d::CurveOccurrenceProvenance;
 use super::evidence::NonEmptyVec;
 use super::intersection::{
     CertifiedIntersection2, ContactKind, IntersectionIdentity, PairIntersectionResult,
-    PairUnsupported, PairUnresolved, ParameterEnclosure, ParameterLocation,
+    PairUnresolved, PairUnsupported, ParameterEnclosure, ParameterLocation,
 };
 use super::quotient::{
     CanonicalBranchSide, CanonicalIncidenceId, CertifiedDeckLabel, DeckContext, DeckLabel,
     DeckLabelError, DeckPlacementResult, DeckSignature,
 };
 use super::span::{BranchGerm, CurveSpan2, SpanId};
-use super::super::source_evidence::{EdgeUseId, SourceVertexKey};
 // The certified CommonArc substrate (GEN-001E) lives in [`super::common_arc`];
 // `contact` re-exports it so the arrangement-facing contact surface stays here.
 pub use super::common_arc::{
@@ -194,11 +194,18 @@ impl IsolatedRootKey {
     /// preserves them), so reparameterization reversal keeps the same pair.
     pub fn new(first_span_id: SpanId, second_span_id: SpanId, ordinal: u32) -> Self {
         let mut participants = [
-            IsolatedRootParticipant { span_id: first_span_id },
-            IsolatedRootParticipant { span_id: second_span_id },
+            IsolatedRootParticipant {
+                span_id: first_span_id,
+            },
+            IsolatedRootParticipant {
+                span_id: second_span_id,
+            },
         ];
         participants.sort();
-        IsolatedRootKey { participants, ordinal }
+        IsolatedRootKey {
+            participants,
+            ordinal,
+        }
     }
 }
 
@@ -478,7 +485,10 @@ impl PairContactResult {
 /// Mirrors [`IsolatedRootKey::new`]: the branch whose span is the first sorted
 /// participant is [`CanonicalBranchSide::First`]. Reversal preserves span ids,
 /// so the sides are stable under operand swap and traversal reversal.
-fn canonical_sides(first_span: SpanId, second_span: SpanId) -> (CanonicalBranchSide, CanonicalBranchSide) {
+fn canonical_sides(
+    first_span: SpanId,
+    second_span: SpanId,
+) -> (CanonicalBranchSide, CanonicalBranchSide) {
     if first_span <= second_span {
         (CanonicalBranchSide::First, CanonicalBranchSide::Second)
     } else {
@@ -648,7 +658,9 @@ pub fn label_branch_from_placement(
     let branch = event
         .branches
         .get_mut(branch_index)
-        .ok_or(DeckLabelError::NoSuchBranch { index: branch_index })?;
+        .ok_or(DeckLabelError::NoSuchBranch {
+            index: branch_index,
+        })?;
     match placement {
         DeckPlacementResult::Unique(label) => {
             branch.deck = label.validate_for(event.deck_context)?;
@@ -660,10 +672,12 @@ pub fn label_branch_from_placement(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::curve2d::{DevelopedCurve2D, LineSegment2, SourceEdgeId, SourceEntityId, SourceFaceId};
+    use super::super::super::source_evidence::{BoundId, EdgeUseId, SourceVertexKey};
+    use super::super::curve2d::{
+        DevelopedCurve2D, LineSegment2, SourceEdgeId, SourceEntityId, SourceFaceId,
+    };
     use super::super::deck::{
-        solve_axis_aligned, DeckGenerator, DevelopedAxis, DevelopedBox, DeckInterval,
+        solve_axis_aligned, DeckGenerator, DeckInterval, DevelopedAxis, DevelopedBox,
     };
     use super::super::evidence::ParameterAxis;
     use super::super::intersection::{intersect_x_monotone, IntersectionPolicy};
@@ -672,7 +686,7 @@ mod tests {
         adapt_axis_aligned_placement, certify_rank2_placement, AmbientLatticeId, DeckRank,
     };
     use super::super::xmonotone::{make_x_monotone, NumericalPolicy, XMonotonePiece2};
-    use super::super::super::source_evidence::{BoundId, EdgeUseId, SourceVertexKey};
+    use super::*;
     use truck_geometry::prelude::Point2;
 
     fn provenance_with(
@@ -766,7 +780,10 @@ mod tests {
         assert_eq!(event.crossing, CrossingClassification::Transverse);
         assert_eq!(event.branches.len(), 2, "two incident branches");
         assert!(
-            event.branches.iter().all(|br| br.germ == BranchGerm::Regular),
+            event
+                .branches
+                .iter()
+                .all(|br| br.germ == BranchGerm::Regular),
             "analytic branches are regular"
         );
         assert!(
@@ -780,10 +797,7 @@ mod tests {
             .all(|br| br.location == ParameterLocation::PieceInterior));
         // Identity is a canonical isolated root (no shared source vertex here),
         // never a point.
-        assert!(matches!(
-            event.identity,
-            EventIdentity::IsolatedRoot(_)
-        ));
+        assert!(matches!(event.identity, EventIdentity::IsolatedRoot(_)));
     }
 
     #[test]
@@ -898,7 +912,10 @@ mod tests {
         };
         // Single crossing: index 0 either way, so the identities are equal.
         // (Multi-root invariance is the GEN-001C test.)
-        assert_eq!(id_ab, id_ba, "single-root event identity is invariant under swap");
+        assert_eq!(
+            id_ab, id_ba,
+            "single-root event identity is invariant under swap"
+        );
     }
 
     // ----- GEN-001D: canonical deck gauge normalization --------------------
@@ -1030,7 +1047,11 @@ mod tests {
         assert_eq!(signature, base.deck_signature().unwrap());
         assert_eq!(
             signature.relative(),
-            &[DeckLabel::rank1(0), DeckLabel::rank1(2), DeckLabel::rank1(5)]
+            &[
+                DeckLabel::rank1(0),
+                DeckLabel::rank1(2),
+                DeckLabel::rank1(5)
+            ]
         );
     }
 
@@ -1413,9 +1434,11 @@ mod tests {
                 ),
             ],
         );
-        let generator =
-            DeckGenerator::new(DevelopedAxis::First, FiniteF64::new(std::f64::consts::TAU).unwrap())
-                .unwrap();
+        let generator = DeckGenerator::new(
+            DevelopedAxis::First,
+            FiniteF64::new(std::f64::consts::TAU).unwrap(),
+        )
+        .unwrap();
         // One full period: the certified solver says k = 1, the adapter turns it
         // into one lattice-bound rank-1 label, and the label is attached to
         // branch 1.
@@ -1423,7 +1446,8 @@ mod tests {
             first: DeckInterval::from_f64(std::f64::consts::TAU, std::f64::consts::TAU).unwrap(),
             second: DeckInterval::from_f64(0.0, 0.0).unwrap(),
         };
-        let placement = adapt_axis_aligned_placement(context, solve_axis_aligned(&generator, &one_period));
+        let placement =
+            adapt_axis_aligned_placement(context, solve_axis_aligned(&generator, &one_period));
         label_branch_from_placement(&mut event, 1, placement).unwrap();
         assert_eq!(event.branches[1].deck.get(), DeckLabel::rank1(1));
         assert_eq!(
@@ -1437,10 +1461,13 @@ mod tests {
             first: DeckInterval::from_f64(0.0, 3.0 * std::f64::consts::TAU).unwrap(),
             second: DeckInterval::from_f64(0.0, 0.0).unwrap(),
         };
-        let placement = adapt_axis_aligned_placement(context, solve_axis_aligned(&generator, &broad));
+        let placement =
+            adapt_axis_aligned_placement(context, solve_axis_aligned(&generator, &broad));
         assert!(matches!(
             label_branch_from_placement(&mut event, 1, placement),
-            Err(DeckLabelError::NonUniquePlacement(DeckPlacementResult::Ambiguous))
+            Err(DeckLabelError::NonUniquePlacement(
+                DeckPlacementResult::Ambiguous
+            ))
         ));
         assert_eq!(event.branches[1].deck.get(), DeckLabel::rank1(1));
     }
@@ -1459,7 +1486,10 @@ mod tests {
                 CertifiedDeckLabel::zero(context),
             )],
         );
-        let placement = adapt_axis_aligned_placement(context, Ok(super::super::deck::DeckSolveResult::Unique(1)));
+        let placement = adapt_axis_aligned_placement(
+            context,
+            Ok(super::super::deck::DeckSolveResult::Unique(1)),
+        );
         assert!(matches!(
             label_branch_from_placement(&mut event, 7, placement),
             Err(DeckLabelError::NoSuchBranch { index: 7 })

@@ -116,10 +116,7 @@ impl RationalBezierSpan2 {
         let control = if all_positive {
             control
         } else {
-            control
-                .iter()
-                .map(|&(x, y, w)| (-x, -y, -w))
-                .collect()
+            control.iter().map(|&(x, y, w)| (-x, -y, -w)).collect()
         };
         let degree = control.len() - 1;
         Ok(Self {
@@ -386,9 +383,9 @@ fn binomial(n: usize, k: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::curve2d::{SourceEdgeId, SourceEntityId, SourceFaceId};
     use super::super::super::source_evidence::{BoundId, EdgeUseId, SourceVertexKey};
+    use super::super::curve2d::{SourceEdgeId, SourceEntityId, SourceFaceId};
+    use super::*;
 
     fn provenance() -> CurveOccurrenceProvenance {
         CurveOccurrenceProvenance {
@@ -588,7 +585,10 @@ mod tests {
         let span_id = super::super::span::SpanId::from_occurrence(&span.provenance);
         let rev_id = super::super::span::SpanId::from_occurrence(&rev.provenance);
         assert_eq!(span_id, rev_id);
-        assert_eq!(rev.provenance.start_vertex_id, span.provenance.end_vertex_id);
+        assert_eq!(
+            rev.provenance.start_vertex_id,
+            span.provenance.end_vertex_id
+        );
     }
 
     #[test]

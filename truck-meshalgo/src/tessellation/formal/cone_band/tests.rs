@@ -74,7 +74,10 @@ fn declared_outer() -> OuterBoundStanding {
 /// reads its content — [`develop_complete_cone_parallel`] re-derives the family
 /// from the source representation — but Step 2's traversal requires one.
 fn curve_schema() -> CurveSchema {
-    identify_line_segment(&Line(Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)))
+    identify_line_segment(&Line(
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+    ))
 }
 
 /// What each bound's single edge use presents to the family reader.
@@ -110,8 +113,7 @@ impl Fixture {
         let mut bounds = Vec::new();
         for (index, presented) in bounds_presented.iter().enumerate() {
             let s = match presented {
-                Presented::CompleteCircle { s, .. }
-                | Presented::CircleWithRadius { s, .. } => *s,
+                Presented::CompleteCircle { s, .. } | Presented::CircleWithRadius { s, .. } => *s,
                 _ => 2.0 + index as f64,
             };
             // The vertex the closed edge starts and ends at, at angle zero.
@@ -161,13 +163,12 @@ impl Fixture {
                 center: schema.apex() + s * schema.axis(),
                 sweep_axis: sign * schema.axis(),
                 radius,
+                curve_orientation: true,
             };
             match self.presented[edge_use.bound.0] {
-                Presented::CompleteCircle { s, sign } => {
-                    Some(SourceCurveFamily::CompleteCircle {
-                        placement: placement(s, sign, schema.radius_at(s)),
-                    })
-                }
+                Presented::CompleteCircle { s, sign } => Some(SourceCurveFamily::CompleteCircle {
+                    placement: placement(s, sign, schema.radius_at(s)),
+                }),
                 Presented::CircleWithRadius { s, sign, radius } => {
                     Some(SourceCurveFamily::CompleteCircle {
                         placement: placement(s, sign, radius),
@@ -232,7 +233,10 @@ fn two_circles_on_one_nappe_recover_an_annular_mesh() {
     assert!(band.separation > 0.0);
     assert_eq!(band.lower_boundary.bound, BoundId(0));
     assert_eq!(band.upper_boundary.bound, BoundId(1));
-    assert_eq!(band.lower_boundary.homology + band.upper_boundary.homology, 0);
+    assert_eq!(
+        band.lower_boundary.homology + band.upper_boundary.homology,
+        0
+    );
     assert_eq!(band.lower_boundary.homology.abs(), 1);
     // The carriers keep their own radii: the fact a cylinder does not have.
     assert!((band.lower_carrier.radius - 1.0).abs() < 1e-9);
@@ -255,7 +259,10 @@ fn two_circles_on_one_nappe_recover_an_annular_mesh() {
     // it stayed off the apex.
     let schema = band.cone.schema();
     for vertex in &mesh.physical_vertices {
-        assert!(schema.radial_gap(*vertex) < 1e-6, "{vertex:?} is off the cone");
+        assert!(
+            schema.radial_gap(*vertex) < 1e-6,
+            "{vertex:?} is off the cone"
+        );
         let s = schema.generator_coordinate(*vertex);
         assert_eq!(schema.nappe_of(s), Some(Nappe::Positive));
         assert!(
@@ -274,7 +281,10 @@ fn a_band_on_the_negative_nappe_recovers_with_the_radius_order_reversed() {
         0.5,
         [
             Presented::CompleteCircle { s: -5.0, sign: 1.0 },
-            Presented::CompleteCircle { s: -2.0, sign: -1.0 },
+            Presented::CompleteCircle {
+                s: -2.0,
+                sign: -1.0,
+            },
         ],
     );
     let (band, mesh) = fixture
@@ -507,7 +517,9 @@ fn the_mesh_does_not_depend_on_which_bound_the_source_called_outer() {
             Presented::CompleteCircle { s: 5.0, sign: -1.0 },
         ],
     );
-    let (_, first) = fixture.run(declared_outer()).expect("bound 0 declared outer");
+    let (_, first) = fixture
+        .run(declared_outer())
+        .expect("bound 0 declared outer");
     let (_, second) = fixture
         .run(OuterBoundStanding::Declared {
             bound_index: 1,

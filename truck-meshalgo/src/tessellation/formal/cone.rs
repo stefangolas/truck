@@ -684,8 +684,7 @@ fn verify_angular_convention(
     // must make the cone's own half-angle with the axis, and must have a
     // component across it, which together say it is a generator direction and
     // not an angular one.
-    let generatrix_cosine =
-        generatrix_direction.dot(axis).abs() / generatrix_direction.magnitude();
+    let generatrix_cosine = generatrix_direction.dot(axis).abs() / generatrix_direction.magnitude();
     let runs_along_a_generator = |v: Vector3| {
         let magnitude = v.magnitude();
         magnitude > f64::EPSILON
@@ -725,8 +724,8 @@ fn verify_angular_convention(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::cylinder::PeriodicParameter;
+    use super::*;
 
     /// A cone about the z-axis with its apex at the origin, half-angle
     /// `atan(slope)`, whose declared generatrix runs from `z = z0` to
@@ -778,8 +777,14 @@ mod tests {
         let below = schema.point_at(-2.0, 0.7);
         assert!((schema.generator_coordinate(above) - 2.0).abs() < 1e-9);
         assert!((schema.generator_coordinate(below) + 2.0).abs() < 1e-9);
-        assert_eq!(schema.nappe_of(schema.generator_coordinate(above)), Some(Nappe::Positive));
-        assert_eq!(schema.nappe_of(schema.generator_coordinate(below)), Some(Nappe::Negative));
+        assert_eq!(
+            schema.nappe_of(schema.generator_coordinate(above)),
+            Some(Nappe::Positive)
+        );
+        assert_eq!(
+            schema.nappe_of(schema.generator_coordinate(below)),
+            Some(Nappe::Negative)
+        );
         assert_eq!(schema.generator_coordinate(schema.apex()), 0.0);
         assert_eq!(schema.nappe_of(0.0), None);
     }
@@ -826,7 +831,10 @@ mod tests {
         let mut previous = schema.angular_coordinate(revo.subs(0.3, 0.0));
         for v in [0.4_f64, 0.8, 1.2, 1.6] {
             let theta = schema.angular_coordinate(revo.subs(0.3, v));
-            assert!(theta > previous, "theta must advance with v: {theta} <= {previous}");
+            assert!(
+                theta > previous,
+                "theta must advance with v: {theta} <= {previous}"
+            );
             previous = theta;
         }
     }
@@ -863,8 +871,14 @@ mod tests {
         let schema = cone.schema();
         assert!((schema.apex() - Point3::new(0.0, 0.0, 0.0)).magnitude() < 1e-9);
         let Line(p, q) = schema.generatrix();
-        assert_eq!(schema.nappe_of(schema.generator_coordinate(p)), Some(Nappe::Negative));
-        assert_eq!(schema.nappe_of(schema.generator_coordinate(q)), Some(Nappe::Positive));
+        assert_eq!(
+            schema.nappe_of(schema.generator_coordinate(p)),
+            Some(Nappe::Negative)
+        );
+        assert_eq!(
+            schema.nappe_of(schema.generator_coordinate(q)),
+            Some(Nappe::Positive)
+        );
     }
 
     #[test]
@@ -979,11 +993,15 @@ mod tests {
         assert!((forward.schema().axis() + inverted.schema().axis()).magnitude() < 1e-12);
         let sample = forward.schema().point_at(2.0, 0.4);
         assert_eq!(
-            forward.schema().nappe_of(forward.schema().generator_coordinate(sample)),
+            forward
+                .schema()
+                .nappe_of(forward.schema().generator_coordinate(sample)),
             Some(Nappe::Positive)
         );
         assert_eq!(
-            inverted.schema().nappe_of(inverted.schema().generator_coordinate(sample)),
+            inverted
+                .schema()
+                .nappe_of(inverted.schema().generator_coordinate(sample)),
             Some(Nappe::Negative)
         );
     }

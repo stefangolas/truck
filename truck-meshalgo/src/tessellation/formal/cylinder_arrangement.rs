@@ -19,6 +19,9 @@
 //! kernel [`super::planar_holes`] already uses to relate an outer loop to its
 //! holes — rather than a new pairwise-segment implementation.
 
+#[cfg(test)]
+use super::super::source_evidence::BoundId;
+use super::super::source_evidence::{EdgeUseId, SourceVertexKey};
 use super::curve_witness::CurveOnCylinderWitness;
 use super::deck::DeckGenerator;
 use super::numeric::NonNegativeFinite;
@@ -27,9 +30,6 @@ use super::planar_slice::{
     bounded_material_region, jordan_arrangement_of, BoundedMaterialRegion, CertificateRoute,
     CertifiedPlanarCurveOccurrence, SimpleJordanArrangement, SliceCategory, SliceExit,
 };
-use super::super::source_evidence::{EdgeUseId, SourceVertexKey};
-#[cfg(test)]
-use super::super::source_evidence::BoundId;
 use truck_geometry::prelude::Point2;
 use truck_topology::compress::OuterBoundStanding;
 
@@ -93,7 +93,9 @@ impl CylinderArrangementExit {
             Self::TranslateTouches { .. } => "cylinder_translate_touches",
             Self::TranslateOverlaps { .. } => "cylinder_translate_overlaps",
             Self::TranslateDiskNotDisjoint { .. } => "cylinder_translate_disk_not_disjoint",
-            Self::TranslateContainmentUndecided { .. } => "cylinder_translate_containment_undecided",
+            Self::TranslateContainmentUndecided { .. } => {
+                "cylinder_translate_containment_undecided"
+            }
         }
     }
 }
@@ -167,7 +169,10 @@ pub fn placed_occurrences(
 /// (second developed) axis.
 fn translated_cycle(cycle: &[Point2], k: i64, generator: &DeckGenerator) -> Vec<Point2> {
     let shift = k as f64 * generator.signed_period().get();
-    cycle.iter().map(|p| Point2::new(p.x, p.y + shift)).collect()
+    cycle
+        .iter()
+        .map(|p| Point2::new(p.x, p.y + shift))
+        .collect()
 }
 
 /// Step 7 and 8. Certify the base developed boundary as a simple Jordan
@@ -203,8 +208,12 @@ pub fn certify_cylinder_disk(
         }
         let other = translated_cycle(base_cycle, k, &generator);
         match classify_components(base_cycle, &other) {
-            ComponentRelation::Cross => return Err(CylinderArrangementExit::TranslateCrosses { k }),
-            ComponentRelation::Touch => return Err(CylinderArrangementExit::TranslateTouches { k }),
+            ComponentRelation::Cross => {
+                return Err(CylinderArrangementExit::TranslateCrosses { k })
+            }
+            ComponentRelation::Touch => {
+                return Err(CylinderArrangementExit::TranslateTouches { k })
+            }
             ComponentRelation::Overlap => {
                 return Err(CylinderArrangementExit::TranslateOverlaps { k })
             }
@@ -233,9 +242,9 @@ pub fn certify_cylinder_disk(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::cylinder::{identify_cylinder, CylinderIdentification};
     use super::super::curve_witness::{axial_line_witness, circumferential_arc_witness};
+    use super::super::cylinder::{identify_cylinder, CylinderIdentification};
+    use super::*;
     use truck_geometry::prelude::{Line, Point3, RevolutedCurve, Vector3};
 
     fn z_cylinder(radius: f64, h: f64) -> super::super::cylinder::CylinderSchema {

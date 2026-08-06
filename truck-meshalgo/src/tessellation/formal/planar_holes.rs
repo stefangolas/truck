@@ -194,7 +194,10 @@ pub fn classify_bounds<'a>(
     // with one fewer hole. It may be a real collapsed `VERTEX_LOOP`, which a
     // plane cannot close, or it may be lost data; nothing here can tell.
     for bound in std::iter::once(outer).chain(inners.iter().copied()) {
-        if matches!(bound, SourceBoundInput::DegenerateEvidenceUnavailable { .. }) {
+        if matches!(
+            bound,
+            SourceBoundInput::DegenerateEvidenceUnavailable { .. }
+        ) {
             return Err(match std::ptr::eq(bound, outer) {
                 true => SliceExit::DegenerateTraversal,
                 false => SliceExit::DegenerateInnerBound,
@@ -231,8 +234,8 @@ pub fn regular_planar_multibound_traversal(
     bounds: &PlanarMultiBoundInput<'_>,
     curves: &mut impl FnMut(usize) -> CurveSchema,
 ) -> Result<RegularPlanarMultiBoundTraversal, (SliceExit, BoundRole)> {
-    let outer =
-        planar_slice::traverse_bound(bounds.outer, curves).map_err(|exit| (exit, BoundRole::Outer))?;
+    let outer = planar_slice::traverse_bound(bounds.outer, curves)
+        .map_err(|exit| (exit, BoundRole::Outer))?;
     let mut inners = Vec::with_capacity(bounds.inners.len());
     for (position, inner) in bounds.inners.iter().enumerate() {
         inners.push(
@@ -494,11 +497,8 @@ pub fn certify_region_with_holes(
         }
     }
 
-    let material_area = outer.signed_area.abs()
-        - holes
-            .iter()
-            .map(|hole| hole.signed_area.abs())
-            .sum::<f64>();
+    let material_area =
+        outer.signed_area.abs() - holes.iter().map(|hole| hole.signed_area.abs()).sum::<f64>();
     if !material_area.is_finite() || material_area <= 0.0 {
         // Containment proves this positive, so reaching here is a defect in
         // this module rather than a verdict about the face.

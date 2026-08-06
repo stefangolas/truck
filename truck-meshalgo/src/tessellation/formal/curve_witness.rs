@@ -298,7 +298,9 @@ pub fn circumferential_arc_witness(
 ) -> Result<CurveOnCylinderWitness, WitnessFailure> {
     let start = finite_point(start)?;
     let end = finite_point(end)?;
-    let sweep = FiniteF64::new(declared_sweep).map_err(|_| WitnessFailure::NonFiniteInput)?.get();
+    let sweep = FiniteF64::new(declared_sweep)
+        .map_err(|_| WitnessFailure::NonFiniteInput)?
+        .get();
     let tolerance = scaled_tolerance(schema);
 
     if radial_gap(schema, start) > tolerance {
@@ -366,6 +368,11 @@ pub struct CompleteCirclePlacement {
     pub sweep_axis: Vector3,
     /// The circle's certified radius.
     pub radius: f64,
+    /// Whether the source `Processor`'s orientation was forward (`true`) or
+    /// inverted (`false`). The `sweep_axis` already folds this; carrying the
+    /// flag separately lets a downstream consumer recover the un-oriented
+    /// normal.
+    pub curve_orientation: bool,
 }
 
 /// Certify a complete-circle witness: one occurrence that traverses an entire
@@ -576,8 +583,8 @@ fn principal_branch(theta: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::cylinder::{identify_cylinder, CylinderIdentification};
+    use super::*;
     use truck_geometry::prelude::{Line, RevolutedCurve, Vector3};
 
     fn z_cylinder(radius: f64, h: f64) -> CylinderSchema {
@@ -655,7 +662,10 @@ mod tests {
         let end = on_cylinder(&schema, 1.0, 1.4);
         let w = circumferential_arc_witness(&schema, start, end, 1.2).expect("arc witness");
         assert_eq!(w.class, WitnessClass::CircumferentialArc);
-        assert!((w.start.x - w.end.x).abs() < 1e-9, "constant axial coordinate");
+        assert!(
+            (w.start.x - w.end.x).abs() < 1e-9,
+            "constant axial coordinate"
+        );
         assert!((w.displacement().y - 1.2).abs() < 1e-9);
     }
 
@@ -840,6 +850,7 @@ mod tests {
             center: schema.origin() + 1.0 * schema.axis(),
             sweep_axis: schema.axis(),
             radius: schema.radius().get(),
+            curve_orientation: true,
         };
         let w = complete_circle_witness(&schema, placement, point, true)
             .expect("a closed circular edge on the parallel is a complete-circle witness");
@@ -865,11 +876,13 @@ mod tests {
             center,
             sweep_axis: schema.axis(),
             radius,
+            curve_orientation: true,
         };
         let reversed_axis = CompleteCirclePlacement {
             center,
             sweep_axis: -schema.axis(),
             radius,
+            curve_orientation: true,
         };
         let a = complete_circle_witness(&schema, forward_axis, point, true).expect("witness");
         let b = complete_circle_witness(&schema, reversed_axis, point, true).expect("witness");
@@ -890,6 +903,7 @@ mod tests {
             center: schema.origin() + 1.0 * schema.axis(),
             sweep_axis: -schema.axis(),
             radius: schema.radius().get(),
+            curve_orientation: true,
         };
         let forward = complete_circle_witness(&schema, placement, point, true).expect("witness");
         let reversed = complete_circle_witness(&schema, placement, point, false).expect("witness");
@@ -919,6 +933,7 @@ mod tests {
                 center: schema.origin() + 1.0 * schema.axis(),
                 sweep_axis: schema.axis(),
                 radius: schema.radius().get(),
+                curve_orientation: true,
             },
         };
         let closed = identify_source_curve_witness(&schema, family, point, point, true, true)
@@ -952,18 +967,21 @@ mod tests {
             center,
             sweep_axis: schema.radial_x(),
             radius,
+            curve_orientation: true,
         });
         // Center off the axis.
         refuse(CompleteCirclePlacement {
             center: center + 0.5 * schema.radial_x(),
             sweep_axis: schema.axis(),
             radius,
+            curve_orientation: true,
         });
         // Not the cylinder's radius.
         refuse(CompleteCirclePlacement {
             center,
             sweep_axis: schema.axis(),
             radius: radius * 0.5,
+            curve_orientation: true,
         });
         // An unnormalized sweep axis is a caller defect, and it is refused on
         // its own length rather than aliasing into the parallelism test.
@@ -971,6 +989,7 @@ mod tests {
             center,
             sweep_axis: 2.0 * schema.axis(),
             radius,
+            curve_orientation: true,
         });
     }
 
@@ -981,7 +1000,8 @@ mod tests {
         let family = SourceCurveFamily::CircularArc {
             parameter_interval: (0.2, 0.2),
         };
-        let exit = identify_source_curve_witness(&schema, family, point, point, true, true).unwrap_err();
+        let exit =
+            identify_source_curve_witness(&schema, family, point, point, true, true).unwrap_err();
         assert_eq!(exit, WitnessFailure::ZeroSweep);
         assert_eq!(exit.category(), SliceCategory::Unsupported);
     }

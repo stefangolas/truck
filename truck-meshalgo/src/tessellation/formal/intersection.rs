@@ -109,10 +109,10 @@
 //! - coincident support circles → [`PairUnsupported::CoincidentCircles`]
 //! - triple intersections (handled by the sweep, ARR-003)
 
+use super::super::source_evidence::{EdgeUseId, SourceVertexKey};
 use super::curve2d::{DirectedCircularArc2, LineSegment2};
 use super::exact::{exact_dot2, exact_sq_dist, CertifiedInterval, Expansion};
 use super::planar_slice::{classify_segments, SegmentIntersection};
-use super::super::source_evidence::{EdgeUseId, SourceVertexKey};
 use super::xmonotone::{ArcPieceEndpoint, XMonotoneCircularArc2, XMonotoneLine2, XMonotonePiece2};
 use std::f64::consts::{PI, TAU};
 use truck_geometry::prelude::{Point2, Vector2};
@@ -542,7 +542,12 @@ fn line_line(
     rhs: &XMonotoneLine2,
     intersection_index: usize,
 ) -> PairIntersectionResult {
-    match classify_segments(lhs.source.start, lhs.source.end, rhs.source.start, rhs.source.end) {
+    match classify_segments(
+        lhs.source.start,
+        lhs.source.end,
+        rhs.source.start,
+        rhs.source.end,
+    ) {
         SegmentIntersection::Empty => PairIntersectionResult::Disjoint,
         SegmentIntersection::Overlap => {
             PairIntersectionResult::Unsupported(PairUnsupported::Overlap)
@@ -651,9 +656,7 @@ fn line_line_parameter_enclosures(
             // whether or not the supports are collinear.
             Some((l, certified_line_parameter(&rhs.source, &point)?))
         }
-        (None, Some(r)) => {
-            Some((certified_line_parameter(&lhs.source, &point)?, r))
-        }
+        (None, Some(r)) => Some((certified_line_parameter(&lhs.source, &point)?, r)),
         (None, None) => {
             let a1 = lhs.source.start;
             let b1 = lhs.source.end;
@@ -671,22 +674,31 @@ fn line_line_parameter_enclosures(
             if !(s_iv.is_finite() && t_iv.is_finite()) {
                 return None;
             }
-            let s = ParameterEnclosure { lo: s_iv.lo, hi: s_iv.hi };
-            let t = ParameterEnclosure { lo: t_iv.lo, hi: t_iv.hi };
+            let s = ParameterEnclosure {
+                lo: s_iv.lo,
+                hi: s_iv.hi,
+            };
+            let t = ParameterEnclosure {
+                lo: t_iv.lo,
+                hi: t_iv.hi,
+            };
             Some((s, t))
         }
     }
 }
 
 /// The endpoint identity of a line-piece location, if it is an endpoint.
-fn line_endpoint_hint(segment: &LineSegment2, loc: ParameterLocation) -> Option<IntersectionIdentity> {
+fn line_endpoint_hint(
+    segment: &LineSegment2,
+    loc: ParameterLocation,
+) -> Option<IntersectionIdentity> {
     match loc {
-        ParameterLocation::SourceStartEndpoint => {
-            Some(IntersectionIdentity::SourceVertex(segment.provenance.start_vertex_id))
-        }
-        ParameterLocation::SourceEndEndpoint => {
-            Some(IntersectionIdentity::SourceVertex(segment.provenance.end_vertex_id))
-        }
+        ParameterLocation::SourceStartEndpoint => Some(IntersectionIdentity::SourceVertex(
+            segment.provenance.start_vertex_id,
+        )),
+        ParameterLocation::SourceEndEndpoint => Some(IntersectionIdentity::SourceVertex(
+            segment.provenance.end_vertex_id,
+        )),
         _ => None,
     }
 }
@@ -788,7 +800,13 @@ fn build_record(
         lhs_location,
         rhs_location,
         contact,
-        identity: pair_identity(lhs_identity_hint, rhs_identity_hint, lhs_edge_use, rhs_edge_use, index),
+        identity: pair_identity(
+            lhs_identity_hint,
+            rhs_identity_hint,
+            lhs_edge_use,
+            rhs_edge_use,
+            index,
+        ),
     }
 }
 
@@ -804,11 +822,10 @@ fn pair_identity(
     index: usize,
 ) -> IntersectionIdentity {
     match (lhs_hint, rhs_hint) {
-        (Some(IntersectionIdentity::SourceVertex(l)), Some(IntersectionIdentity::SourceVertex(r)))
-            if l == r =>
-        {
-            IntersectionIdentity::SourceVertex(l)
-        }
+        (
+            Some(IntersectionIdentity::SourceVertex(l)),
+            Some(IntersectionIdentity::SourceVertex(r)),
+        ) if l == r => IntersectionIdentity::SourceVertex(l),
         (Some(h), _) => h,
         (None, Some(h)) => h,
         (None, None) => IntersectionIdentity::CurveIntersection {
@@ -1049,10 +1066,13 @@ fn arc_endpoint_identity_for_line(
         // Unresolved lift or certifiably off the piece: no endpoint admission.
         _ => return None,
     };
-    let t_other = other_root.and_then(|o| match arc_parameter_for_line(arc, seg.start, dx, dy, o) {
-        Ok(ArcParameterLift::OnPiece(t)) => Some(t),
-        _ => None,
-    });
+    let t_other =
+        other_root.and_then(
+            |o| match arc_parameter_for_line(arc, seg.start, dx, dy, o) {
+                Ok(ArcParameterLift::OnPiece(t)) => Some(t),
+                _ => None,
+            },
+        );
     if attributed_to_this_arc_root(&t_root, t_other.as_ref(), &t_end) {
         Some(admission_from_endpoint(arc, role, endpoint))
     } else {
@@ -1398,12 +1418,18 @@ fn arc_parameter_for_circle(
     let r_iv = CertifiedInterval::from_expansion(&r2_exp);
     let cb = arc.source.cos_basis;
     let sb = arc.source.sin_basis;
-    let a_over_d = a_iv.div(dist_iv).ok_or(PairUnresolved::NonFiniteComputedValue)?;
-    let h_over_d = h_iv.div(dist_iv).ok_or(PairUnresolved::NonFiniteComputedValue)?;
+    let a_over_d = a_iv
+        .div(dist_iv)
+        .ok_or(PairUnresolved::NonFiniteComputedValue)?;
+    let h_over_d = h_iv
+        .div(dist_iv)
+        .ok_or(PairUnresolved::NonFiniteComputedValue)?;
     let sign_h = if side >= 0 { 1.0 } else { -1.0 };
     let sh = CertifiedInterval::point(sign_h);
-    let off_cos = CertifiedInterval::from_expansion(&dot_diff_exp(root_center, arc.source.center, cb));
-    let off_sin = CertifiedInterval::from_expansion(&dot_diff_exp(root_center, arc.source.center, sb));
+    let off_cos =
+        CertifiedInterval::from_expansion(&dot_diff_exp(root_center, arc.source.center, cb));
+    let off_sin =
+        CertifiedInterval::from_expansion(&dot_diff_exp(root_center, arc.source.center, sb));
     let dc_cos = CertifiedInterval::from_expansion(&dot_vec_exp(dcx, dcy, cb.x, cb.y));
     let dc_sin = CertifiedInterval::from_expansion(&dot_vec_exp(dcx, dcy, sb.x, sb.y));
     let rot_cos = CertifiedInterval::from_expansion(&rot_dot_exp(dcx, dcy, cb.x, cb.y));
@@ -1466,9 +1492,7 @@ fn line_piece_location(
             && separated_from_other_root(s_iv, other_root)
         {
             return PieceLocation {
-                location: LocationOnPiece::IdentifiedEndpoint(
-                    ParameterLocation::SourceEndEndpoint,
-                ),
+                location: LocationOnPiece::IdentifiedEndpoint(ParameterLocation::SourceEndEndpoint),
                 parameter: ParameterEnclosure::from_f64(1.0),
                 identity_hint: Some(IntersectionIdentity::SourceVertex(
                     line.source.provenance.end_vertex_id,
@@ -1583,7 +1607,9 @@ fn arc_location_for_line_root(
             ) {
                 Ok(ad.into_piece_location())
             } else {
-                Ok(PieceLocation::undecided(NumericalCause::EnclosureOverlapsBoundary))
+                Ok(PieceLocation::undecided(
+                    NumericalCause::EnclosureOverlapsBoundary,
+                ))
             }
         }
     }
@@ -1639,7 +1665,9 @@ fn arc_location_for_circle_root(
             ) {
                 Ok(ad.into_piece_location())
             } else {
-                Ok(PieceLocation::undecided(NumericalCause::EnclosureOverlapsBoundary))
+                Ok(PieceLocation::undecided(
+                    NumericalCause::EnclosureOverlapsBoundary,
+                ))
             }
         }
     }
@@ -1752,17 +1780,7 @@ fn combine_line_arc(
                 )
             };
             Ok(RootOutcome::Record(build_record(
-                l_param,
-                r_param,
-                l_loc,
-                r_loc,
-                l_hint,
-                r_hint,
-                l_eu,
-                r_eu,
-                point,
-                contact,
-                index,
+                l_param, r_param, l_loc, r_loc, l_hint, r_hint, l_eu, r_eu, point, contact, index,
             )))
         }
     }
@@ -1784,7 +1802,9 @@ fn process_line_root(
     let line_loc = line_piece_location(line, arc, s_iv, other_root);
     let arc_loc = arc_location_for_line_root(arc, line, dx, dy, s_iv, other_root)?;
     let point = representative_point_for_line(&line.source, s_iv);
-    combine_line_arc(line, arc, line_loc, arc_loc, line_first, point, contact, index)
+    combine_line_arc(
+        line, arc, line_loc, arc_loc, line_first, point, contact, index,
+    )
 }
 
 fn line_circle(
@@ -1864,9 +1884,7 @@ fn line_circle(
                 .merge(&dcrossw.mul_expansion(&dcrossw).negate());
             let d4_iv = CertifiedInterval::from_expansion(&d4);
             if d4_iv.lo <= 0.0 {
-                return PairIntersectionResult::Unresolved(
-                    PairUnresolved::RootsBelowF64Resolution,
-                );
+                return PairIntersectionResult::Unresolved(PairUnresolved::RootsBelowF64Resolution);
             }
             let sqrt_d = match d4_iv.sqrt() {
                 Some(s) => s,
@@ -1894,8 +1912,14 @@ fn line_circle(
                     )
                 }
             };
-            let s0_enc = ParameterEnclosure { lo: s0.lo, hi: s0.hi };
-            let s1_enc = ParameterEnclosure { lo: s1.lo, hi: s1.hi };
+            let s0_enc = ParameterEnclosure {
+                lo: s0.lo,
+                hi: s0.hi,
+            };
+            let s1_enc = ParameterEnclosure {
+                lo: s1.lo,
+                hi: s1.hi,
+            };
 
             let mut intersections = Vec::new();
             for (root, other) in [(&s0_enc, &s1_enc), (&s1_enc, &s0_enc)] {
@@ -1974,8 +1998,7 @@ fn combine_arc_arc(
         _ => {
             let lhs_pl = lhs_loc.location.recorded().unwrap();
             let rhs_pl = rhs_loc.location.recorded().unwrap();
-            if contact == ContactKind::Tangent && !arc_arc_source_join(lhs, rhs, lhs_pl, rhs_pl)
-            {
+            if contact == ContactKind::Tangent && !arc_arc_source_join(lhs, rhs, lhs_pl, rhs_pl) {
                 return Ok(RootOutcome::UnrelatedTangency);
             }
             let lhs_eu = lhs.identity.source_occurrence.edge_use_id;
@@ -2055,9 +2078,7 @@ fn circle_circle(
     let r2_iv = CertifiedInterval::from_expansion(&r2_exp);
     let dist_iv = match dist_sq_iv.sqrt() {
         Some(d) => d,
-        None => {
-            return PairIntersectionResult::Unresolved(PairUnresolved::NonFiniteComputedValue)
-        }
+        None => return PairIntersectionResult::Unresolved(PairUnresolved::NonFiniteComputedValue),
     };
     if dist_iv.lo <= 0.0 {
         return PairIntersectionResult::Unresolved(PairUnresolved::NonFiniteComputedValue);
@@ -2069,9 +2090,7 @@ fn circle_circle(
     let num = r1_iv.sub(&r2_iv).add(&dist_sq_iv);
     let a_iv = match num.div(&two_dist) {
         Some(x) => x,
-        None => {
-            return PairIntersectionResult::Unresolved(PairUnresolved::NonFiniteComputedValue)
-        }
+        None => return PairIntersectionResult::Unresolved(PairUnresolved::NonFiniteComputedValue),
     };
 
     match circle_circle_discriminant(&a_exp, &r1_exp, &r2_exp) {
@@ -2106,9 +2125,7 @@ fn circle_circle(
             // real by the discriminant sign, over the exact intervals.
             let h_sq_iv = r1_iv.sub(&a_iv.mul(&a_iv));
             if h_sq_iv.lo <= 0.0 {
-                return PairIntersectionResult::Unresolved(
-                    PairUnresolved::RootsBelowF64Resolution,
-                );
+                return PairIntersectionResult::Unresolved(PairUnresolved::RootsBelowF64Resolution);
             }
             let h_iv = match h_sq_iv.sqrt() {
                 Some(h) => h,
@@ -2161,19 +2178,23 @@ fn circle_circle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::super::super::source_evidence::{BoundId, EdgeUseId, SourceVertexKey};
     use super::super::curve2d::{
         CurveOccurrenceProvenance, DevelopedCurve2D, SourceEdgeId, SourceEntityId, SourceFaceId,
     };
-    use super::super::super::source_evidence::{BoundId, EdgeUseId, SourceVertexKey};
     use super::super::xmonotone::{
         make_x_monotone, ClosedInterval, DecompositionKind, MonotoneKind, NumericalPolicy,
         PieceIdentity,
     };
+    use super::*;
 
     const PI: f64 = std::f64::consts::PI;
 
-    fn provenance_with(index: usize, start: SourceVertexKey, end: SourceVertexKey) -> CurveOccurrenceProvenance {
+    fn provenance_with(
+        index: usize,
+        start: SourceVertexKey,
+        end: SourceVertexKey,
+    ) -> CurveOccurrenceProvenance {
         CurveOccurrenceProvenance {
             source_face_id: Some(SourceFaceId(42)),
             bound_id: BoundId(1),
@@ -2186,7 +2207,11 @@ mod tests {
     }
 
     fn provenance() -> CurveOccurrenceProvenance {
-        provenance_with(0, SourceVertexKey::ShellVertex(3), SourceVertexKey::ShellVertex(4))
+        provenance_with(
+            0,
+            SourceVertexKey::ShellVertex(3),
+            SourceVertexKey::ShellVertex(4),
+        )
     }
 
     fn line_piece(start: Point2, end: Point2) -> XMonotonePiece2 {
@@ -2268,7 +2293,10 @@ mod tests {
             Point2::new(3.0, 1.0),
             Point2::new(0.0, 0.0),
         );
-        assert_eq!(line_circle_discriminant_exp(&a, &r2, &o), CertifiedSign::Positive);
+        assert_eq!(
+            line_circle_discriminant_exp(&a, &r2, &o),
+            CertifiedSign::Positive
+        );
 
         // Tangent line x = 2 through the radius-2 circle: A = 4, O = 4, so
         // A·R² − O² = 16 − 16 = 0 exactly.
@@ -2278,7 +2306,10 @@ mod tests {
             Point2::new(2.0, 1.0),
             Point2::new(0.0, 0.0),
         );
-        assert_eq!(line_circle_discriminant_exp(&a, &r2, &o), CertifiedSign::Zero);
+        assert_eq!(
+            line_circle_discriminant_exp(&a, &r2, &o),
+            CertifiedSign::Zero
+        );
 
         // Line x = 3: A = 4, O = 6, so 16 − 36 < 0: no real intersections.
         let o = orient_exp(
@@ -2286,7 +2317,10 @@ mod tests {
             Point2::new(3.0, 1.0),
             Point2::new(0.0, 0.0),
         );
-        assert_eq!(line_circle_discriminant_exp(&a, &r2, &o), CertifiedSign::Negative);
+        assert_eq!(
+            line_circle_discriminant_exp(&a, &r2, &o),
+            CertifiedSign::Negative
+        );
     }
 
     #[test]
@@ -2295,7 +2329,10 @@ mod tests {
         // S = 2·4·4 + 2·4·4 − 16 − 16 − 16 + 2·4·4 = 48 > 0.
         let a = Expansion::from_product(2.0, 2.0);
         let r = Expansion::from_product(2.0, 2.0);
-        assert_eq!(circle_circle_discriminant(&a, &r, &r), CertifiedSign::Positive);
+        assert_eq!(
+            circle_circle_discriminant(&a, &r, &r),
+            CertifiedSign::Positive
+        );
 
         // Concentric equal: A = 0 → S = −16 − 16 + 32 = 0.
         let a0 = Expansion::zero();
@@ -2303,11 +2340,17 @@ mod tests {
 
         // A = 100, R1 = R2 = 4: S = 1600 − 10000 < 0.
         let a100 = Expansion::from_product(10.0, 10.0);
-        assert_eq!(circle_circle_discriminant(&a100, &r, &r), CertifiedSign::Negative);
+        assert_eq!(
+            circle_circle_discriminant(&a100, &r, &r),
+            CertifiedSign::Negative
+        );
 
         // A = 16, R1 = R2 = 4: S = 256 − 256 = 0 (internal tangency).
         let a16 = Expansion::from_product(4.0, 4.0);
-        assert_eq!(circle_circle_discriminant(&a16, &r, &r), CertifiedSign::Zero);
+        assert_eq!(
+            circle_circle_discriminant(&a16, &r, &r),
+            CertifiedSign::Zero
+        );
     }
 
     // -- line–line ---------------------------------------------------------
@@ -2458,8 +2501,12 @@ mod tests {
                     assert!((r - 2.0).abs() < 1e-8, "point not on circle: r={r}");
                 }
                 assert_eq!(pts[0].contact, ContactKind::Transverse);
-                assert!(pts.iter().all(|p| p.lhs_location == ParameterLocation::PieceInterior));
-                assert!(pts.iter().all(|p| p.rhs_location == ParameterLocation::PieceInterior));
+                assert!(pts
+                    .iter()
+                    .all(|p| p.lhs_location == ParameterLocation::PieceInterior));
+                assert!(pts
+                    .iter()
+                    .all(|p| p.rhs_location == ParameterLocation::PieceInterior));
             }
             other => panic!("expected two intersections, got {:?}", other.tag()),
         }
@@ -2524,9 +2571,10 @@ mod tests {
     fn two_disjoint_circles() {
         let c1 = arc_pieces(Point2::new(0.0, 0.0), 1.0, 0.0, 2.0 * PI, 0);
         let c2 = arc_pieces(Point2::new(10.0, 0.0), 1.0, 0.0, 2.0 * PI, 1);
-        let any_hit = c1.iter().zip(c2.iter()).any(|(a, b)| {
-            matches!(intersect(a, b), PairIntersectionResult::Intersections(_))
-        });
+        let any_hit = c1
+            .iter()
+            .zip(c2.iter())
+            .any(|(a, b)| matches!(intersect(a, b), PairIntersectionResult::Intersections(_)));
         assert!(!any_hit, "far circles never intersect");
     }
 
@@ -2546,7 +2594,10 @@ mod tests {
         let c2 = arc_pieces(Point2::new(0.0, 0.0), 1.0, 0.0, 2.0 * PI, 1);
         match intersect(&c1[0], &c2[0]) {
             PairIntersectionResult::Unsupported(PairUnsupported::CoincidentCircles) => {}
-            other => panic!("expected coincident-circles unsupported, got {:?}", other.tag()),
+            other => panic!(
+                "expected coincident-circles unsupported, got {:?}",
+                other.tag()
+            ),
         }
     }
 
@@ -2569,7 +2620,10 @@ mod tests {
                 }
             }
         }
-        assert!(saw_tangency, "external tangency must be unsupported tangency");
+        assert!(
+            saw_tangency,
+            "external tangency must be unsupported tangency"
+        );
     }
 
     // -- rotated basis through the certified decomposition ------------------
@@ -2587,10 +2641,15 @@ mod tests {
             sin_basis: Vector2::new(-2.0 * theta.sin(), 2.0 * theta.cos()),
             t0: 0.0,
             t1: 2.0 * PI,
-            provenance: provenance_with(0, SourceVertexKey::ShellVertex(3), SourceVertexKey::ShellVertex(4)),
+            provenance: provenance_with(
+                0,
+                SourceVertexKey::ShellVertex(3),
+                SourceVertexKey::ShellVertex(4),
+            ),
         };
         let curve = DevelopedCurve2D::CircularArc(arc);
-        let pieces = make_x_monotone(&curve, &NumericalPolicy::standard()).expect("rotated basis decomposes");
+        let pieces = make_x_monotone(&curve, &NumericalPolicy::standard())
+            .expect("rotated basis decomposes");
         let line = line_piece(Point2::new(-3.0, 1.0), Point2::new(3.0, 1.0));
         let hits = total_intersections(&pieces, &line, false);
         assert_eq!(hits.len(), 2, "a line at y=1 crosses the circle twice");
@@ -2618,10 +2677,15 @@ mod tests {
             sin_basis: Vector2::new(-2.0 * theta.sin(), 2.0 * theta.cos()),
             t0: 0.0,
             t1: 2.0 * PI,
-            provenance: provenance_with(0, SourceVertexKey::ShellVertex(3), SourceVertexKey::ShellVertex(4)),
+            provenance: provenance_with(
+                0,
+                SourceVertexKey::ShellVertex(3),
+                SourceVertexKey::ShellVertex(4),
+            ),
         };
         let curve = DevelopedCurve2D::CircularArc(arc);
-        let pieces = make_x_monotone(&curve, &NumericalPolicy::standard()).expect("rotated basis decomposes");
+        let pieces = make_x_monotone(&curve, &NumericalPolicy::standard())
+            .expect("rotated basis decomposes");
         let line = line_piece(Point2::new(-3.0, 0.0), Point2::new(3.0, 0.0));
         let mut saw_resolution = false;
         for piece in &pieces {
@@ -2640,7 +2704,10 @@ mod tests {
                 PairIntersectionResult::Disjoint | PairIntersectionResult::Unsupported(_) => {}
             }
         }
-        assert!(saw_resolution, "the diameter line must resolve or be Unresolved, never silently drop");
+        assert!(
+            saw_resolution,
+            "the diameter line must resolve or be Unresolved, never silently drop"
+        );
     }
 
     #[test]
@@ -2652,7 +2719,11 @@ mod tests {
             sin_basis: Vector2::new(-2.0 * theta.sin(), 2.0 * theta.cos()),
             t0: 0.0,
             t1: 2.0 * PI,
-            provenance: provenance_with(0, SourceVertexKey::ShellVertex(3), SourceVertexKey::ShellVertex(4)),
+            provenance: provenance_with(
+                0,
+                SourceVertexKey::ShellVertex(3),
+                SourceVertexKey::ShellVertex(4),
+            ),
         };
         let arc2 = DirectedCircularArc2 {
             center: Point2::new(2.0, 0.0),
@@ -2660,7 +2731,11 @@ mod tests {
             sin_basis: Vector2::new(0.0, 2.0),
             t0: 0.0,
             t1: 2.0 * PI,
-            provenance: provenance_with(1, SourceVertexKey::ShellVertex(5), SourceVertexKey::ShellVertex(6)),
+            provenance: provenance_with(
+                1,
+                SourceVertexKey::ShellVertex(5),
+                SourceVertexKey::ShellVertex(6),
+            ),
         };
         let pieces1 = make_x_monotone(
             &DevelopedCurve2D::CircularArc(arc1),
@@ -2678,12 +2753,16 @@ mod tests {
             for b in &pieces2 {
                 match intersect(a, b) {
                     PairIntersectionResult::Intersections(pts) => count += pts.len(),
-                    PairIntersectionResult::Unresolved(_) | PairIntersectionResult::Unsupported(_) => {}
+                    PairIntersectionResult::Unresolved(_)
+                    | PairIntersectionResult::Unsupported(_) => {}
                     PairIntersectionResult::Disjoint => {}
                 }
             }
         }
-        assert_eq!(count, 2, "two radius-2 circles at distance 2 intersect twice");
+        assert_eq!(
+            count, 2,
+            "two radius-2 circles at distance 2 intersect twice"
+        );
     }
 
     // -- exhaustive location: certified exterior is discarded, nothing else --
@@ -2828,8 +2907,14 @@ mod tests {
         // Piece [0, π]; a root at angle ≈ 4.08 rad (1.3π) is off the piece on
         // every 2π copy.
         let piece = fabricated_piece(0.0, PI);
-        let u = CertifiedInterval { lo: -0.55, hi: -0.45 };
-        let v = CertifiedInterval { lo: -0.85, hi: -0.75 };
+        let u = CertifiedInterval {
+            lo: -0.55,
+            hi: -0.45,
+        };
+        let v = CertifiedInterval {
+            lo: -0.85,
+            hi: -0.75,
+        };
         match lift(&piece, u, v) {
             Ok(ArcParameterLift::OffPiece) => {}
             other => panic!("expected OffPiece, got {other:?}"),
@@ -2872,7 +2957,10 @@ mod tests {
         // Boundary (the pair-level lift then reports Undecidable/Unresolved).
         let piece = fabricated_piece(0.0, PI);
         let u = CertifiedInterval { lo: 0.999, hi: 1.0 };
-        let v = CertifiedInterval { lo: -0.001, hi: 0.001 };
+        let v = CertifiedInterval {
+            lo: -0.001,
+            hi: 0.001,
+        };
         let t = on_piece(lift(&piece, u, v));
         assert_eq!(
             arc_parameter_membership(&piece, &t),
@@ -2893,7 +2981,10 @@ mod tests {
             t.lo >= TAU - 1e-9 && t.hi <= 3.0 * PI + 1e-9,
             "the lift must lie on the [2π, 3π] source axis, got {t:?}"
         );
-        assert!(t.contains(TAU + 0.6), "lift must contain the unwrapped 2π + 0.6");
+        assert!(
+            t.contains(TAU + 0.6),
+            "lift must contain the unwrapped 2π + 0.6"
+        );
         // And membership on that axis is Interior for this interior root.
         assert_eq!(
             arc_parameter_membership(&piece, &t),

@@ -4,13 +4,13 @@
 //! and never reach the realizer.
 
 use super::*;
-use crate::tessellation::formal::cylinder::{identify_cylinder, CylinderIdentification};
-use crate::tessellation::source_evidence::{
-    ErasedOrientationMechanism, OrientationEvidence, OrientationOrigin, SourceEdgeOrientationEvidence,
-    SourceEdgeUseInput, SourceFaceOrientationEvidence,
-};
 use crate::tessellation::formal::curve_witness::CompleteCirclePlacement;
+use crate::tessellation::formal::cylinder::{identify_cylinder, CylinderIdentification};
 use crate::tessellation::formal::support::identify_line_segment;
+use crate::tessellation::source_evidence::{
+    ErasedOrientationMechanism, OrientationEvidence, OrientationOrigin,
+    SourceEdgeOrientationEvidence, SourceEdgeUseInput, SourceFaceOrientationEvidence,
+};
 use truck_geometry::prelude::{InnerSpace, Line, RevolutedCurve, Vector3};
 
 fn z_cylinder(radius: f64, height: f64) -> CertifiedEmbeddedCylinder {
@@ -39,7 +39,13 @@ fn on_cylinder(schema: &CylinderSchema, z: f64, theta: f64) -> Point3 {
 /// vertices. Every fixture here declares the composed sense explicitly rather
 /// than leaving it erased, so the traversal stage has the authority it
 /// requires and the test exercises the band stages rather than that gate.
-fn edge_use(bound: BoundId, index: usize, edge: usize, from: usize, to: usize) -> SourceEdgeUseInput {
+fn edge_use(
+    bound: BoundId,
+    index: usize,
+    edge: usize,
+    from: usize,
+    to: usize,
+) -> SourceEdgeUseInput {
     SourceEdgeUseInput {
         id: EdgeUseId::new(bound, index),
         source_edge_index: edge,
@@ -99,11 +105,7 @@ impl Fixture {
             let base = vertices.len();
             // Two vertices half a turn apart, in the winding's own direction.
             vertices.push(on_cylinder(&schema, *level, 0.0));
-            vertices.push(on_cylinder(
-                &schema,
-                *level,
-                winding * std::f64::consts::PI,
-            ));
+            vertices.push(on_cylinder(&schema, *level, winding * std::f64::consts::PI));
             let edges = [sweeps.len(), sweeps.len() + 1];
             sweeps.push(winding * std::f64::consts::PI);
             sweeps.push(winding * std::f64::consts::PI);
@@ -208,7 +210,10 @@ impl Fixture {
 /// requires one, so the fixture supplies a real identified schema rather than
 /// an unidentified stub.
 fn curve_schema() -> CurveSchema {
-    identify_line_segment(&Line(Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)))
+    identify_line_segment(&Line(
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+    ))
 }
 
 /// The band vertical slice, end to end: two distinct essential circles on one
@@ -283,7 +288,8 @@ fn two_distinct_essential_circles_recover_an_annular_mesh() {
     let mut at_lower = 0;
     let mut at_upper = 0;
     for vertex in &mesh.developed.vertices {
-        if vertex.x >= band.lower_carrier.axial_low() && vertex.x <= band.lower_carrier.axial_high() {
+        if vertex.x >= band.lower_carrier.axial_low() && vertex.x <= band.lower_carrier.axial_high()
+        {
             at_lower += 1;
         } else if vertex.x >= band.upper_carrier.axial_low()
             && vertex.x <= band.upper_carrier.axial_high()
@@ -347,6 +353,7 @@ fn two_bounds_of_one_closed_circular_edge_each_develop_into_opposite_parallels()
             center: schema.origin() + levels[edge_use.bound.0] * schema.axis(),
             sweep_axis: sweep_axes[edge_use.bound.0],
             radius: schema.radius().get(),
+            curve_orientation: true,
         },
     };
 
@@ -444,7 +451,9 @@ fn two_coincident_complete_circles_are_the_same_carrier() {
     );
     assert_eq!(first_carrier.radius, second_carrier.radius);
     assert!(
-        first_carrier.observed_high.max(second_carrier.observed_high)
+        first_carrier
+            .observed_high
+            .max(second_carrier.observed_high)
             - first_carrier.observed_low.min(second_carrier.observed_low)
             <= first_carrier.enclosure,
         "one certified enclosure covers both complete circles"
@@ -480,7 +489,10 @@ fn two_coincident_complete_circles_are_the_same_carrier() {
         "the two bounds are written over distinct source vertices"
     );
     assert_eq!(
-        classify_carriers(&carrier_of(&a, &disjoint_schema), &carrier_of(&b, &disjoint_schema)),
+        classify_carriers(
+            &carrier_of(&a, &disjoint_schema),
+            &carrier_of(&b, &disjoint_schema)
+        ),
         CarrierRelation::SameCarrier,
         "complete circle equality is decided on the circles, not on the file"
     );
@@ -626,7 +638,10 @@ fn three_declared_outer_bounds_remain_a_source_contradiction() {
         1.0e-3,
     )
     .expect_err("three declared outer bounds are not the repaired pattern");
-    assert_eq!(exit, BandExit::Patch(SliceExit::MultipleOuterBoundsDeclared));
+    assert_eq!(
+        exit,
+        BandExit::Patch(SliceExit::MultipleOuterBoundsDeclared)
+    );
 }
 
 /// The repair is gated on the band certificate, not on the annotation. Two
