@@ -5,6 +5,7 @@
 #![allow(dead_code, unused)]
 
 use super::diagnosis;
+use super::diagnosis::ObservedClosure;
 use super::domain::lattice::AxisPeriodStatus;
 use super::domain::lattice::CertifiedLattice;
 use super::formal;
@@ -75,7 +76,79 @@ where
         .or_else(|| surface.search_parameter(point, None, 100))
         .or_else(|| surface.search_nearest_parameter(point, hint, 100))
         .or_else(|| surface.search_nearest_parameter(point, None, 100))
+        // Last, so it is reached only where every existing attempt returned
+        // `None` — which is exactly the population that becomes
+        // `BoundaryProjectionFailed`. A face that projects today projects
+        // through the identical chain and gets the identical parameter.
+        .or_else(|| by_structural_seeds(surface, point, hint))
 }
+
+/// Retry the parameter inverse from the starts the surface's own structure
+/// suggests.
+///
+/// The chain above fails as a *numerical* matter, not a geometric one: it runs
+/// a Newton iteration from a single start — a caller's hint, or the best cell
+/// of a uniform presearch grid — and a single start is not enough on a
+/// piecewise surface whose pieces the grid does not see. `search_parameter_seeds`
+/// supplies one start per knot span, so every polynomial piece gets its own
+/// attempt. Only the initialisation changes; the iteration is the same one.
+///
+/// This returns a parameter, not a verdict. A returned parameter is still
+/// subject to the caller's incidence check — a nearest point is not an
+/// incidence — so nothing is admitted here that the pipeline would not have
+/// admitted from any other start.
+fn by_structural_seeds<S>(surface: &S, point: Point3, hint: Option<(f64, f64)>) -> Option<(f64, f64)>
+where
+    S: MeshableSurface,
+{
+    if !diagnosis::spline_seed_recovery_enabled() {
+        return None;
+    }
+    let seeds = surface.search_parameter_seeds();
+    if seeds.is_empty() {
+        return None;
+    }
+    let mut best: Option<((f64, f64), f64, f64)> = None;
+    for seed in seeds {
+        let Some(uv) = surface.search_parameter(point, seed, 100) else {
+            continue;
+        };
+        let residual = surface.subs(uv.0, uv.1).distance(point);
+        // Distance from the hint, in parameter space. Among starts that
+        // converge equally well this is what keeps the boundary walk monotone:
+        // a spline can carry the same 3D point in more than one span, and
+        // taking whichever one happened to converge first would step the
+        // traversal across the domain.
+        let drift = match hint {
+            Some((u0, v0)) => (uv.0 - u0).hypot(uv.1 - v0),
+            None => 0.0,
+        };
+        let better = match best {
+            None => true,
+            Some((_, best_residual, best_drift)) => {
+                if residual < best_residual * SEED_RESIDUAL_TIE
+                    && best_residual < residual * SEED_RESIDUAL_TIE
+                {
+                    drift < best_drift
+                } else {
+                    residual < best_residual
+                }
+            }
+        };
+        if better {
+            best = Some((uv, residual, drift));
+        }
+    }
+    best.map(|(uv, _, _)| uv)
+}
+
+/// Within this factor two seeds' residuals are the same answer, and the choice
+/// between them is made on traversal continuity instead.
+///
+/// Both are converged solutions of the same equation; their residuals differ
+/// only by where the iteration stopped. Comparing them exactly would let
+/// floating-point noise decide which span the boundary walk continues in.
+const SEED_RESIDUAL_TIE: f64 = 1.0 + 1.0e-6;
 
 /// Tessellates faces
 #[cfg(not(target_arch = "wasm32"))]
@@ -615,6 +688,12 @@ where
     // structurally, which is what the census reads — so the log is now opt-in
     // behind its own probe rather than being the only channel.
     let recovery_log = std::env::var_os("TRUCK_PROBE_RECOVERY").is_some();
+    // The deck-consistent two-loop join. Unlike the routes above it does not
+    // build a mesh of its own: it rebuilds the *same* boundary with the second
+    // loop traversed in the direction that satisfies `Σδ = 0`, and re-runs the
+    // ordinary tessellator on it. So it inherits every check the legacy path
+    // makes, and adds no geometry the legacy path would not have accepted.
+    let deck_join_gate = diagnosis::deck_join_recovery_enabled();
     let run_torus = torus_probe || torus_recovery_gate;
     // A per-run shell ordinal, so a `FaceKey` is unique across shells:
     // `declared_face_index` is an index *within* a shell and collides between
@@ -834,13 +913,68 @@ where
         // itself failed — so the meshed shell is unchanged and this commit adds
         // information without moving any face between populations. The reason
         // travels beside it instead of being destroyed.
+        // The pieces are retained only for a face that can reach the two-loop
+        // join at all — a periodic chart presenting exactly two bounds — so the
+        // clone is paid on the band population rather than on every face.
+        let deck_join_candidate = deck_join_gate
+            && (lattice.declared_u_period().is_some() || lattice.declared_v_period().is_some())
+            && preboundary.as_ref().is_ok_and(|pieces| pieces.len() == 2);
         let (polygon, failure) = match preboundary {
             Err(reason) => (None, Some(TessellationFailure::from(reason))),
             Ok(preboundary) => {
+                let retained = deck_join_candidate.then(|| preboundary.clone());
                 let boundary = PolyBoundary::new(preboundary, &surface, tol, &lattice);
                 match trimming_tessellation_result(&surface, &boundary, tol, &lattice) {
                     Ok(mesh) => (Some(mesh), None),
-                    Err(failure) => (Some(PolygonMesh::default()), Some(failure)),
+                    // Refinement-only, structurally: the corrected join is
+                    // reached only from the arm where the legacy path produced
+                    // no mesh, so it can replace a failure and nothing else.
+                    Err(failure) => {
+                        // The DIAG-001 record, and with it the loss bucket the
+                        // band routes admit on, must keep describing the legacy
+                        // boundary — not a mixture of it and this second
+                        // attempt.
+                        let _suspension = diagnosis::SinkSuspension::new();
+                        let recovered = retained.and_then(|pieces| {
+                            let (boundary, outcome) = PolyBoundary::new_with_join(
+                                pieces,
+                                &surface,
+                                tol,
+                                &lattice,
+                                TwoLoopJoinPolicy::DeckConsistent,
+                            );
+                            // Rebuilding is only worth a tessellation pass when
+                            // the equation actually selected the other
+                            // traversal. Every other outcome reproduces the
+                            // boundary that was just tried.
+                            let applied = TwoLoopJoinOutcome::ForwardResolves { applied: true };
+                            (outcome == applied)
+                                .then(|| {
+                                    trimming_tessellation_result(&surface, &boundary, tol, &lattice)
+                                })
+                                .and_then(std::result::Result::ok)
+                        });
+                        match recovered {
+                            Some(mesh) => {
+                                if recovery_log {
+                                    eprintln!(
+                                        "RECOVERED\tsource_face_id={}\t\
+                                         declared_face_index={declared_face_index}\t\
+                                         triangles={}\tpath=deck_join",
+                                        source_face_id
+                                            .map(|id| id.to_string())
+                                            .unwrap_or_else(|| "none".into()),
+                                        mesh.tri_faces().len(),
+                                    );
+                                }
+                                (Some(mesh), None)
+                            }
+                            // The corrected join was not attempted, or was
+                            // itself refused. The legacy failure is preserved
+                            // exactly.
+                            None => (Some(PolygonMesh::default()), Some(failure)),
+                        }
+                    }
                 }
             }
         };
@@ -3691,6 +3825,98 @@ fn normalize_range(curve: &mut Vec<SurfacePoint>, compidx: usize, (u0, u1): (f64
 /// to be parameterized. Relative sign between loops is invariant; absolute
 /// sign is not.
 #[allow(dead_code)]
+/// Record one boundary piece's deck evidence into the DIAG-001 sink.
+///
+/// The winding sign uses the *same* degeneracy threshold the two-closed-loop
+/// branch tests against, so a piece recorded as sign `0` is exactly a piece
+/// that branch would admit. Reporting a different threshold here would make
+/// the record describe a decision nothing takes.
+fn record_piece_deck(
+    piece_index: usize,
+    points: &[SurfacePoint],
+    closure: ObservedClosure,
+    ku: i64,
+    kv: i64,
+) {
+    let area = signed_area(points);
+    let uv = |p: &SurfacePoint| (p.uv.x, p.uv.y);
+    let (start_uv, end_uv) = match (points.first(), points.last()) {
+        (Some(first), Some(last)) => (uv(first), uv(last)),
+        _ => ((f64::NAN, f64::NAN), (f64::NAN, f64::NAN)),
+    };
+    diagnosis::record_boundary_piece(diagnosis::BoundaryPieceDeck {
+        piece_index,
+        closure,
+        ku,
+        kv,
+        winding_sign: match area {
+            a if a.abs() < DEGENERATE_LOOP_AREA => 0,
+            a if a > 0.0 => 1,
+            _ => -1,
+        },
+        signed_area: area,
+        representative: start_uv,
+        start_uv,
+        end_uv,
+        point_count: points.len(),
+    });
+}
+
+/// Record what the two-closed-loop join did to the deck sum.
+///
+/// `Σδᵢ = Δ_walk`, and `Δ_walk = 0` for a contractible regular boundary. The
+/// branch traverses loop 1 **reversed**, unconditionally, so the sum it
+/// realises is `δ₀ − δ₁`. `forward_would_close` is the discriminator: it is
+/// true exactly when the reversal is what broke the equation and traversing
+/// forward would satisfy it, which is the case package 1 is about.
+fn record_two_loop_join(
+    loop0_displacement: [i64; 2],
+    loop1_displacement: [i64; 2],
+    mean_translate: [i64; 2],
+    loop1_reversed: bool,
+    loop0_path: &BoundaryPath,
+    loop1_path: &BoundaryPath,
+) {
+    let uv = |p: &SurfacePoint| (p.uv.x, p.uv.y);
+    let nan = (f64::NAN, f64::NAN);
+    let ends = |path: &BoundaryPath| match (path.points.first(), path.points.last()) {
+        (Some(first), Some(last)) => (uv(first), uv(last)),
+        _ => (nan, nan),
+    };
+    let (loop0_start, loop0_end) = ends(loop0_path);
+    let (loop1_start, loop1_end) = ends(loop1_path);
+    // The sum the chosen traversal realises, and the sum the other one would.
+    let sign = if loop1_reversed { -1 } else { 1 };
+    let deck_sum_u = loop0_displacement[0] + sign * loop1_displacement[0];
+    let deck_sum_v = loop0_displacement[1] + sign * loop1_displacement[1];
+    let other_u = loop0_displacement[0] - sign * loop1_displacement[0];
+    let other_v = loop0_displacement[1] - sign * loop1_displacement[1];
+    let deck_consistent = deck_sum_u == 0 && deck_sum_v == 0;
+    diagnosis::record_two_loop_join(diagnosis::TwoLoopJoinRecord {
+        loop0_displacement,
+        loop1_displacement,
+        loop1_reversed,
+        mean_translate,
+        deck_sum_u,
+        deck_sum_v,
+        deck_consistent,
+        forward_would_close: !deck_consistent && other_u == 0 && other_v == 0,
+        // The join appends loop 1's reversed path after loop 0's, then closes
+        // back to loop 0's start: two bridges, and these are their endpoints.
+        bridge0: [loop0_end, loop1_start],
+        bridge1: [loop1_end, loop0_start],
+    });
+}
+
+/// The parameter-space area below which a closed loop is treated as degenerate
+/// — a band's boundary circle, which encloses no area in the chart because it
+/// *is* a chart-crossing line.
+///
+/// Named because the two-closed-loop branch and the DIAG-001 record must test
+/// the same number: a record taken against a different threshold would describe
+/// a population no code path acts on.
+const DEGENERATE_LOOP_AREA: f64 = 1e-4;
+
 fn signed_area(curve: &[SurfacePoint]) -> f64 {
     curve
         .iter()
@@ -3753,6 +3979,51 @@ fn working_range(
     )
 }
 
+/// How the two-closed-loop branch traverses the second loop.
+///
+/// The branch has always reversed loop 1 unconditionally. For a quotient-closed
+/// boundary walk `Σδᵢ = Δ_walk`, with `Δ_walk = 0` for a contractible regular
+/// boundary, so the reversal is only correct when the two loops wind the *same*
+/// way. The two boundary circles of a band wind opposite — as they must, for
+/// the face boundary to be coherently oriented — and there the reversal makes
+/// `Σδ = ±2`, which is exactly the crossing the CDT then refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TwoLoopJoinPolicy {
+    /// Reverse loop 1 unconditionally.
+    Legacy,
+    /// Traverse loop 1 in whichever direction satisfies `Σδ = 0`, and fall back
+    /// to [`Self::Legacy`] when no direction does or both do. The equation is
+    /// decidable, so this guesses nothing: a direction is chosen only when it
+    /// is the unique solution.
+    DeckConsistent,
+}
+
+/// What the two-closed-loop branch concluded about its deck equation.
+///
+/// Reported rather than inferred, so a caller can tell "the correction changed
+/// the boundary" from "there was nothing to correct" without rebuilding and
+/// comparing meshes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TwoLoopJoinOutcome {
+    /// The branch did not run: the face does not present two degenerate closed
+    /// loops on a periodic chart.
+    NotAttempted,
+    /// `Σδ = 0` already holds for the reversed traversal.
+    LegacyDeckConsistent,
+    /// `Σδ ≠ 0` reversed, and forward traversal is the unique solution.
+    /// `applied` says whether the policy let it be taken.
+    ForwardResolves {
+        /// Whether the forward traversal was used.
+        applied: bool,
+    },
+    /// Neither traversal satisfies the equation. Refused: the legacy join is
+    /// retained and the face keeps whatever typed failure it had.
+    Inconsistent,
+    /// Both traversals satisfy it, so the deck equation does not select one.
+    /// Refused for the same reason.
+    Unresolved,
+}
+
 impl PolyBoundary {
     fn new(
         pieces: Vec<PolyBoundaryPiece>,
@@ -3760,6 +4031,17 @@ impl PolyBoundary {
         tol: f64,
         lattice: &CertifiedLattice,
     ) -> Self {
+        Self::new_with_join(pieces, surface, tol, lattice, TwoLoopJoinPolicy::Legacy).0
+    }
+
+    fn new_with_join(
+        pieces: Vec<PolyBoundaryPiece>,
+        surface: &impl PreMeshableSurface,
+        tol: f64,
+        lattice: &CertifiedLattice,
+        join_policy: TwoLoopJoinPolicy,
+    ) -> (Self, TwoLoopJoinOutcome) {
+        let mut join_outcome = TwoLoopJoinOutcome::NotAttempted;
         let probe = std::env::var_os("TRUCK_PROBE_BOUNDARY").is_some();
         let had_source_pieces = !pieces.is_empty();
         // EXPERIMENT (TRUCK_FACE_DOMAIN): take the working rectangle from the
@@ -3770,9 +4052,22 @@ impl PolyBoundary {
             false => surface.try_range_tuple(),
         };
         let (mut closed, mut open) = (Vec::new(), Vec::new());
+        // The lattice displacement of each closed loop, parallel to `closed`.
+        // The `BoundaryLoop` the classification produces does not retain it,
+        // and the two-closed-loop branch below needs it to say what its join
+        // does to the deck sum — recovering it afterwards from normalised
+        // points would re-derive an integer the classifier already decided.
+        let mut closed_displacements: Vec<[i64; 2]> = Vec::new();
         let u_period = lattice.declared_u_period();
         let v_period = lattice.declared_v_period();
-        pieces.into_iter().for_each(|PolyBoundaryPiece(mut vec)| {
+        // DIAG-001 deck evidence. Recorded where each piece is classified, so
+        // the displacement written down is the one the pipeline acted on rather
+        // than one recovered later from already-normalised points.
+        let diag = diagnosis::diag_enabled();
+        pieces
+            .into_iter()
+            .enumerate()
+            .for_each(|(piece_index, PolyBoundaryPiece(mut vec))| {
             let p0 = vec[0].uv;
             let p1 = vec[vec.len() - 1].uv;
 
@@ -3811,6 +4106,10 @@ impl PolyBoundary {
             match closure {
                 BoundaryClosure::EuclideanClosed => {
                     vec.pop();
+                    if diag {
+                        record_piece_deck(piece_index, &vec, ObservedClosure::EuclideanClosed, 0, 0);
+                    }
+                    closed_displacements.push([0, 0]);
                     closed.push(BoundaryLoop::euclidean_source_loop(vec));
                 }
                 BoundaryClosure::PeriodicClosed {
@@ -3832,9 +4131,24 @@ impl PolyBoundary {
                             vec.last_mut().unwrap().uv.y = vec[0].uv.y + (kv as f64) * vp;
                         }
                     }
+                    if diag {
+                        record_piece_deck(
+                            piece_index,
+                            &vec,
+                            ObservedClosure::PeriodicClosed,
+                            ku,
+                            kv,
+                        );
+                    }
+                    closed_displacements.push([ku, kv]);
                     closed.push(BoundaryLoop::periodic_source_walk(vec));
                 }
-                BoundaryClosure::Open => open.push(vec),
+                BoundaryClosure::Open => {
+                    if diag {
+                        record_piece_deck(piece_index, &vec, ObservedClosure::Open, 0, 0);
+                    }
+                    open.push(vec)
+                }
             }
         });
         if closed.len() == 2
@@ -3842,7 +4156,10 @@ impl PolyBoundary {
         {
             let area0 = signed_area(&closed[0].points);
             let area1 = signed_area(&closed[1].points);
-            if area0.abs() < 1e-4 && area1.abs() < 1e-4 {
+            if area0.abs() < DEGENERATE_LOOP_AREA && area1.abs() < DEGENERATE_LOOP_AREA {
+                let loop0_displacement = closed_displacements[0];
+                let loop1_displacement = closed_displacements[1];
+                let mut mean_translate = [0i64, 0i64];
                 let loop0 = closed.remove(0);
                 let mut loop1 = closed.remove(0);
                 let u0_mean: f64 =
@@ -3851,6 +4168,7 @@ impl PolyBoundary {
                     loop1.points.iter().map(|p| p.uv.x).sum::<f64>() / loop1.points.len() as f64;
                 if let Some(up) = lattice.declared_u_period() {
                     let ku = ((u0_mean - u1_mean) / up).round();
+                    mean_translate[0] = ku as i64;
                     if ku != 0.0 {
                         for p in &mut loop1.points {
                             p.uv.x += ku * up;
@@ -3863,6 +4181,7 @@ impl PolyBoundary {
                     loop1.points.iter().map(|p| p.uv.y).sum::<f64>() / loop1.len() as f64;
                 if let Some(vp) = lattice.declared_v_period() {
                     let kv = ((v0_mean - v1_mean) / vp).round();
+                    mean_translate[1] = kv as i64;
                     if kv != 0.0 {
                         for p in &mut loop1.points {
                             p.uv.y += kv * vp;
@@ -3875,9 +4194,55 @@ impl PolyBoundary {
                 // start, and the closing wrap back to `loop0`'s start. Building
                 // this by parts labels those bridges instead of letting them
                 // inherit `Source`.
+                // Solve the deck equation before choosing a traversal. Reversing
+                // loop 1 realises `δ₀ − δ₁`; traversing it forward realises
+                // `δ₀ + δ₁`. `Δ_walk = 0`, so each direction is admissible
+                // exactly when its sum vanishes, and the direction is *chosen*
+                // only when precisely one does.
+                let reversed_closes = loop0_displacement[0] == loop1_displacement[0]
+                    && loop0_displacement[1] == loop1_displacement[1];
+                let forward_closes = loop0_displacement[0] == -loop1_displacement[0]
+                    && loop0_displacement[1] == -loop1_displacement[1];
+                let take_forward = match (reversed_closes, forward_closes) {
+                    (false, true) => {
+                        let applied = join_policy == TwoLoopJoinPolicy::DeckConsistent;
+                        join_outcome = TwoLoopJoinOutcome::ForwardResolves { applied };
+                        applied
+                    }
+                    (true, false) => {
+                        join_outcome = TwoLoopJoinOutcome::LegacyDeckConsistent;
+                        false
+                    }
+                    // Both zero — the loops are Euclidean-closed on a periodic
+                    // chart, so the equation says nothing about direction — or
+                    // neither, which is a boundary the deck model does not
+                    // describe. Refuse in both cases and keep the legacy
+                    // traversal, so a face can only be recovered on a decided
+                    // equation and never on a coin toss.
+                    (true, true) => {
+                        join_outcome = TwoLoopJoinOutcome::Unresolved;
+                        false
+                    }
+                    (false, false) => {
+                        join_outcome = TwoLoopJoinOutcome::Inconsistent;
+                        false
+                    }
+                };
                 let mut loop1_path = loop1.into_path_cutting_wrap();
-                loop1_path.reverse();
+                if !take_forward {
+                    loop1_path.reverse();
+                }
                 let mut path = loop0.into_path_cutting_wrap();
+                if diag {
+                    record_two_loop_join(
+                        loop0_displacement,
+                        loop1_displacement,
+                        mean_translate,
+                        !take_forward,
+                        &path,
+                        &loop1_path,
+                    );
+                }
                 // The two loops are disconnected: joining them creates a
                 // segment neither supplied, and so does closing back to the
                 // start. Both are declared, so no source point is dropped to
@@ -4089,7 +4454,7 @@ impl PolyBoundary {
                 ]));
             }
         }
-        Self(closed)
+        (Self(closed), join_outcome)
     }
 
     /// Where `c` lies relative to the domain bounded by `self`.
@@ -5643,6 +6008,118 @@ mod cone_topology_tests {
             &unevidenced_lattice(&cylinder),
         );
         assert!(res.is_none());
+    }
+
+    /// A cylindrical band presented the way STEP presents one: two boundary
+    /// circles winding **opposite** ways, as they must for the face boundary to
+    /// be coherently oriented.
+    fn opposite_winding_band_pieces() -> (RevolutedCurve<Line<Point3>>, Vec<PolyBoundaryPiece>) {
+        let cylinder = RevolutedCurve::by_revolution(
+            Line(Point3::new(10.0, 0.0, 0.0), Point3::new(10.0, 0.0, 10.0)),
+            Point3::origin(),
+            Vector3::unit_z(),
+        );
+        let circle = |u: f64, sign: f64| -> PolyBoundaryPiece {
+            PolyBoundaryPiece(
+                (0..=32)
+                    .map(|i| {
+                        let v = sign * (i as f64 / 32.0) * 2.0 * PI;
+                        let uv = Point2::new(u, v);
+                        (uv, cylinder.subs(uv.x, uv.y)).into()
+                    })
+                    .collect(),
+            )
+        };
+        (cylinder, vec![circle(0.2, 1.0), circle(0.8, -1.0)])
+    }
+
+    /// The deck equation, on the geometry it was written for: reversing loop 1
+    /// gives `Σδ = ±2`, so the legacy join is refused and forward traversal is
+    /// named as the unique solution.
+    #[test]
+    fn opposite_winding_band_selects_forward_traversal() {
+        let (cylinder, pieces) = opposite_winding_band_pieces();
+        let lattice = unevidenced_lattice(&cylinder);
+        let (_, legacy) = PolyBoundary::new_with_join(
+            pieces.clone(),
+            &cylinder,
+            0.01,
+            &lattice,
+            TwoLoopJoinPolicy::Legacy,
+        );
+        assert_eq!(
+            legacy,
+            TwoLoopJoinOutcome::ForwardResolves { applied: false },
+            "the legacy policy diagnoses the case but does not act on it",
+        );
+        let (_, corrected) = PolyBoundary::new_with_join(
+            pieces,
+            &cylinder,
+            0.01,
+            &lattice,
+            TwoLoopJoinPolicy::DeckConsistent,
+        );
+        assert_eq!(
+            corrected,
+            TwoLoopJoinOutcome::ForwardResolves { applied: true },
+            "the deck-consistent policy takes the solution",
+        );
+    }
+
+    /// The corrected join is what makes the band tessellate: the legacy
+    /// traversal's two bridges cross, and the CDT refuses the second one.
+    #[test]
+    fn opposite_winding_band_tessellates_only_when_deck_consistent() {
+        let (cylinder, pieces) = opposite_winding_band_pieces();
+        let lattice = unevidenced_lattice(&cylinder);
+        let legacy = PolyBoundary::new(pieces.clone(), &cylinder, 0.01, &lattice);
+        assert_eq!(
+            trimming_tessellation_result(&cylinder, &legacy, 0.01, &lattice)
+                .err()
+                .map(|failure| failure.reason),
+            Some(TessellationFailureReason::ConstraintInsertionIncomplete),
+            "the crossing bridges are the failure this package is about",
+        );
+        let (corrected, _) = PolyBoundary::new_with_join(
+            pieces,
+            &cylinder,
+            0.01,
+            &lattice,
+            TwoLoopJoinPolicy::DeckConsistent,
+        );
+        let mesh = trimming_tessellation_result(&cylinder, &corrected, 0.01, &lattice)
+            .expect("the deck-consistent boundary tessellates");
+        assert!(!mesh.tri_faces().is_empty(), "and produces triangles");
+    }
+
+    /// Two loops winding the *same* way need the reversal, and must not be
+    /// disturbed: the equation selects the legacy traversal there.
+    #[test]
+    fn same_winding_band_keeps_the_legacy_traversal() {
+        let cylinder = RevolutedCurve::by_revolution(
+            Line(Point3::new(10.0, 0.0, 0.0), Point3::new(10.0, 0.0, 10.0)),
+            Point3::origin(),
+            Vector3::unit_z(),
+        );
+        let circle = |u: f64| -> PolyBoundaryPiece {
+            PolyBoundaryPiece(
+                (0..=32)
+                    .map(|i| {
+                        let v = (i as f64 / 32.0) * 2.0 * PI;
+                        let uv = Point2::new(u, v);
+                        (uv, cylinder.subs(uv.x, uv.y)).into()
+                    })
+                    .collect(),
+            )
+        };
+        let (_, outcome) = PolyBoundary::new_with_join(
+            vec![circle(0.2), circle(0.8)],
+            &cylinder,
+            0.01,
+            &unevidenced_lattice(&cylinder),
+            TwoLoopJoinPolicy::DeckConsistent,
+        );
+        assert_eq!(outcome, TwoLoopJoinOutcome::LegacyDeckConsistent);
     }
 
     #[test]

@@ -1036,6 +1036,10 @@ mod provenance_tests {
             use_id: Some(SourceEntityId::new(811)),
             definition_id: Some(SourceEntityId::new(402)),
             surface_id: Some(SourceEntityId::new(91)),
+            // This test predates the field and stopped compiling when it
+            // landed. What it is about is the three *identities*; the
+            // outer-bound standing is not one of them.
+            outer_bound: OuterBoundStanding::NotRetained,
         };
         assert_eq!(
             provenance.to_string(),

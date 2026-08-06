@@ -480,3 +480,51 @@ mod from_pcurve {
 mod geom_impls;
 /// implementation for output STEP format.
 mod stepout_impls;
+
+#[cfg(test)]
+mod seed_forwarding_tests {
+    use super::Surface;
+    use truck_geometry::prelude::*;
+
+    /// The STEP surface enum must forward `search_parameter_seeds` to the
+    /// variant it wraps.
+    ///
+    /// This is the production type: every spline that reaches the tessellator
+    /// arrives inside it. The trait method is defaulted, so a derive that
+    /// failed to forward would compile, run, and answer "no seeds" for every
+    /// surface in every model — a retry that can never fire, reported as a
+    /// retry that does not help. That failure mode has cost this project a
+    /// measurement before.
+    #[test]
+    fn the_step_surface_enum_forwards_spline_seeds() {
+        let knots = KnotVec::from(vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0]);
+        let ctrl_pts = (0..4)
+            .map(|i| {
+                (0..4)
+                    .map(|j| Point3::new(i as f64, j as f64, (i * j) as f64 * 0.1))
+                    .collect()
+            })
+            .collect();
+        let bspline = BSplineSurface::new((knots.clone(), knots), ctrl_pts);
+        let bare = SearchParameter::<D2>::search_parameter_seeds(&bspline);
+        assert_eq!(bare.len(), 4, "the bare surface offers its spans");
+        let wrapped = Surface::BSplineSurface(bspline);
+        assert_eq!(
+            SearchParameter::<D2>::search_parameter_seeds(&wrapped),
+            bare,
+            "and the enum forwards them unchanged",
+        );
+    }
+
+    /// A surface with no piecewise structure offers nothing, and that is the
+    /// correct answer rather than a fabricated grid.
+    #[test]
+    fn a_plane_offers_no_seeds() {
+        let plane = Plane::new(
+            Point3::origin(),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        );
+        assert!(SearchParameter::<D2>::search_parameter_seeds(&plane).is_empty());
+    }
+}

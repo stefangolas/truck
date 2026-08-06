@@ -1667,6 +1667,85 @@ where
         };
         algo::surface::search_parameter(self, point, hint, trials)
     }
+
+    /// One start per knot-span cell: the midpoints of the rectangles the two
+    /// knot vectors cut the domain into.
+    ///
+    /// A B-spline is a *different polynomial* on each span, so a span is the
+    /// largest region the inverse is smooth over and its midpoint is the point
+    /// furthest from the discontinuities at either end. The uniform presearch
+    /// grid this supplements knows none of that: it can put every one of its
+    /// samples inside one span of a knot vector that is dense elsewhere.
+    fn search_parameter_seeds(&self) -> Vec<(f64, f64)> {
+        knot_span_midpoints(self.uknot_vec(), self.vknot_vec())
+    }
+}
+
+/// The midpoints of the cells two knot vectors cut a domain into.
+///
+/// Repeated knots span nothing and are dropped: a knot of multiplicity `k`
+/// contributes `k - 1` empty intervals whose "midpoints" are the
+/// discontinuities themselves — the worst possible starts.
+pub(super) fn knot_span_midpoints(uknots: &KnotVec, vknots: &KnotVec) -> Vec<(f64, f64)> {
+    let spans = |knots: &KnotVec| -> Vec<f64> {
+        knots
+            .as_slice()
+            .windows(2)
+            .filter(|w| w[1] - w[0] > f64::EPSILON)
+            .map(|w| (w[0] + w[1]) / 2.0)
+            .collect()
+    };
+    let (us, vs) = (spans(uknots), spans(vknots));
+    us.iter()
+        .flat_map(|&u| vs.iter().map(move |&v| (u, v)))
+        .collect()
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+
+    /// One seed per knot-span *cell*, and none on a repeated knot.
+    #[test]
+    fn seeds_are_one_per_knot_span_cell() {
+        let uknots = KnotVec::from(vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0]);
+        let vknots = KnotVec::from(vec![0.0, 0.0, 1.0, 1.0]);
+        let seeds = knot_span_midpoints(&uknots, &vknots);
+        // u has two non-empty spans, [0, 0.5] and [0.5, 1]; v has one.
+        assert_eq!(seeds, vec![(0.25, 0.5), (0.75, 0.5)]);
+    }
+
+    /// The clamped ends of a knot vector are repeated `degree + 1` times and
+    /// span nothing. A midpoint there is the discontinuity itself.
+    #[test]
+    fn repeated_knots_contribute_no_seed() {
+        let knots = KnotVec::from(vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(knot_span_midpoints(&knots, &knots), vec![(0.5, 0.5)]);
+    }
+
+    /// The seeds reach the surface through the trait, not only the free
+    /// function — a spline that answered the default `Vec::new()` would leave
+    /// the retry with nothing to try.
+    #[test]
+    fn a_spline_surface_offers_its_spans_through_the_trait() {
+        let knots = KnotVec::from(vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0]);
+        let ctrl_pts = (0..4)
+            .map(|i| {
+                (0..4)
+                    .map(|j| Point3::new(i as f64, j as f64, (i * j) as f64 * 0.1))
+                    .collect()
+            })
+            .collect();
+        let surface = BSplineSurface::new((knots.clone(), knots), ctrl_pts);
+        let seeds = SearchParameter::<D2>::search_parameter_seeds(&surface);
+        assert_eq!(seeds.len(), 4, "two spans each way");
+        let nurbs = NurbsSurface::<Vector4>::from(surface);
+        assert_eq!(
+            SearchParameter::<D2>::search_parameter_seeds(&nurbs).len(),
+            4,
+            "the weights change the map, not the domain partition",
+        );
+    }
 }
 
 impl<P> SearchNearestParameter<D2> for BSplineSurface<P>

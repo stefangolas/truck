@@ -845,6 +845,12 @@ where
         };
         algo::surface::search_parameter(self, point, hint, trials)
     }
+
+    /// The knot-span cell midpoints of the underlying non-rational surface.
+    /// The weights change the map, not the domain partition.
+    fn search_parameter_seeds(&self) -> Vec<(f64, f64)> {
+        bspsurface::knot_span_midpoints(self.uknot_vec(), self.vknot_vec())
+    }
 }
 
 impl<V: Homogeneous<Scalar = f64>> From<BSplineSurface<V::Point>> for NurbsSurface<V> {

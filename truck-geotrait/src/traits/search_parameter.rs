@@ -111,6 +111,25 @@ pub trait SearchParameter<Dim: SPDimension> {
         hint: H,
         trials: usize,
     ) -> Option<Dim::Parameter>;
+
+    /// Starting parameters the geometry's own structure suggests for the
+    /// iterative inverse, most promising first.
+    ///
+    /// [`Self::search_parameter`] is a Newton iteration, and a Newton iteration
+    /// from one bad start fails on a surface whose inverse is perfectly
+    /// well-posed. The default hint strategy is a uniform presearch grid that
+    /// keeps only its single best cell, which is a poor start precisely where
+    /// the geometry is not uniform. A piecewise geometry knows better: its
+    /// knot vector already partitions its domain, and one start per span
+    /// covers every piece.
+    ///
+    /// An empty result means "no structure to offer" — the default, and the
+    /// honest answer for a primitive whose inverse is closed-form anyway. A
+    /// caller must treat the seeds as *starts*, never as answers: each one
+    /// still has to converge and still has to be checked for incidence.
+    fn search_parameter_seeds(&self) -> Vec<Dim::Parameter> {
+        Vec::new()
+    }
 }
 
 impl<Dim: SPDimension, T: SearchParameter<Dim>> SearchParameter<Dim> for &T {
@@ -124,6 +143,10 @@ impl<Dim: SPDimension, T: SearchParameter<Dim>> SearchParameter<Dim> for &T {
     ) -> Option<Dim::Parameter> {
         T::search_parameter(*self, point, hint, trials)
     }
+    #[inline(always)]
+    fn search_parameter_seeds(&self) -> Vec<Dim::Parameter> {
+        T::search_parameter_seeds(*self)
+    }
 }
 
 impl<Dim: SPDimension, T: SearchParameter<Dim>> SearchParameter<Dim> for Box<T> {
@@ -136,6 +159,10 @@ impl<Dim: SPDimension, T: SearchParameter<Dim>> SearchParameter<Dim> for Box<T> 
         trials: usize,
     ) -> Option<Dim::Parameter> {
         T::search_parameter(&**self, point, hint, trials)
+    }
+    #[inline(always)]
+    fn search_parameter_seeds(&self) -> Vec<Dim::Parameter> {
+        T::search_parameter_seeds(&**self)
     }
 }
 

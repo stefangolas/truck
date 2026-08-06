@@ -980,6 +980,18 @@ pub fn derive_sp_d2(input: TokenStream) -> TokenStream {
                     trials: usize,
                 ) -> Option<(f64, f64)>,
             );
+            // Forwarded by a second call because `methods!` takes either
+            // all-generic or all-non-generic signatures, not a mixture. It has
+            // to be forwarded *somewhere*: the trait's default returns no
+            // seeds, so a derived enum falling back to it would silently strip
+            // the knot structure off every spline it wraps, and a seeding route
+            // that can never fire reads exactly like a route that does not
+            // help.
+            let seed_method = methods!(
+                variants,
+                trait_name,
+                fn search_parameter_seeds(&self,) -> Vec<(f64, f64)>,
+            );
             quote! {
                 #[automatically_derived]
                 impl #gen #trait_name for #ty #gen
@@ -988,6 +1000,7 @@ pub fn derive_sp_d2(input: TokenStream) -> TokenStream {
                     #(#tys: #trait_name,)* {
                     type Point = <#top_ty as #trait_name>::Point;
                     #(#methods)*
+                    #(#seed_method)*
                 }
             }
         }
@@ -1011,6 +1024,9 @@ pub fn derive_sp_d2(input: TokenStream) -> TokenStream {
                         trials: usize,
                     ) -> Option<(f64, f64)> {
                         self.0.search_parameter(pt, hint, trials)
+                    }
+                    fn search_parameter_seeds(&self) -> Vec<(f64, f64)> {
+                        self.0.search_parameter_seeds()
                     }
                 }
             }

@@ -265,6 +265,148 @@ pub struct RealizedConstraintMetadata {
 }
 
 // ---------------------------------------------------------------------------
+// Deck evidence for periodic boundary pieces
+// ---------------------------------------------------------------------------
+
+/// How one boundary piece closed, recorded without erasing its displacement.
+///
+/// Mirrors `triangulation::BoundaryClosure`, which is not `Serialize` and
+/// carries the displacement inside one variant. Splitting the kind from the
+/// displacement lets a record be aggregated on either.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum ObservedClosure {
+    /// The endpoints met within Euclidean UV tolerance.
+    EuclideanClosed,
+    /// The endpoints met only modulo the lattice.
+    PeriodicClosed,
+    /// The piece did not close.
+    Open,
+}
+
+/// The deck evidence carried by one closed boundary piece.
+///
+/// This is the per-piece half of what package 1 needs to decide a two-loop
+/// join: the lattice displacement the walk actually accumulated, the winding
+/// sign of its parameter-space traversal, and the fundamental-domain
+/// representative it was normalised onto. Recorded where the piece is
+/// classified, because that is the only place all three are known at once.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct BoundaryPieceDeck {
+    /// The piece's index in the face's boundary list.
+    pub piece_index: usize,
+    /// How the piece closed.
+    pub closure: ObservedClosure,
+    /// The integer lattice displacement along `u`.
+    pub ku: i64,
+    /// The integer lattice displacement along `v`.
+    pub kv: i64,
+    /// The sign of the piece's signed parameter-space area: `+1`, `-1`, or `0`
+    /// when the area is below the degeneracy threshold — which is exactly the
+    /// case the two-loop branch admits.
+    pub winding_sign: i8,
+    /// The signed parameter-space area itself, retained because the sign alone
+    /// cannot distinguish "degenerate" from "nearly degenerate".
+    pub signed_area: f64,
+    /// The fundamental-domain representative: the piece's first point after
+    /// normalisation.
+    pub representative: (f64, f64),
+    /// The piece's first parameter point, after normalisation.
+    pub start_uv: (f64, f64),
+    /// The piece's last parameter point, after normalisation.
+    pub end_uv: (f64, f64),
+    /// The number of parameter samples in the piece.
+    pub point_count: usize,
+}
+
+/// What the two-closed-loop branch of `PolyBoundary::new` did, and whether the
+/// deck equation it implies is satisfiable.
+///
+/// The branch cuts both loops open, **reverses one unconditionally**, and
+/// bridges them with a pair of seam segments. For a quotient-closed boundary
+/// walk `Σδᵢ = Δ_walk`, and `Δ_walk = 0` for a contractible regular boundary.
+/// Traversing loop1 reversed contributes `−δ₁`, so the sum the branch actually
+/// realises is `δ₀ − δ₁`. When the two loops carry **opposite** winding — as
+/// the two boundary circles of a band must, for the face boundary to be
+/// coherently oriented — that sum is `±2`, not `0`, and the two bridges become
+/// crossing diagonals rather than the vertical cut edges of a rectangle.
+///
+/// This record does not repair anything. It states which traversal the branch
+/// chose and what `Σδ` that choice produced, so the population can be counted
+/// before a repair is designed.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct TwoLoopJoinRecord {
+    /// Loop 0's lattice displacement `[ku, kv]`.
+    pub loop0_displacement: [i64; 2],
+    /// Loop 1's lattice displacement `[ku, kv]`.
+    pub loop1_displacement: [i64; 2],
+    /// Whether loop 1 was traversed reversed. Currently always `true`: the
+    /// branch reverses unconditionally.
+    pub loop1_reversed: bool,
+    /// The lattice translate applied to loop 1 by the mean-parameter alignment,
+    /// `[ku, kv]`.
+    pub mean_translate: [i64; 2],
+    /// `Σδ` along `u` for the traversal the branch chose.
+    pub deck_sum_u: i64,
+    /// `Σδ` along `v` for the traversal the branch chose.
+    pub deck_sum_v: i64,
+    /// Whether `Σδ = Δ_walk = 0` holds for that choice.
+    pub deck_consistent: bool,
+    /// Whether the traversal *not* taken would have satisfied the equation.
+    /// With the legacy reversal that is the forward traversal, and this is the
+    /// discriminator the repair turns on; once the repair applies it is false,
+    /// because the taken traversal is then the one that closes.
+    pub forward_would_close: bool,
+    /// The first bridge's endpoints, `(from, to)` in parameter space.
+    pub bridge0: [(f64, f64); 2],
+    /// The closing bridge's endpoints, `(from, to)` in parameter space.
+    pub bridge1: [(f64, f64); 2],
+}
+
+/// The mechanism-level subtype of a seam-involved insertion failure.
+///
+/// `SyntheticSyntheticCrossing` names *which segments* collided; it says
+/// nothing about *why*. This says why, and only from recorded evidence: a face
+/// is `OppositeWindingReversed` when the branch ran, the loops wound opposite,
+/// and traversing loop 1 forward would have closed the deck equation. That is
+/// the population package 1's repair is for. Everything else stays separately
+/// named rather than being folded in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+pub enum SeamMechanism {
+    /// The two-loop join ran, the loops wound opposite, and forward traversal
+    /// closes `Σδ = 0`. The hypothesised repairable case.
+    OppositeWindingReversed,
+    /// The two-loop join ran and its deck equation is already satisfied, so
+    /// the crossing has another cause.
+    JoinDeckConsistent,
+    /// The two-loop join ran and *neither* traversal closes the equation.
+    JoinDeckUnsatisfiable,
+    /// Seam segments are present but the two-loop join did not run — the seams
+    /// came from a periodic walk's wrap, the collapsed-pair branch, or an open
+    /// piece's synthetic closure.
+    SeamWithoutTwoLoopJoin,
+    /// No seam evidence was recorded for this face.
+    NoSeamEvidence,
+}
+
+/// Derive the seam mechanism from the recorded deck evidence.
+///
+/// Deliberately total and evidence-only: with no join record and no seam
+/// segments there is nothing to say, and saying `NoSeamEvidence` is the honest
+/// answer rather than a guess about which branch ran.
+pub fn derive_seam_mechanism(
+    join: Option<&TwoLoopJoinRecord>,
+    seam_segment_count: usize,
+) -> SeamMechanism {
+    match join {
+        Some(join) if join.deck_consistent => SeamMechanism::JoinDeckConsistent,
+        Some(join) if join.forward_would_close => SeamMechanism::OppositeWindingReversed,
+        Some(_) => SeamMechanism::JoinDeckUnsatisfiable,
+        None if seam_segment_count > 0 => SeamMechanism::SeamWithoutTwoLoopJoin,
+        None => SeamMechanism::NoSeamEvidence,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Loss bucket
 // ---------------------------------------------------------------------------
 
@@ -337,6 +479,15 @@ pub struct FailedFaceDiagnosis {
     pub deck_status: ObservedDeckStatus,
     /// The observed projection status.
     pub projection_status: ObservedProjectionStatus,
+    /// The number of seam segments, separated from the closure segments that
+    /// [`Self::synthetic_segment_count`] merges them with.
+    pub seam_segment_count: usize,
+    /// The deck evidence for each boundary piece.
+    pub boundary_pieces: Vec<BoundaryPieceDeck>,
+    /// What the two-closed-loop join did, when it ran.
+    pub two_loop_join: Option<TwoLoopJoinRecord>,
+    /// The mechanism-level subtype of a seam-involved failure.
+    pub seam_mechanism: SeamMechanism,
     /// The structured conflict witnesses, when the failure is an insertion
     /// failure.
     pub insertion_conflicts: Vec<ConstraintConflictWitness>,
@@ -521,6 +672,25 @@ pub fn cylinder_band_recovery_enabled() -> bool {
     formal_recovery_enabled() && recovery_route_enabled("TRUCK_FORMAL_RECOVERY_BAND")
 }
 
+/// Whether the deck-consistent two-loop join is active.
+///
+/// Nested under the master gate, like every other formal route. The route is
+/// refinement-only by construction: the legacy boundary is built and
+/// tessellated first, and the corrected join is attempted **only** on a face
+/// that still has no mesh, so it can replace nothing but a failure.
+pub fn deck_join_recovery_enabled() -> bool {
+    formal_recovery_enabled() && recovery_route_enabled("TRUCK_FORMAL_RECOVERY_DECK_JOIN")
+}
+
+/// Whether the structural-seed retry of the parameter inverse is active.
+///
+/// Refinement-only in the same structural sense as the routes above, one level
+/// down: the retry is the last link of the projection chain, so it is reached
+/// only for a point every existing attempt already returned `None` for.
+pub fn spline_seed_recovery_enabled() -> bool {
+    formal_recovery_enabled() && recovery_route_enabled("TRUCK_FORMAL_RECOVERY_SEED")
+}
+
 /// Whether diagnostic capture is enabled.
 ///
 /// Enabled by `TRUCK_FACE_DIAG_JSONL`, and independently by the cylinder-band
@@ -553,6 +723,9 @@ struct DiagnosisSink {
     vertex_insertion_failed: bool,
     source_segment_count: usize,
     synthetic_segment_count: usize,
+    seam_segment_count: usize,
+    boundary_pieces: Vec<BoundaryPieceDeck>,
+    two_loop_join: Option<TwoLoopJoinRecord>,
 }
 
 impl DiagnosisSink {
@@ -563,12 +736,47 @@ impl DiagnosisSink {
         self.vertex_insertion_failed = false;
         self.source_segment_count = 0;
         self.synthetic_segment_count = 0;
+        self.seam_segment_count = 0;
+        self.boundary_pieces.clear();
+        self.two_loop_join = None;
     }
 }
 
 std::thread_local! {
     static FACE_DIAGNOSIS_SINK: std::cell::RefCell<DiagnosisSink> =
         std::cell::RefCell::new(DiagnosisSink::default());
+    /// Whether recording is currently suspended. See [`SinkSuspension`].
+    static SINK_SUSPENDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Suspends recording for as long as it is held.
+///
+/// A face is tessellated once per boundary the pipeline is willing to try, and
+/// the deck-consistent join adds a second attempt on a face the first one lost.
+/// Without this, that second attempt would append its own segments and
+/// witnesses to the first one's, and the derived bucket — which the band routes
+/// read as an admission rule — would describe neither attempt. The DIAG-001
+/// record therefore stays a statement about the *legacy* boundary, which is
+/// what every number taken from it so far means.
+pub(crate) struct SinkSuspension(());
+
+impl SinkSuspension {
+    /// Suspend recording until the returned guard is dropped.
+    pub(crate) fn new() -> Self {
+        SINK_SUSPENDED.with(|flag| flag.set(true));
+        Self(())
+    }
+}
+
+impl Drop for SinkSuspension {
+    fn drop(&mut self) {
+        SINK_SUSPENDED.with(|flag| flag.set(false));
+    }
+}
+
+/// Whether recording is suspended.
+fn suspended() -> bool {
+    SINK_SUSPENDED.with(|flag| flag.get())
 }
 
 /// Clear the diagnostic sink before a new face.
@@ -585,11 +793,20 @@ pub(crate) fn record_segment(
     boundary_component: Option<usize>,
     segment_index: u32,
 ) -> u64 {
+    if suspended() {
+        // A caller still needs an id to hand back to `record_conflict`, which
+        // ignores it for the same reason this is ignored.
+        return u64::MAX;
+    }
     FACE_DIAGNOSIS_SINK.with(|sink| {
         let sink = &mut *sink.borrow_mut();
         let id = sink.segments.len() as u64;
         match origin {
             SegmentOrigin::Source => sink.source_segment_count += 1,
+            SegmentOrigin::Seam => {
+                sink.synthetic_segment_count += 1;
+                sink.seam_segment_count += 1;
+            }
             _ => sink.synthetic_segment_count += 1,
         }
         sink.segments.push(SemanticSegmentRef {
@@ -607,6 +824,9 @@ pub(crate) fn record_segment(
 /// Record a realized constraint chain edge, mapping it to the semantic
 /// segment that requested it.
 pub(crate) fn record_realized_edge(role: ConstraintRole, semantic_segment_id: u64) {
+    if suspended() {
+        return;
+    }
     FACE_DIAGNOSIS_SINK.with(|sink| {
         let sink = &mut *sink.borrow_mut();
         let semantic_segment = sink
@@ -627,6 +847,9 @@ pub(crate) fn record_conflict(
     blocking_id: u64,
     relation: PresentedSegmentRelation,
 ) {
+    if suspended() {
+        return;
+    }
     FACE_DIAGNOSIS_SINK.with(|sink| {
         let sink = &mut *sink.borrow_mut();
         let incoming = sink
@@ -652,6 +875,26 @@ pub(crate) fn record_conflict(
             intersection_enclosure: None,
         });
     });
+}
+
+/// Record one boundary piece's deck evidence.
+///
+/// Called from `PolyBoundary::new` as each piece is classified, so the
+/// displacement recorded is the one the pipeline acted on rather than one
+/// recomputed later from normalised points.
+pub(crate) fn record_boundary_piece(piece: BoundaryPieceDeck) {
+    if suspended() {
+        return;
+    }
+    FACE_DIAGNOSIS_SINK.with(|sink| sink.borrow_mut().boundary_pieces.push(piece));
+}
+
+/// Record what the two-closed-loop join did.
+pub(crate) fn record_two_loop_join(record: TwoLoopJoinRecord) {
+    if suspended() {
+        return;
+    }
+    FACE_DIAGNOSIS_SINK.with(|sink| sink.borrow_mut().two_loop_join = Some(record));
 }
 
 /// Record that a vertex insertion failed.
@@ -708,6 +951,10 @@ pub(crate) fn build_face_diagnosis(
         let witnesses = std::mem::take(&mut sink.witnesses);
         let source_segment_count = sink.source_segment_count;
         let synthetic_segment_count = sink.synthetic_segment_count;
+        let seam_segment_count = sink.seam_segment_count;
+        let boundary_pieces = std::mem::take(&mut sink.boundary_pieces);
+        let two_loop_join = sink.two_loop_join;
+        let seam_mechanism = derive_seam_mechanism(two_loop_join.as_ref(), seam_segment_count);
         sink.clear();
         let derived_bucket =
             derive_loss_bucket(terminal_reason, &witnesses, vertex_insertion_failed);
@@ -725,6 +972,10 @@ pub(crate) fn build_face_diagnosis(
             lift_status,
             deck_status,
             projection_status,
+            seam_segment_count,
+            boundary_pieces,
+            two_loop_join,
+            seam_mechanism,
             insertion_conflicts: witnesses,
             derived_bucket,
         }
@@ -892,6 +1143,10 @@ mod tests {
             lift_status: ObservedLiftStatus::Unavailable,
             deck_status: ObservedDeckStatus::Unavailable,
             projection_status: ObservedProjectionStatus::Successful,
+            seam_segment_count: 0,
+            boundary_pieces: Vec::new(),
+            two_loop_join: None,
+            seam_mechanism: SeamMechanism::NoSeamEvidence,
             insertion_conflicts: vec![witness(
                 seg_ref(0, SegmentOrigin::Source, Some(0)),
                 seg_ref(1, SegmentOrigin::Source, Some(0)),
@@ -1060,6 +1315,76 @@ mod tests {
             derive_projection_status(TessellationFailureReason::BoundaryWireEmpty),
             ObservedProjectionStatus::Unavailable,
         );
+    }
+
+    fn join(loop0: [i64; 2], loop1: [i64; 2], reversed: bool) -> TwoLoopJoinRecord {
+        let sign = if reversed { -1 } else { 1 };
+        let deck_sum_u = loop0[0] + sign * loop1[0];
+        let deck_sum_v = loop0[1] + sign * loop1[1];
+        let forward_u = loop0[0] + loop1[0];
+        let forward_v = loop0[1] + loop1[1];
+        TwoLoopJoinRecord {
+            loop0_displacement: loop0,
+            loop1_displacement: loop1,
+            loop1_reversed: reversed,
+            mean_translate: [0, 0],
+            deck_sum_u,
+            deck_sum_v,
+            deck_consistent: deck_sum_u == 0 && deck_sum_v == 0,
+            forward_would_close: reversed && forward_u == 0 && forward_v == 0,
+            bridge0: [(0.0, 0.0); 2],
+            bridge1: [(0.0, 0.0); 2],
+        }
+    }
+
+    /// The band case: two boundary circles wound opposite, loop 1 reversed.
+    /// `Σδ = +2`, and traversing forward would have closed it.
+    #[test]
+    fn opposite_winding_reversed_is_the_repairable_case() {
+        let record = join([1, 0], [-1, 0], true);
+        assert_eq!(record.deck_sum_u, 2, "the reversal doubles the winding");
+        assert!(!record.deck_consistent);
+        assert!(record.forward_would_close);
+        assert_eq!(
+            derive_seam_mechanism(Some(&record), 2),
+            SeamMechanism::OppositeWindingReversed,
+        );
+    }
+
+    /// Two loops wound the same way: the unconditional reverse is already
+    /// right, so a crossing here has some other cause and must not be folded
+    /// into the repairable population.
+    #[test]
+    fn same_winding_reversed_is_deck_consistent() {
+        let record = join([1, 0], [1, 0], true);
+        assert!(record.deck_consistent);
+        assert!(!record.forward_would_close);
+        assert_eq!(
+            derive_seam_mechanism(Some(&record), 2),
+            SeamMechanism::JoinDeckConsistent,
+        );
+    }
+
+    /// Neither traversal closes the equation — refuse, do not guess.
+    #[test]
+    fn unsatisfiable_deck_equation_is_named_separately() {
+        let record = join([2, 0], [-1, 0], true);
+        assert!(!record.deck_consistent);
+        assert!(!record.forward_would_close);
+        assert_eq!(
+            derive_seam_mechanism(Some(&record), 2),
+            SeamMechanism::JoinDeckUnsatisfiable,
+        );
+    }
+
+    /// Seams with no join record came from another branch entirely.
+    #[test]
+    fn seams_without_a_join_are_not_attributed_to_it() {
+        assert_eq!(
+            derive_seam_mechanism(None, 3),
+            SeamMechanism::SeamWithoutTwoLoopJoin,
+        );
+        assert_eq!(derive_seam_mechanism(None, 0), SeamMechanism::NoSeamEvidence);
     }
 
     /// Lift status: certified when all periodic axes are exact.
