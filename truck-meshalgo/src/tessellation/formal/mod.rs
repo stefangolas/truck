@@ -93,6 +93,7 @@ pub mod exact;
 pub mod intersection;
 pub mod numeric;
 pub mod outcome;
+pub mod planar_developed;
 pub mod planar_holes;
 pub mod planar_slice;
 pub mod quotient;
@@ -199,6 +200,10 @@ pub use outcome::{
     ShellKey, StageEvaluation, StageOutcome, UnresolvedReason, UnresolvedReport, UnsupportedCause,
     UnsupportedReport, ValidSemantic,
 };
+pub use planar_developed::{
+    develop_planar_curves, run_developed_face, run_developed_track, survey_arrangement,
+    ArrangementSurvey, DevelopedExit, DevelopedFaceRecord, DevelopedRecord,
+};
 pub use planar_holes::{
     run_planar_holes_slice, BoundRole, BoundaryComponentMap, BoundaryLoop, ComponentRelation,
     HoleFinalValidityReport, HoleSliceRecord, MultiBoundEntry, PlanarMultiBoundInput,
@@ -220,8 +225,8 @@ pub use rank1_annulus::{
 };
 pub use span::{BranchGerm, CurveSpan2, FastPath, SpanId};
 pub use support::{
-    identify_line_segment, identify_plane, identify_polyline, CurveSchema, CurveSchemaFailure,
-    PlaneGram, PlaneSchema, SchemaIdentificationFailure, SupportSurfaceSchema,
+    identify_line_segment, identify_plane, identify_polyline, CircularArcPlacement3, CurveSchema,
+    CurveSchemaFailure, PlaneGram, PlaneSchema, SchemaIdentificationFailure, SupportSurfaceSchema,
     MINIMUM_NORMALISED_GRAM_DETERMINANT,
 };
 pub use torus::{

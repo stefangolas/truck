@@ -1384,7 +1384,10 @@ mod tests {
             derive_seam_mechanism(None, 3),
             SeamMechanism::SeamWithoutTwoLoopJoin,
         );
-        assert_eq!(derive_seam_mechanism(None, 0), SeamMechanism::NoSeamEvidence);
+        assert_eq!(
+            derive_seam_mechanism(None, 0),
+            SeamMechanism::NoSeamEvidence
+        );
     }
 
     /// Lift status: certified when all periodic axes are exact.

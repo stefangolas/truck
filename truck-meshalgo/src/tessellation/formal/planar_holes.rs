@@ -1060,6 +1060,16 @@ pub fn run_planar_holes_slice(
     }
     record.stage = SliceStage::AmbientRank0;
 
+    // Read before Step 2H, for the reason [`super::planar_slice::run_planar_slice`]
+    // gives: a face refused for its curve family must be able to say which
+    // family, and the traversal it would have read them from does not exist.
+    for edge_use in input.edge_uses() {
+        let tag = curve_of(edge_use.source_edge_index).tag();
+        if !record.curve_representations.contains(&tag) {
+            record.curve_representations.push(tag);
+        }
+    }
+
     let bounds = match classify_bounds(input, outer_bound) {
         Ok(MultiBoundEntry::DelegateToHoleFreeSlice) => {
             record.delegated = true;

@@ -97,7 +97,11 @@ where
 /// subject to the caller's incidence check — a nearest point is not an
 /// incidence — so nothing is admitted here that the pipeline would not have
 /// admitted from any other start.
-fn by_structural_seeds<S>(surface: &S, point: Point3, hint: Option<(f64, f64)>) -> Option<(f64, f64)>
+fn by_structural_seeds<S>(
+    surface: &S,
+    point: Point3,
+    hint: Option<(f64, f64)>,
+) -> Option<(f64, f64)>
 where
     S: MeshableSurface,
 {
@@ -1024,6 +1028,9 @@ where
                     &holes_record,
                 );
             }
+            if let Some(developed) = outcome.as_ref().and_then(|o| o.developed.as_ref()) {
+                emit_developed_probe(source_face_id, declared_face_index, developed);
+            }
             // The recovery gate. Every conjunct is explicit: a validated formal
             // mesh replaces a face the legacy path *lost*, and never a face it
             // meshed.
@@ -1729,7 +1736,19 @@ fn run_slice_for_face<S, C>(
         &vertex_position,
         tol,
     );
-    Some(FormalSliceOutcome { planar, holes })
+    // The developed-curve track, run only when its probe asks for it. It
+    // produces no mesh and nothing below reads it, so it cannot alter a face's
+    // geometry — but it does cost an O(pieces^2) certified pairwise pass, and
+    // that is not worth spending on every planar face of every model by
+    // default.
+    let developed = std::env::var_os("TRUCK_PROBE_DEVELOPED")
+        .is_some()
+        .then(|| formal::run_developed_face(&input, plane, &mut curve_of, &vertex_position, tol));
+    Some(FormalSliceOutcome {
+        planar,
+        holes,
+        developed,
+    })
 }
 
 /// Both rank-0 formal paths' verdicts on one face.
@@ -1743,6 +1762,9 @@ struct FormalSliceOutcome {
     /// The planar-holes slice's record. `delegated` when the face has no inner
     /// bounds.
     holes: formal::HoleSliceRecord,
+    /// The developed-curve track's survey, when `TRUCK_PROBE_DEVELOPED` asked
+    /// for it. An observer: it builds no mesh and nothing consumes it.
+    developed: Option<formal::DevelopedFaceRecord>,
 }
 
 /// Turn a validated planar mesh into the polygon mesh the shell holds.
@@ -2809,6 +2831,50 @@ fn emit_holes_probe(
             .obstruction_bound
             .map_or("none", formal::BoundRole::tag),
     );
+}
+
+/// One line per bound of one face: how the developed-curve track read it.
+///
+/// `crossings` is the number package 6 turns on. Read over the corpus's lost
+/// planar faces it says whether the legacy tessellator's
+/// `ConstraintInsertionIncomplete` is a real arrangement — boundary curves that
+/// genuinely cross, needing face extraction and parity selection — or an
+/// artefact of approximating those curves by chords before asking. The
+/// polyline the legacy path asks on is a different object from the analytic
+/// curve this track asks on, and only the second answer is about the face.
+fn emit_developed_probe(
+    source_face_id: Option<u64>,
+    declared_face_index: usize,
+    record: &formal::DevelopedFaceRecord,
+) {
+    let id = source_face_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    for (bound_index, bound) in record.bounds.iter().enumerate() {
+        let (occurrences, arcs, pieces, crossings) = match bound.survey {
+            Some(survey) => (
+                survey.occurrences.to_string(),
+                survey.arcs.to_string(),
+                survey.pieces.to_string(),
+                survey.certified_crossings.to_string(),
+            ),
+            None => (
+                "none".to_string(),
+                "none".to_string(),
+                "none".to_string(),
+                "none".to_string(),
+            ),
+        };
+        eprintln!(
+            "DEV\tsource_face_id={id}\tdeclared_face_index={declared_face_index}\t\
+             bound={bound_index}\tbounds={}\toutcome={}\tcategory={}\t\
+             occurrences={occurrences}\tarcs={arcs}\tpieces={pieces}\t\
+             crossings={crossings}",
+            record.bound_count,
+            bound.tag(),
+            bound.exit.map_or("resolved", |exit| exit.category().tag()),
+        );
+    }
 }
 
 fn emit_slice_probe(
@@ -4068,89 +4134,97 @@ impl PolyBoundary {
             .into_iter()
             .enumerate()
             .for_each(|(piece_index, PolyBoundaryPiece(mut vec))| {
-            let p0 = vec[0].uv;
-            let p1 = vec[vec.len() - 1].uv;
+                let p0 = vec[0].uv;
+                let p1 = vec[vec.len() - 1].uv;
 
-            let closure = if p0.distance(p1) < 1.0e-3 {
-                BoundaryClosure::EuclideanClosed
-            } else {
-                let ku = u_period
-                    .and_then(|up| periodic_displacement(p0.x, p1.x, up, 1e-3))
-                    .unwrap_or(0);
-                let kv = v_period
-                    .and_then(|vp| periodic_displacement(p0.y, p1.y, vp, 1e-3))
-                    .unwrap_or(0);
-                if (ku != 0 || kv != 0) && vec[0].point.distance(vec[vec.len() - 1].point) < 1e-3 {
+                let closure = if p0.distance(p1) < 1.0e-3 {
+                    BoundaryClosure::EuclideanClosed
+                } else {
+                    let ku = u_period
+                        .and_then(|up| periodic_displacement(p0.x, p1.x, up, 1e-3))
+                        .unwrap_or(0);
+                    let kv = v_period
+                        .and_then(|vp| periodic_displacement(p0.y, p1.y, vp, 1e-3))
+                        .unwrap_or(0);
+                    if (ku != 0 || kv != 0)
+                        && vec[0].point.distance(vec[vec.len() - 1].point) < 1e-3
+                    {
+                        BoundaryClosure::PeriodicClosed {
+                            displacement: [ku, kv],
+                        }
+                    } else {
+                        BoundaryClosure::Open
+                    }
+                };
+
+                if probe {
+                    let perimeter: f64 = vec
+                        .windows(2)
+                        .map(|w| w[0].uv.distance(w[1].uv))
+                        .sum::<f64>();
+                    eprintln!(
+                        "PROBE piece pts={} gap={:.6e} perimeter={perimeter:.6e} \
+                     closure={:?}",
+                        vec.len(),
+                        p0.distance(p1),
+                        closure,
+                    );
+                }
+
+                match closure {
+                    BoundaryClosure::EuclideanClosed => {
+                        vec.pop();
+                        if diag {
+                            record_piece_deck(
+                                piece_index,
+                                &vec,
+                                ObservedClosure::EuclideanClosed,
+                                0,
+                                0,
+                            );
+                        }
+                        closed_displacements.push([0, 0]);
+                        closed.push(BoundaryLoop::euclidean_source_loop(vec));
+                    }
                     BoundaryClosure::PeriodicClosed {
                         displacement: [ku, kv],
-                    }
-                } else {
-                    BoundaryClosure::Open
-                }
-            };
-
-            if probe {
-                let perimeter: f64 = vec
-                    .windows(2)
-                    .map(|w| w[0].uv.distance(w[1].uv))
-                    .sum::<f64>();
-                eprintln!(
-                    "PROBE piece pts={} gap={:.6e} perimeter={perimeter:.6e} \
-                     closure={:?}",
-                    vec.len(),
-                    p0.distance(p1),
-                    closure,
-                );
-            }
-
-            match closure {
-                BoundaryClosure::EuclideanClosed => {
-                    vec.pop();
-                    if diag {
-                        record_piece_deck(piece_index, &vec, ObservedClosure::EuclideanClosed, 0, 0);
-                    }
-                    closed_displacements.push([0, 0]);
-                    closed.push(BoundaryLoop::euclidean_source_loop(vec));
-                }
-                BoundaryClosure::PeriodicClosed {
-                    displacement: [ku, kv],
-                } => {
-                    if let Some(up) = u_period {
-                        if ku != 0 {
-                            for p in &mut vec {
-                                p.uv.x -= (ku as f64) * up;
+                    } => {
+                        if let Some(up) = u_period {
+                            if ku != 0 {
+                                for p in &mut vec {
+                                    p.uv.x -= (ku as f64) * up;
+                                }
+                                vec.last_mut().unwrap().uv.x = vec[0].uv.x + (ku as f64) * up;
                             }
-                            vec.last_mut().unwrap().uv.x = vec[0].uv.x + (ku as f64) * up;
                         }
-                    }
-                    if let Some(vp) = v_period {
-                        if kv != 0 {
-                            for p in &mut vec {
-                                p.uv.y -= (kv as f64) * vp;
+                        if let Some(vp) = v_period {
+                            if kv != 0 {
+                                for p in &mut vec {
+                                    p.uv.y -= (kv as f64) * vp;
+                                }
+                                vec.last_mut().unwrap().uv.y = vec[0].uv.y + (kv as f64) * vp;
                             }
-                            vec.last_mut().unwrap().uv.y = vec[0].uv.y + (kv as f64) * vp;
                         }
+                        if diag {
+                            record_piece_deck(
+                                piece_index,
+                                &vec,
+                                ObservedClosure::PeriodicClosed,
+                                ku,
+                                kv,
+                            );
+                        }
+                        closed_displacements.push([ku, kv]);
+                        closed.push(BoundaryLoop::periodic_source_walk(vec));
                     }
-                    if diag {
-                        record_piece_deck(
-                            piece_index,
-                            &vec,
-                            ObservedClosure::PeriodicClosed,
-                            ku,
-                            kv,
-                        );
+                    BoundaryClosure::Open => {
+                        if diag {
+                            record_piece_deck(piece_index, &vec, ObservedClosure::Open, 0, 0);
+                        }
+                        open.push(vec)
                     }
-                    closed_displacements.push([ku, kv]);
-                    closed.push(BoundaryLoop::periodic_source_walk(vec));
                 }
-                BoundaryClosure::Open => {
-                    if diag {
-                        record_piece_deck(piece_index, &vec, ObservedClosure::Open, 0, 0);
-                    }
-                    open.push(vec)
-                }
-            }
-        });
+            });
         if closed.len() == 2
             && (lattice.declared_u_period().is_some() || lattice.declared_v_period().is_some())
         {

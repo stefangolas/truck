@@ -519,8 +519,8 @@ pub enum CurveSchema {
     Polyline(PolylineSchema),
     /// A circular arc, structurally identified but *not* exactly polygonal:
     /// [`Self::polygonal`] returns `None` for this variant, exactly as it
-    /// does for [`Self::NotStructurallyIdentified`]. Its only purpose is to
-    /// let [`Self::is_structurally_identified`] tell a Step-2 traversal gate
+    /// does for [`Self::NotStructurallyIdentified`]. Its purpose is to let
+    /// [`Self::is_structurally_identified`] tell a Step-2 traversal gate
     /// that a reader *did* read this representation, so a caller whose
     /// downstream stage understands arcs (the rank-1 cylinder witness route;
     /// see `super::curve_witness`) can admit it past that gate without
@@ -528,9 +528,48 @@ pub enum CurveSchema {
     /// (`super::planar_slice::certified_planar_curves`), which still exits
     /// `UnsupportedCurveRepresentation` on it exactly as it does for
     /// `NotStructurallyIdentified` today.
-    CircularArc,
+    ///
+    /// The payload is the arc's own placement in the curve's own parameter
+    /// basis, carried so that a stage which understands arcs can obtain it
+    /// from the schema the entry point already threads, rather than from a
+    /// second adapter parameter. It is *evidence*, not authority: the reader
+    /// that builds it is the only thing that certifies circularity, and every
+    /// consumer still discharges its own curve-on-surface obligation against
+    /// it. A consumer that does not understand arcs is unaffected — the
+    /// variant is as unusable to it as it was when it carried nothing.
+    CircularArc(CircularArcPlacement3),
     /// Nothing structural was established. Carries no authority.
     NotStructurallyIdentified(CurveSchemaFailure),
+}
+
+/// A source circle's placement, in the curve's own parameter basis.
+///
+/// ```text
+/// point(t) = center + cos_basis * cos(t) + sin_basis * sin(t)
+/// ```
+///
+/// The 3D counterpart of [`super::curve2d::DirectedCircularArc2`], and
+/// deliberately the same shape: developing one into a certified planar chart
+/// is then an affine map applied to three vectors, with no reparameterization
+/// and no resampling.
+///
+/// `parameter_interval` is the source curve's own trimmed interval in the
+/// curve's own direction, with the representation's orientation folded in
+/// exactly once by the reader. It is never reduced modulo `TAU`, never
+/// shortened to the "near" sweep, and never inferred from coincident
+/// endpoints — the same discipline
+/// [`super::curve2d::DirectedCircularArc2`]'s `t0`/`t1` carry, stated here
+/// because this is where the value crosses the importer seam.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CircularArcPlacement3 {
+    /// The circle center.
+    pub center: Point3,
+    /// The transformed image of the unit circle's `e_x`.
+    pub cos_basis: Vector3,
+    /// The transformed image of the unit circle's `e_y`.
+    pub sin_basis: Vector3,
+    /// The source curve's own trimmed interval, in the curve's own direction.
+    pub parameter_interval: (f64, f64),
 }
 
 impl CurveSchema {
@@ -544,7 +583,19 @@ impl CurveSchema {
     pub fn polygonal(&self) -> Option<&PolylineSchema> {
         match self {
             Self::LineSegment(schema) | Self::Polyline(schema) => Some(schema),
-            Self::CircularArc | Self::NotStructurallyIdentified(_) => None,
+            Self::CircularArc(_) | Self::NotStructurallyIdentified(_) => None,
+        }
+    }
+
+    /// The arc placement, when a reader identified this curve as a circle.
+    ///
+    /// The arc counterpart of [`Self::polygonal`]: a stage reads whichever
+    /// accessor matches the certificate route it can discharge, and gets
+    /// `None` from the other.
+    pub fn circular_arc(&self) -> Option<&CircularArcPlacement3> {
+        match self {
+            Self::CircularArc(placement) => Some(placement),
+            Self::LineSegment(_) | Self::Polyline(_) | Self::NotStructurallyIdentified(_) => None,
         }
     }
 
@@ -562,7 +613,7 @@ impl CurveSchema {
         match self {
             Self::LineSegment(_) => "line_segment",
             Self::Polyline(_) => "polyline",
-            Self::CircularArc => "circular_arc",
+            Self::CircularArc(_) => "circular_arc",
             Self::NotStructurallyIdentified(cause) => cause.tag(),
         }
     }

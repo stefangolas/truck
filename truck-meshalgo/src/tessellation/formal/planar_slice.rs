@@ -1696,17 +1696,27 @@ pub fn run_planar_slice(
     }
     record.stage = SliceStage::AmbientRank0;
 
+    // The face's curve representations, read before Step 2 rather than from
+    // its product. Read afterwards they are unavailable on exactly the faces
+    // that need explaining: `traverse_bound` refuses on the first
+    // unidentified curve, so `unsupported_curve_representation` used to report
+    // `curves=none` and the histogram over the enum could not say which
+    // family to admit next. Reading them here costs one `curve_of` call per
+    // edge use on a path that is about to make the same calls, and grants
+    // nothing — a tag is a diagnostic label, and Step 2 still decides
+    // admission from the schema itself.
+    for edge_use in input.edge_uses() {
+        let tag = curve_of(edge_use.source_edge_index).tag();
+        if !record.curve_representations.contains(&tag) {
+            record.curve_representations.push(tag);
+        }
+    }
+
     // Step 2.
     let traversal = match regular_traversal(input, outer_bound, curve_of) {
         Ok(traversal) => traversal,
         Err(exit) => return record.exited(SliceStage::AmbientRank0, exit),
     };
-    for occurrence in &traversal.occurrences {
-        let tag = occurrence.curve.tag();
-        if !record.curve_representations.contains(&tag) {
-            record.curve_representations.push(tag);
-        }
-    }
     record.stage = SliceStage::RegularTraversal;
 
     // Step 3.
