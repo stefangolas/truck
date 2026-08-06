@@ -5767,13 +5767,27 @@ fn flood_parity(
     let mut contradictory_parity = false;
     while let Some((ffh, current_parity)) = queue.pop_front() {
         let face = triangulation.face(ffh);
-        let edges = if let Some(inner) = face.as_inner() {
-            inner.adjacent_edges()
-        } else {
-            let e0 = face.adjacent_edge().unwrap();
-            let e1 = e0.next();
-            let e2 = e1.next();
-            [e0, e1, e2]
+        let edges = match face.as_inner() {
+            Some(inner) => inner.adjacent_edges(),
+            None => match face.adjacent_edge() {
+                Some(e0) => {
+                    let e1 = e0.next();
+                    let e2 = e1.next();
+                    [e0, e1, e2]
+                }
+                // The outer face has no adjacent edge, so the CDT holds fewer
+                // than three distinct vertices: there are no inner faces and no
+                // material region to select. This was an `unwrap`, and it
+                // aborts the *whole model* rather than the face — `00005641`
+                // panicked here the moment WAVE-4B started returning closed-form
+                // parameters for boundaries that used to fail projection
+                // outright, some of which collapse to a point in the chart.
+                //
+                // Stopping the flood is the honest answer: step 3 finds no face
+                // at odd parity and reports `NoOddParityRegion`, which is
+                // exactly what a degenerate chart image is.
+                None => break,
+            },
         };
         for e in edges {
             // Audit A1. This was `e.is_constraint_edge()` — one bit, so an
