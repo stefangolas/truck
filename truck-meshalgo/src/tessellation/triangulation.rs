@@ -3300,6 +3300,12 @@ impl PolyBoundaryPiece {
         }
         bdry3d.push(bdry3d[0]);
         let lift_probe = std::env::var_os("TRUCK_PROBE_LIFT").is_some();
+        // Refinement-only recovery for the apex/pole singular transition.
+        // Off by default; see `SINGULAR_HALF_PERIOD_TOL` and the exhaustion
+        // branch below. A face that lifts through the legacy path untouched is
+        // byte-identical with this set or unset -- the gate only changes what
+        // happens *after* bisection would otherwise return `AmbiguousLift`.
+        let lift_singular_recovery = std::env::var_os("TRUCK_LIFT_SINGULAR_RECOVERY").is_some();
         // PROJ-001. Under this probe the walk does *not* stop at the first
         // failing point: the ratio of failing points to boundary points is the
         // measurement, and three failures out of 400 is a different diagnosis
@@ -3421,13 +3427,45 @@ impl PolyBoundaryPiece {
                             f64::abs(now - before) >= AMBIGUOUS_STEP_FRACTION * period
                         })
                     };
-                    if ambiguous(u, u0, up) || ambiguous(v, v0, vp) {
-                        if refinements < MAX_LIFT_REFINEMENTS {
-                            refinements += 1;
-                            pending.push((pt, synthetic));
-                            pending.push((previous_point.midpoint(pt), true));
-                            continue;
-                        }
+                if ambiguous(u, u0, up) || ambiguous(v, v0, vp) {
+                    // Singular-transition recovery (TRUCK_LIFT_SINGULAR_RECOVERY,
+                    // default off). A rank-1 periodic surface whose boundary
+                    // crosses a rank-deficient point -- a cone apex, a sphere
+                    // pole -- reaches here with a *real* on-surface boundary
+                    // sample whose periodic step is an exact half-period tie:
+                    // the two flanking generatrices sit half a period apart, and
+                    // the chord between them crosses the axis off-surface. That
+                    // makes bisection pointless -- every chord midpoint is
+                    // off-surface and projects to one of the two branches, so
+                    // the step never shrinks, and exhaustion is reached on a
+                    // synthetic midpoint rather than on the real sample. At the
+                    // half-period tie the two candidate deck copies are
+                    // equidistant from the previous sample and differ by exactly
+                    // one full period, so the nearest-copy representative
+                    // already chosen by `get_mindiff` is a continuous
+                    // half-period step rather than a full-period fold. Admit it
+                    // directly, before any off-surface midpoint is invented.
+                    let half_period_tie = |now: f64, before: f64, period: Option<f64>| {
+                        period.is_some_and(|period| {
+                            ((f64::abs(now - before) / period) - 0.5).abs()
+                                <= SINGULAR_HALF_PERIOD_TOL
+                        })
+                    };
+                    let singular_resolvable = !synthetic
+                        && (!ambiguous(u, u0, up) || half_period_tie(u, u0, up))
+                        && (!ambiguous(v, v0, vp) || half_period_tie(v, v0, vp));
+                    if lift_singular_recovery && singular_resolvable {
+                        // Fall through: push the nearest-copy representative
+                        // exactly as a resolved step would. A face that lifts
+                        // through the legacy path is untouched, because this
+                        // only fires for a sample the legacy path would have
+                        // bisected and then refused.
+                    } else if refinements < MAX_LIFT_REFINEMENTS {
+                        refinements += 1;
+                        pending.push((pt, synthetic));
+                        pending.push((previous_point.midpoint(pt), true));
+                        continue;
+                    } else {
                         // G2. Bisection is exhausted and the step is still
                         // ambiguous, so no evidence distinguishes the two
                         // candidate period copies. Previously control fell
@@ -3438,6 +3476,7 @@ impl PolyBoundaryPiece {
                         // branch is not one.
                         return Err(TessellationFailureReason::AmbiguousLift);
                     }
+                }
                 }
                 vec.push((Point2::new(u, v), pt).into());
                 previous = Some((u, v));
@@ -3768,6 +3807,22 @@ const AMBIGUOUS_STEP_FRACTION: f64 = 0.45;
 
 /// How many times a single step may be halved before refinement gives up.
 const MAX_LIFT_REFINEMENTS: usize = 8;
+
+/// Half-width of the band around the exact half-period tie at which the
+/// singular-lift recovery (`TRUCK_LIFT_SINGULAR_RECOVERY`) admits an exhausted
+/// step, as a fraction of the period.
+///
+/// The recovery fires only when bisection has exhausted *and* every ambiguous
+/// periodic step lies within this band of exactly half a period. There the two
+/// candidate deck copies are equidistant from the previous sample and differ by
+/// exactly one full period -- they are deck-equivalent representations of the
+/// same physical point, not two distinguishable branches -- so the nearest-copy
+/// representative already chosen by `get_mindiff` is a continuous half-period
+/// step rather than a full-period fold. The band admits only genuine ties
+/// (cone apex / sphere pole crossings between generatrices half a period apart);
+/// a step at, say, `0.6` of a period is a real branch ambiguity and remains
+/// `AmbiguousLift`.
+const SINGULAR_HALF_PERIOD_TOL: f64 = 0.02;
 
 /// How many independent ray directions [`PolyBoundary::include`] may try before
 /// reporting that containment is undecidable at a point.
