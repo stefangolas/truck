@@ -3300,12 +3300,15 @@ impl PolyBoundaryPiece {
         }
         bdry3d.push(bdry3d[0]);
         let lift_probe = std::env::var_os("TRUCK_PROBE_LIFT").is_some();
-        // Refinement-only recovery for the apex/pole singular transition.
-        // Off by default; see `SINGULAR_HALF_PERIOD_TOL` and the exhaustion
-        // branch below. A face that lifts through the legacy path untouched is
-        // byte-identical with this set or unset -- the gate only changes what
-        // happens *after* bisection would otherwise return `AmbiguousLift`.
-        let lift_singular_recovery = std::env::var_os("TRUCK_LIFT_SINGULAR_RECOVERY").is_some();
+        // Apex/pole singular-transition recovery. On by default: it is
+        // refinement-only (it fires solely where the legacy path would return
+        // `AmbiguousLift`) and validated zero-regression on the NIST and ABC
+        // corpora. A face that lifts through the legacy path is byte-identical
+        // with this on or off -- it only changes what happens *after* bisection
+        // would otherwise give up. Set TRUCK_LIFT_SINGULAR_RECOVERY=0 to
+        // disable (emergency withdrawal).
+        let lift_singular_recovery =
+            !matches!(std::env::var("TRUCK_LIFT_SINGULAR_RECOVERY"), Ok(v) if v == "0");
         // PROJ-001. Under this probe the walk does *not* stop at the first
         // failing point: the ratio of failing points to boundary points is the
         // measurement, and three failures out of 400 is a different diagnosis
