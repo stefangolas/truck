@@ -280,6 +280,58 @@ pub enum PointVerdict {
     Inconclusive,
 }
 
+/// Why a within-tolerance candidate lies outside the declared parameter range
+/// (PROJ-003 Stage C).
+///
+/// The face-level `DomainOrContractIssue` verdict is not one mechanism. A
+/// candidate whose world residual is within the caller tolerance but whose UV
+/// is outside the declared range can be: an equivalent representative of a
+/// genuinely periodic surface, a point numerically epsilon outside a closed
+/// boundary, a sign that the represented parameter range does not cover the
+/// surface's actual geometry, or simply a parameter the surface contract does
+/// not cover. The class is derived from the candidate, the declared range, and
+/// the certified lattice; it is what decides whether a principled recovery
+/// exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+pub enum DomainRecoveryClass {
+    /// The candidate differs from an in-range representative by an integer
+    /// number of *certified* surface periods on a certified periodic axis.
+    PeriodicEquivalent,
+    /// The candidate sits only microscopically outside a closed boundary of
+    /// the declared range, within a scale-aware epsilon of it.
+    BoundaryEpsilon,
+    /// The candidate's residual is within tolerance at a parameter far outside
+    /// the declared range, so the represented range and the surface's actual
+    /// (geometric) extent disagree in a nontrivial way.
+    RepresentationRangeMismatch,
+    /// The candidate lies genuinely outside the declared domain and no
+    /// principled transformation brings it back in.
+    TrueOutOfDomain,
+    /// The class could not be established.
+    Unknown,
+}
+
+/// One probed failing boundary point's structured evidence (PROJ-002/PROJ-003).
+///
+/// Holds the best candidate the deep probe found — its UV and re-evaluable
+/// residual — alongside the verdict the probe classified, so a downstream
+/// analysis can inspect *where* the candidate landed (e.g. how far outside the
+/// declared range a `DomainOrContractIssue` candidate sits) rather than only
+/// its label.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct ProjectionPointEvidence {
+    /// The per-point verdict.
+    pub verdict: PointVerdict,
+    /// The route that produced the best candidate.
+    pub route: NearestRoute,
+    /// The best candidate's parameter.
+    pub best_uv: (f64, f64),
+    /// The best candidate's world residual.
+    pub best_residual: f64,
+    /// The domain class, when the point is a domain/contract issue.
+    pub domain_class: Option<DomainRecoveryClass>,
+}
+
 /// The face-level projection witness, aggregated over its probed points.
 #[derive(Clone, Debug, Serialize)]
 pub struct ProjectionWitness {
@@ -309,6 +361,8 @@ pub struct ProjectionWitness {
     pub winning_route: NearestRoute,
     /// Per-point verdict counts, in the face's own order of severity.
     pub point_verdicts: Vec<PointVerdict>,
+    /// The structured evidence of each probed point, when the deep probe ran.
+    pub point_evidence: Vec<ProjectionPointEvidence>,
     /// Searches that stopped on a singular Jacobian.
     pub degenerate_hits: usize,
     /// Searches that exhausted their trial budget.
@@ -648,6 +702,129 @@ pub enum LossBucket {
 }
 
 // ---------------------------------------------------------------------------
+// ARR-TAIL: mechanistic signature of a residual failed face
+// ---------------------------------------------------------------------------
+
+/// The true pipeline stage a residual failed face was lost at.
+///
+/// ARR-TAIL wants the *mechanism*, not the terminal enum alone: two faces with
+/// the same `NoOddParityRegion` reason are different work depending on whether
+/// the parity flood selected nothing or selected only degenerate triangles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Default)]
+pub enum ArrFailureStage {
+    /// The boundary could not be constructed (projection or lift).
+    BoundaryConstruction,
+    /// A constraint was rejected before insertion (overlap / duplicate).
+    ConstraintRejected,
+    /// A constraint was refused by the triangulation during insertion.
+    ConstraintIncomplete,
+    /// The raw CDT produced no triangles.
+    CdtEmpty,
+    /// The parity flood selected no material region.
+    MaterialEmpty,
+    /// Parity selected triangles that validation then removed as degenerate.
+    PostMaterialDegenerate,
+    /// An ambiguous periodic lift.
+    LiftAmbiguous,
+    /// The parity flood contradicted itself.
+    ParityContradiction,
+    /// The stage could not be established from retained evidence.
+    #[default]
+    Unknown,
+}
+
+/// The CDT/material pipeline class of a residual failed face.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Default)]
+pub enum ArrMaterialStage {
+    /// The failure happened before the CDT was ever read.
+    NotReached,
+    /// The CDT produced triangles but no material count was retained.
+    CdtOnly,
+    /// The material filter selected zero triangles.
+    MaterialEmpty,
+    /// The material filter selected triangles, all later removed as degenerate.
+    MaterialDegenerated,
+    /// Material survived validation, yet the face is still lost downstream.
+    MaterialSurvived,
+    /// Not established.
+    #[default]
+    Unknown,
+}
+
+/// The origin-pair class of a witnessed constraint conflict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Default)]
+pub enum ArrProvenanceClass {
+    /// Both segments are authoritative source trim.
+    SourceSource,
+    /// At least one segment is synthesised (closure or seam).
+    SourceSynthetic,
+    /// Both segments are synthesised.
+    SyntheticSynthetic,
+    /// No pair evidence was retained.
+    #[default]
+    None,
+}
+
+/// Whether a seam or deck bridge is implicated in a residual failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Default)]
+pub enum ArrSeamOrDeck {
+    /// No seam segment and no two-loop join record.
+    #[default]
+    None,
+    /// At least one seam segment is present.
+    Seam,
+    /// A two-loop join ran (periodic/deck context).
+    Deck,
+    /// Both seam segments and a two-loop join record are present.
+    SeamAndDeck,
+}
+
+/// The curve-family pair class of a witnessed constraint conflict.
+///
+/// Not derivable from retained evidence today: the presented segments are
+/// parameter-space polylines by the time the CDT sees them, and the source
+/// curve family is not threaded into the insertion path. The variants name
+/// what the class would be once that evidence exists; everything today is
+/// `Unknown`, reported honestly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Default)]
+pub enum CurvePairClass {
+    /// The pair class could not be established from retained evidence.
+    #[default]
+    Unknown,
+}
+
+/// The mechanistic signature of one residual failed face (ARR-TAIL-001).
+///
+/// Diagnostic-only: constructed at diagnosis-build time from evidence the
+/// pipeline already retained, it cannot change rendered geometry. It exists to
+/// cluster the several-thousand-face residual tail by *mechanism* rather than
+/// by terminal-reason histogram. Fields that would require a major
+/// architecture change to fill (e.g. the source curve family of a presented
+/// constraint segment) are left at their `None`/`Unknown` value and reported
+/// honestly as such.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ArrSignature {
+    /// The pipeline stage the face was actually lost at.
+    pub failure_stage: ArrFailureStage,
+    /// The coarse bound-count class: `0`, `1`, `2`, or `>= 3`.
+    pub bound_count_bucket: usize,
+    /// Whether a seam or two-loop-join deck context is implicated.
+    pub seam_or_deck: ArrSeamOrDeck,
+    /// The dominant presented-segment relation among the retained witnesses.
+    pub pair_relation: Option<PresentedSegmentRelation>,
+    /// The origin-pair class of the dominant witnessed conflict.
+    pub pair_provenance: ArrProvenanceClass,
+    /// Whether the dominant conflict is within one bound.
+    pub same_bound: Option<bool>,
+    /// The curve-family pair class. Unavailable for constraint segments today.
+    pub curve_pair_class: CurvePairClass,
+    /// The CDT/material pipeline class.
+    pub material_stage: ArrMaterialStage,
+    /// The projection verdict class of a projection-failed face.
+    pub projection_verdict: Option<PointVerdict>,
+}
+
+// ---------------------------------------------------------------------------
 // Failed face diagnosis
 // ---------------------------------------------------------------------------
 
@@ -710,6 +887,8 @@ pub struct FailedFaceDiagnosis {
     pub route_decisions: Vec<RouteDecisionRecord>,
     /// The deterministic loss bucket.
     pub derived_bucket: LossBucket,
+    /// The mechanistic ARR-TAIL signature, always present for a failed face.
+    pub arr: ArrSignature,
 }
 
 // ---------------------------------------------------------------------------
@@ -921,6 +1100,39 @@ pub fn spline_seed_recovery_enabled() -> bool {
 /// `TRUCK_FORMAL_RECOVERY_PROJ_STAGE_A=0` to disable (emergency withdrawal).
 pub fn proj_residual_recovery_enabled() -> bool {
     formal_recovery_enabled() && recovery_route_enabled("TRUCK_FORMAL_RECOVERY_PROJ_STAGE_A")
+}
+
+/// Whether PROJ-003 Stage B is active: residual-certified admission of a
+/// structural-seed nearest iterate that the legacy chain (including the
+/// spline-seed `search_parameter` retry) rejected.
+///
+/// Refinement-only in the same structural sense as Stage A: it fires only
+/// where the whole legacy projection chain returned `None` *and* Stage A did
+/// not admit a production-start iterate, so a face that projects through the
+/// legacy chain or is recovered by Stage A is byte-identical with this on or
+/// off. The admission contract is the same one Stage A enforces — finite UV,
+/// inside the declared parameter range, `|S(u, v) - P| <= tol` — with the
+/// candidate taken from the bounded nearest searches launched from the
+/// structural (knot-span) seeds rather than from the production starts. Set
+/// `TRUCK_FORMAL_RECOVERY_PROJ_STAGE_B=0` to disable (emergency withdrawal).
+pub fn proj_seed_recovery_enabled() -> bool {
+    formal_recovery_enabled() && recovery_route_enabled("TRUCK_FORMAL_RECOVERY_PROJ_STAGE_B")
+}
+
+/// Whether PROJ-003 Stage C is active: domain/contract recovery of a
+/// within-tolerance iterate that lies outside the declared parameter range.
+///
+/// Refinement-only like the stages before it: it runs only where the whole
+/// legacy chain, Stage A, and Stage B all returned `None` for a point. Unlike
+/// A and B it may *transform* the candidate's coordinates, but only through a
+/// principled domain/periodicity semantics — an integer number of certified
+/// surface periods on a certified periodic axis, or a clamped boundary for a
+/// microscopically-outside candidate — and every admission is re-certified
+/// with the existing caller tolerance (finite UV, in-domain after the
+/// transformation, finite evaluation, `|S(u, v) - P| <= tol`). Set
+/// `TRUCK_FORMAL_RECOVERY_PROJ_STAGE_C=0` to disable (emergency withdrawal).
+pub fn proj_domain_recovery_enabled() -> bool {
+    formal_recovery_enabled() && recovery_route_enabled("TRUCK_FORMAL_RECOVERY_PROJ_STAGE_C")
 }
 
 /// Whether the winding-number reading of material parity is active.
@@ -1383,6 +1595,112 @@ pub(crate) fn derived_bucket(terminal_reason: TessellationFailureReason) -> Loss
     })
 }
 
+/// Derive the ARR-TAIL mechanistic signature from retained evidence.
+///
+/// Purely observational: every input is already retained in the sink or in the
+/// face-level parameters. The signature is what lets the census cluster the
+/// residual tail by mechanism without a new diagnostic sweep.
+fn derive_arr_signature(
+    terminal_reason: TessellationFailureReason,
+    bound_count: usize,
+    seam_segment_count: usize,
+    two_loop_join: Option<&TwoLoopJoinRecord>,
+    witnesses: &[ConstraintConflictWitness],
+    overlap_conflicts: &[ConstraintConflictWitness],
+    cdt_stages: CdtStageVector,
+    projection_witness: Option<&ProjectionWitness>,
+) -> ArrSignature {
+    use TessellationFailureReason as R;
+    // The failure stage, from the terminal reason and the material counts that
+    // separate empty-from-degenerate `NoOddParityRegion`.
+    let material_stage = match cdt_stages.raw_cdt_triangles {
+        None => ArrMaterialStage::NotReached,
+        Some(_) => match cdt_stages.material_selected {
+            None => ArrMaterialStage::CdtOnly,
+            Some(0) => ArrMaterialStage::MaterialEmpty,
+            Some(_) => match cdt_stages.final_valid {
+                Some(0) => ArrMaterialStage::MaterialDegenerated,
+                Some(_) => ArrMaterialStage::MaterialSurvived,
+                None => ArrMaterialStage::Unknown,
+            },
+        },
+    };
+    let failure_stage = match terminal_reason {
+        R::BoundaryProjectionFailed | R::BoundaryPointOffSurface | R::BoundaryWireEmpty => {
+            ArrFailureStage::BoundaryConstruction
+        }
+        R::AmbiguousLift => ArrFailureStage::LiftAmbiguous,
+        R::ConstraintOverlapUnsupported => ArrFailureStage::ConstraintRejected,
+        R::ConstraintInsertionIncomplete => ArrFailureStage::ConstraintIncomplete,
+        R::ContradictoryDualParity => ArrFailureStage::ParityContradiction,
+        R::NoOddParityRegion => match material_stage {
+            ArrMaterialStage::MaterialDegenerated => ArrFailureStage::PostMaterialDegenerate,
+            ArrMaterialStage::MaterialEmpty | ArrMaterialStage::CdtOnly => {
+                ArrFailureStage::MaterialEmpty
+            }
+            _ => ArrFailureStage::Unknown,
+        },
+        _ => ArrFailureStage::Unknown,
+    };
+    let seam_or_deck = match (seam_segment_count > 0, two_loop_join.is_some()) {
+        (true, true) => ArrSeamOrDeck::SeamAndDeck,
+        (true, false) => ArrSeamOrDeck::Seam,
+        (false, true) => ArrSeamOrDeck::Deck,
+        (false, false) => ArrSeamOrDeck::None,
+    };
+    // The dominant witnessed relation and its provenance. Overlaps and
+    // insertion conflicts are held apart in the sink but are the same pair
+    // evidence for the purposes of naming the mechanism.
+    let all: Vec<&ConstraintConflictWitness> =
+        witnesses.iter().chain(overlap_conflicts.iter()).collect();
+    let mut relation_counts: Vec<&PresentedSegmentRelation> =
+        all.iter().map(|w| &w.relation).collect();
+    relation_counts.sort_by_key(|r| format!("{r:?}"));
+    relation_counts.dedup();
+    let pair_relation = relation_counts
+        .into_iter()
+        .max_by_key(|r| all.iter().filter(|w| &w.relation == *r).count())
+        .copied();
+    let provenance_of = |w: &ConstraintConflictWitness| {
+        let incoming = OriginClass::from(w.incoming.origin);
+        let blocking = OriginClass::from(w.blocking.origin);
+        match (
+            incoming.is_authoritative_source(),
+            blocking.is_authoritative_source(),
+        ) {
+            (true, true) => ArrProvenanceClass::SourceSource,
+            (false, false) => ArrProvenanceClass::SyntheticSynthetic,
+            _ => ArrProvenanceClass::SourceSynthetic,
+        }
+    };
+    let dominant = pair_relation.and_then(|relation| {
+        all.iter()
+            .find(|w| w.relation == relation)
+            .copied()
+    });
+    let (pair_provenance, same_bound) = match dominant {
+        Some(w) => (provenance_of(w), w.same_bound),
+        None => (ArrProvenanceClass::None, None),
+    };
+    let projection_verdict = projection_witness.map(|w| w.verdict);
+    ArrSignature {
+        failure_stage,
+        bound_count_bucket: match bound_count {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            _ => 3,
+        },
+        seam_or_deck,
+        pair_relation,
+        pair_provenance,
+        same_bound,
+        curve_pair_class: CurvePairClass::Unknown,
+        material_stage,
+        projection_verdict,
+    }
+}
+
 /// Build the per-face diagnosis from the sink.
 ///
 /// Reads and clears the sink. The `model_id` and `surface_family` fields are
@@ -1415,6 +1733,16 @@ pub(crate) fn build_face_diagnosis(
         let derived_bucket =
             derive_loss_bucket(terminal_reason, &witnesses, vertex_insertion_failed);
         let projection_status = derive_projection_status(terminal_reason);
+        let arr = derive_arr_signature(
+            terminal_reason,
+            bound_count,
+            seam_segment_count,
+            two_loop_join.as_ref(),
+            &witnesses,
+            &overlap_conflicts,
+            cdt_stages,
+            projection_witness.as_ref(),
+        );
         FailedFaceDiagnosis {
             model_id: String::new(),
             source_face_id,
@@ -1439,6 +1767,7 @@ pub(crate) fn build_face_diagnosis(
             projection_witness,
             route_decisions,
             derived_bucket,
+            arr,
         }
     })
 }
@@ -1621,6 +1950,7 @@ mod tests {
             projection_witness: None,
             route_decisions: Vec::new(),
             derived_bucket: LossBucket::SourceSourceSameBoundCrossing,
+            arr: ArrSignature::default(),
         };
         let json1 = serde_json::to_string(&diag).unwrap();
         let json2 = serde_json::to_string(&diag).unwrap();

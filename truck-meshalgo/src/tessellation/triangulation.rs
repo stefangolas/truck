@@ -215,6 +215,18 @@ fn proj_residual_recovery_enabled_cached() -> bool {
     *ENABLED.get_or_init(diagnosis::proj_residual_recovery_enabled)
 }
 
+/// PROJ-003 Stage B gate, read once for the same reason as Stage A's.
+fn proj_seed_recovery_enabled_cached() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(diagnosis::proj_seed_recovery_enabled)
+}
+
+/// PROJ-003 Stage C gate, read once for the same reason as Stage A's.
+fn proj_domain_recovery_enabled_cached() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(diagnosis::proj_domain_recovery_enabled)
+}
+
 /// PROJ-002's deep inverse probe. Same reason for the `OnceLock`, and more of
 /// it: this one runs a full Newton solve per seed per failing point.
 fn projection_deep_probe_enabled() -> bool {
@@ -274,6 +286,37 @@ where
         in_domain: in_domain(outcome.best),
         iterations: 0,
     }
+}
+
+/// Run the bounded structural-seed nearest search and retain the best iterate.
+///
+/// One `probe_nearest` per structural (knot-span) seed, capped at
+/// [`DEEP_SEED_CAP`]. The best iterate over the seeds is folded into
+/// `attempt.seed_best` and its index into `attempt.seed_best_index`. Shared by
+/// the PROJ-002 deep probe and the PROJ-003 Stage B recovery, so the two read
+/// the identical candidate.
+fn probe_structural_seeds<S>(
+    surface: &S,
+    point: Point3,
+    mut attempt: ProjectionAttempt,
+) -> ProjectionAttempt
+where
+    S: ParametricSurface3D + MeshableSurface,
+{
+    let seeds = surface.search_parameter_seeds();
+    attempt.seeds = attempt.seeds.max(seeds.len());
+    attempt.seed_cap_hit = seeds.len() > DEEP_SEED_CAP;
+    for (index, seed) in seeds.into_iter().take(DEEP_SEED_CAP).enumerate() {
+        let outcome = probe_nearest(surface, point, seed);
+        attempt.searches_run += 1;
+        attempt.seeds_tested += 1;
+        let merged = better_outcome(attempt.seed_best, outcome);
+        if merged.residual == outcome.residual && merged.uv == outcome.uv {
+            attempt.seed_best_index = index;
+        }
+        attempt.seed_best = merged;
+    }
+    attempt
 }
 
 /// Classify one failing boundary point from what the deep probe found.
@@ -351,18 +394,19 @@ fn better_outcome(a: NearestOutcome, b: NearestOutcome) -> NearestOutcome {
     }
 }
 
-/// The Stage A admission contract, without the environment gate.
+/// The residual-certified admission contract, on one best candidate.
 ///
-/// Split from [`residual_certified_recovery`] so the mechanism tests can
-/// exercise the contract directly instead of depending on a process-global
-/// cached environment flag.
-fn residual_certified_admission<S: PreMeshableSurface>(
+/// Split from the per-stage wrappers so the mechanism tests can exercise the
+/// contract directly: a candidate is admitted only if its UV is finite, lies
+/// inside the surface's declared parameter range, evaluates to a finite world
+/// point, and re-evaluates to a world residual within the caller tolerance.
+/// No tolerance widening and no domain normalization happen here.
+fn admit_outcome<S: PreMeshableSurface>(
     surface: &S,
     point: Point3,
     tol: f64,
-    attempt: ProjectionAttempt,
+    best: NearestOutcome,
 ) -> Option<((f64, f64), f64)> {
-    let best = attempt.prod_best;
     if !best.ran() {
         return None;
     }
@@ -387,6 +431,20 @@ fn residual_certified_admission<S: PreMeshableSurface>(
         return None;
     }
     Some(((u, v), residual))
+}
+
+/// The Stage A admission contract, without the environment gate.
+///
+/// Split from [`residual_certified_recovery`] so the mechanism tests can
+/// exercise the contract directly instead of depending on a process-global
+/// cached environment flag.
+fn residual_certified_admission<S: PreMeshableSurface>(
+    surface: &S,
+    point: Point3,
+    tol: f64,
+    attempt: ProjectionAttempt,
+) -> Option<((f64, f64), f64)> {
+    admit_outcome(surface, point, tol, attempt.prod_best)
 }
 
 /// PROJ-003 Stage A: residual-certified admission of a production-start
@@ -419,6 +477,230 @@ fn residual_certified_recovery<S: PreMeshableSurface>(
         return None;
     }
     residual_certified_admission(surface, point, tol, attempt)
+}
+
+/// PROJ-003 Stage B admission contract, without the environment gate.
+///
+/// The same contract Stage A enforces, but the candidate is the best iterate of
+/// the bounded nearest searches launched from the surface's structural
+/// (knot-span) seeds, which Stage A does not consider. Runs only after Stage A
+/// refused the point.
+fn residual_certified_seed_admission<S: PreMeshableSurface>(
+    surface: &S,
+    point: Point3,
+    tol: f64,
+    attempt: ProjectionAttempt,
+) -> Option<((f64, f64), f64)> {
+    admit_outcome(surface, point, tol, attempt.seed_best)
+}
+
+/// PROJ-003 Stage B: residual-certified admission of a structural-seed
+/// nearest iterate the legacy projection chain rejected.
+///
+/// PROJ-002's deep probe found `SeedBasinGap` faces: the production starts
+/// (the caller's hint and the hintless presearch) do not reach a within-tol
+/// solution, but a nearest search started from a structural knot-span seed
+/// does. The legacy chain's seed link runs `search_parameter` per seed, which
+/// throws away any iterate Newton's `near2` test did not certify; Stage B
+/// promotes the diagnostic nearest-search into production, admitting the
+/// bounded seed search's best iterate under the same contract as Stage A.
+///
+/// Refinement-only by construction: it runs only where the whole legacy chain
+/// (including the seed link) returned `None` *and* Stage A refused the point,
+/// so it can change nothing that already projected or was recovered by A.
+/// Returns the admitted parameter and its certified residual.
+fn residual_certified_seed_recovery<S: PreMeshableSurface>(
+    surface: &S,
+    point: Point3,
+    tol: f64,
+    attempt: ProjectionAttempt,
+) -> Option<((f64, f64), f64)> {
+    if !proj_seed_recovery_enabled_cached() {
+        return None;
+    }
+    residual_certified_seed_admission(surface, point, tol, attempt)
+}
+
+/// The relative scale at which an out-of-range coordinate counts as a
+/// boundary-epsilon candidate for Stage C classification.
+///
+/// A coordinate within this fraction of the declared span outside the range is
+/// treated as numerical error at a closed boundary; beyond it, the candidate is
+/// a genuine domain disagreement. Deliberately conservative and scale-aware
+/// (relative to the parameter extent, not an absolute UV epsilon).
+const DOMAIN_BOUNDARY_EPSILON_REL: f64 = 1.0e-6;
+
+/// Classify why a within-tolerance candidate lies outside the declared range.
+///
+/// `best` must be a candidate with a finite residual `<= tol` whose UV is
+/// outside the declared parameter range (a `DomainOrContractIssue` point).
+/// Returns [`diagnosis::DomainRecoveryClass::Unknown`] for any input that is
+/// not such a point.
+fn classify_domain_point(
+    best: NearestOutcome,
+    tol: f64,
+    urange: Option<(f64, f64)>,
+    vrange: Option<(f64, f64)>,
+    lattice: &CertifiedLattice,
+) -> diagnosis::DomainRecoveryClass {
+    use diagnosis::DomainRecoveryClass as C;
+    if !best.ran() || !best.residual.is_finite() || best.residual > tol || best.in_domain {
+        return C::Unknown;
+    }
+    let (u, v) = best.uv;
+    // Classify one axis. Returns `None` when the coordinate is inside range (so
+    // that axis is not the question), and the axis's class otherwise.
+    let class_axis = |coord: f64, range: Option<(f64, f64)>, gen: Option<f64>| -> Option<C> {
+        let (lo, hi) = range?;
+        if coord >= lo && coord <= hi {
+            return None;
+        }
+        if let Some(period) = gen {
+            if period.is_finite() && period > 0.0 {
+                let mid = 0.5 * (lo + hi);
+                let shifted = coord - ((coord - mid) / period).round() * period;
+                if shifted >= lo && shifted <= hi {
+                    return Some(C::PeriodicEquivalent);
+                }
+            }
+        }
+        let span = hi - lo;
+        if span <= 0.0 || !span.is_finite() {
+            return Some(C::TrueOutOfDomain);
+        }
+        let outside = if coord > hi { coord - hi } else { lo - coord };
+        let frac = outside / span;
+        if frac <= DOMAIN_BOUNDARY_EPSILON_REL {
+            Some(C::BoundaryEpsilon)
+        } else if frac >= 1.0 {
+            Some(C::RepresentationRangeMismatch)
+        } else {
+            Some(C::TrueOutOfDomain)
+        }
+    };
+    let ua = class_axis(u, urange, lattice.u_generator());
+    let va = class_axis(v, vrange, lattice.v_generator());
+    match (ua, va) {
+        (None, None) => C::Unknown,
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+        (Some(a), Some(b)) => {
+            // With two out-of-range axes the class is the more privileged one:
+            // a periodically reducible axis names a periodic equivalent, a
+            // boundary epsilon names numerical error, and the rest are genuine
+            // domain disagreements.
+            let rank = |c: C| match c {
+                C::PeriodicEquivalent => 3,
+                C::BoundaryEpsilon => 2,
+                C::RepresentationRangeMismatch => 1,
+                _ => 0,
+            };
+            if rank(a) >= rank(b) { a } else { b }
+        }
+    }
+}
+
+/// PROJ-003 Stage C: recover a within-tolerance candidate outside the declared
+/// parameter range, through principled domain/periodicity semantics only.
+///
+/// The `DomainOrContractIssue` population is not one mechanism. This admits a
+/// candidate only when a certified periodic axis maps it back into the declared
+/// range by an integer number of periods (`PeriodicEquivalent`), or when it
+/// sits microscopically outside a closed boundary and clamping to the boundary
+/// still re-evaluates within the caller tolerance (`BoundaryEpsilon`). Every
+/// other class is diagnostic-only. Every admission is re-certified under the
+/// existing contract: finite UV, in-domain after the transformation, finite
+/// evaluation, `|S(u, v) - P| <= tol`. Returns the admitted parameter, its
+/// certified residual, and the class that justified the admission.
+fn residual_certified_domain_recovery<S: PreMeshableSurface>(
+    surface: &S,
+    point: Point3,
+    tol: f64,
+    attempt: ProjectionAttempt,
+    lattice: &CertifiedLattice,
+) -> Option<((f64, f64), f64, diagnosis::DomainRecoveryClass)> {
+    use diagnosis::DomainRecoveryClass as C;
+    if !proj_domain_recovery_enabled_cached() {
+        return None;
+    }
+    // The within-tolerance candidate that made this a domain question.
+    let candidate = if attempt.prod_best.ran() && attempt.prod_best.residual <= tol {
+        attempt.prod_best
+    } else if attempt.seed_best.ran() && attempt.seed_best.residual <= tol {
+        attempt.seed_best
+    } else {
+        return None;
+    };
+    if !candidate.in_domain {
+        let (urange, vrange) = surface.try_range_tuple();
+        let class = classify_domain_point(candidate, tol, urange, vrange, lattice);
+        let (u, v) = candidate.uv;
+        let transform = |coord: f64,
+                         range: Option<(f64, f64)>,
+                         gen: Option<f64>|
+         -> Option<f64> {
+            let (lo, hi) = range?;
+            if coord >= lo && coord <= hi {
+                return Some(coord);
+            }
+            if let Some(period) = gen {
+                if period.is_finite() && period > 0.0 {
+                    let mid = 0.5 * (lo + hi);
+                    let shifted = coord - ((coord - mid) / period).round() * period;
+                    if shifted >= lo && shifted <= hi {
+                        return Some(shifted);
+                    }
+                }
+            }
+            None
+        };
+        let (nu, nv) = match class {
+            // Normalize every out-of-range axis by certified periods. An axis
+            // that is out of range and *not* periodically reducible refuses the
+            // whole admission — Stage C never mixes a periodic shift with a
+            // clamp or an epsilon to force a candidate in.
+            C::PeriodicEquivalent => {
+                let nu = transform(u, urange, lattice.u_generator())?;
+                let nv = transform(v, vrange, lattice.v_generator())?;
+                (nu, nv)
+            }
+            // Clamp each out-of-range coordinate to the closed boundary, then
+            // re-certify below.
+            C::BoundaryEpsilon => {
+                let (urange, vrange) = (urange?, vrange?);
+                let nu = if u < urange.0 {
+                    urange.0
+                } else if u > urange.1 {
+                    urange.1
+                } else {
+                    u
+                };
+                let nv = if v < vrange.0 {
+                    vrange.0
+                } else if v > vrange.1 {
+                    vrange.1
+                } else {
+                    v
+                };
+                (nu, nv)
+            }
+            _ => return None,
+        };
+        if !nu.is_finite() || !nv.is_finite() {
+            return None;
+        }
+        let evaluated = surface.subs(nu, nv);
+        if !evaluated.x.is_finite() || !evaluated.y.is_finite() || !evaluated.z.is_finite() {
+            return None;
+        }
+        let residual = evaluated.distance(point);
+        if !residual.is_finite() || residual > tol {
+            return None;
+        }
+        Some(((nu, nv), residual, class))
+    } else {
+        None
+    }
 }
 
 pub(super) fn by_search_nearest_parameter<S>(
@@ -504,28 +786,21 @@ where
             attempt.searches_run += 1;
         }
     }
+    // PROJ-003 Stage B. On a point the whole production chain (including the
+    // spline-seed link) has rejected, run the bounded structural-seed *nearest*
+    // search and retain the best iterate, so the Stage B recovery has a
+    // candidate. The deep probe needs the identical iterate to classify, so it
+    // runs here too whenever either gate is open.
+    if result.is_none()
+        && (proj_seed_recovery_enabled_cached() || projection_deep_probe_enabled())
+    {
+        attempt = probe_structural_seeds(surface, point, attempt);
+    }
     // PROJ-002. Only on a point production has already rejected, and only under
-    // its own gate: this runs a full Newton solve per seed, and the seed count
-    // is per knot span.
+    // its own gate: this labels the attempt for classification. The structural
+    // seed probing above already ran wherever the deep probe runs.
     if result.is_none() && projection_deep_probe_enabled() {
         attempt.deep = true;
-        // The structural seeds, asked with the *nearest* search rather than
-        // `search_parameter`. PROJ-001 could not answer this: `search_parameter`
-        // is all-or-nothing and returns `None` unless the point is already
-        // within tolerance, so a failing point yielded no residual at all.
-        let seeds = surface.search_parameter_seeds();
-        attempt.seeds = attempt.seeds.max(seeds.len());
-        attempt.seed_cap_hit = seeds.len() > DEEP_SEED_CAP;
-        for (index, seed) in seeds.into_iter().take(DEEP_SEED_CAP).enumerate() {
-            let outcome = probe_nearest(surface, point, seed);
-            attempt.searches_run += 1;
-            attempt.seeds_tested += 1;
-            let merged = better_outcome(attempt.seed_best, outcome);
-            if merged.residual == outcome.residual && merged.uv == outcome.uv {
-                attempt.seed_best_index = index;
-            }
-            attempt.seed_best = merged;
-        }
         for outcome in [attempt.prod_best, attempt.seed_best] {
             if outcome.degenerate {
                 attempt.degenerate_hits += 1;
@@ -3799,6 +4074,17 @@ impl PolyBoundaryPiece {
         let mut recovered_points = 0usize;
         let mut recovered_residual_min = f64::INFINITY;
         let mut recovered_residual_max = 0.0f64;
+        // PROJ-003 Stage B per-face accumulators: structural-seed admissions.
+        let mut recovered_b_points = 0usize;
+        let mut recovered_b_residual_min = f64::INFINITY;
+        let mut recovered_b_residual_max = 0.0f64;
+        // PROJ-003 Stage C per-face accumulators: domain/periodicity admissions
+        // and the class that justified each.
+        let mut recovered_c_points = 0usize;
+        let mut recovered_c_residual_min = f64::INFINITY;
+        let mut recovered_c_residual_max = 0.0f64;
+        let mut domain_class_counts: rustc_hash::FxHashMap<diagnosis::DomainRecoveryClass, usize> =
+            rustc_hash::FxHashMap::default();
         // PROJ-002 per-face accumulators.
         let mut deep_probed = 0usize;
         let mut deep_point_cap_hit = false;
@@ -3810,6 +4096,10 @@ impl PolyBoundaryPiece {
         let mut deep_worst_ratio = 0.0f64;
         let mut deep_point_verdicts: Vec<(diagnosis::PointVerdict, diagnosis::NearestRoute)> =
             Vec::new();
+        // PROJ-002/PROJ-003 structured point evidence, aligned with
+        // `deep_point_verdicts`, carrying the best candidate and its domain
+        // class for the face's witness.
+        let mut deep_point_evidence: Vec<diagnosis::ProjectionPointEvidence> = Vec::new();
         let mut failed_links = [0usize; 6];
         let mut seeds_offered = 0usize;
         let mut best_residual = f64::INFINITY;
@@ -3856,6 +4146,29 @@ impl PolyBoundaryPiece {
                             recovered_residual_min = recovered_residual_min.min(residual);
                             recovered_residual_max = recovered_residual_max.max(residual);
                             uv
+                        } else if let Some((uv, residual)) =
+                            // PROJ-003 Stage B: residual-certified admission of
+                            // the structural-seed nearest iterate. Runs only
+                            // after Stage A refused the point, so neither a
+                            // legacy success nor a Stage-A success can be
+                            // altered by it.
+                            residual_certified_seed_recovery(surface, pt, tol, attempt)
+                        {
+                            recovered_b_points += 1;
+                            recovered_b_residual_min = recovered_b_residual_min.min(residual);
+                            recovered_b_residual_max = recovered_b_residual_max.max(residual);
+                            uv
+                        } else if let Some((uv, residual, class)) =
+                            // PROJ-003 Stage C: domain/contract recovery. Runs
+                            // only after the whole legacy chain, Stage A, and
+                            // Stage B all refused the point.
+                            residual_certified_domain_recovery(surface, pt, tol, attempt, lattice)
+                        {
+                            recovered_c_points += 1;
+                            recovered_c_residual_min = recovered_c_residual_min.min(residual);
+                            recovered_c_residual_max = recovered_c_residual_max.max(residual);
+                            *domain_class_counts.entry(class).or_insert(0) += 1;
+                            uv
                         } else if proj_probe {
                             failed_points += 1;
                             failed_links[usize::from(attempt.link).min(5)] += 1;
@@ -3884,6 +4197,36 @@ impl PolyBoundaryPiece {
                                         deep_worst_ratio = deep_worst_ratio.max(ratio);
                                     }
                                     deep_point_verdicts.push((verdict, route));
+                                    // PROJ-003. The structured point evidence:
+                                    // the best candidate's UV/residual and, for a
+                                    // domain/contract point, its mechanism class.
+                                    let domain_class = match verdict {
+                                        diagnosis::PointVerdict::DomainOrContractIssue => {
+                                            let within = |o: &NearestOutcome| {
+                                                o.ran() && o.residual <= tol
+                                            };
+                                            let candidate = if within(&prod) {
+                                                prod
+                                            } else {
+                                                seed
+                                            };
+                                            Some(classify_domain_point(
+                                                candidate,
+                                                tol,
+                                                urange,
+                                                vrange,
+                                                lattice,
+                                            ))
+                                        }
+                                        _ => None,
+                                    };
+                                    deep_point_evidence.push(diagnosis::ProjectionPointEvidence {
+                                        verdict,
+                                        route,
+                                        best_uv: best.uv,
+                                        best_residual: best.residual,
+                                        domain_class,
+                                    });
                                 } else {
                                     deep_point_cap_hit = true;
                                 }
@@ -4035,7 +4378,10 @@ impl PolyBoundaryPiece {
         // the reconciliation can track each admission through the downstream
         // walk to its terminal outcome. Deliberately separate from the PROJ
         // record above — a face admitted and then lost later needs both lines.
-        if recovered_points > 0 && (proj_probe || std::env::var_os("TRUCK_PROBE_PROJ_RECOVERY").is_some())
+        if (recovered_points > 0
+            || recovered_b_points > 0
+            || recovered_c_points > 0)
+            && (proj_probe || std::env::var_os("TRUCK_PROBE_PROJ_RECOVERY").is_some())
         {
             let (source_face_id, declared_face_index, _) =
                 PROBE_FACE_CONTEXT.with(std::cell::Cell::get);
@@ -4045,12 +4391,38 @@ impl PolyBoundaryPiece {
             let sid = source_face_id
                 .map(|id| format!("#{id}"))
                 .unwrap_or_else(|| "-".to_string());
-            eprintln!(
-                "PROJ_RECOVER\tsource_face_id={sid}\t\
-                 declared_face_index={declared_face_index}\tadmitted={recovered_points}\t\
-                 residual_min={:.6e}\tresidual_max={:.6e}\ttol={tol:.6e}",
-                recovered_residual_min, recovered_residual_max,
-            );
+            if recovered_points > 0 {
+                eprintln!(
+                    "PROJ_RECOVER\tsource_face_id={sid}\t\
+                     declared_face_index={declared_face_index}\tadmitted={recovered_points}\t\
+                     residual_min={:.6e}\tresidual_max={:.6e}\ttol={tol:.6e}",
+                    recovered_residual_min, recovered_residual_max,
+                );
+            }
+            if recovered_b_points > 0 {
+                eprintln!(
+                    "PROJ_RECOVER_B\tsource_face_id={sid}\t\
+                     declared_face_index={declared_face_index}\tadmitted={recovered_b_points}\t\
+                     residual_min={:.6e}\tresidual_max={:.6e}\ttol={tol:.6e}",
+                    recovered_b_residual_min, recovered_b_residual_max,
+                );
+            }
+            if recovered_c_points > 0 {
+                let mut classes: Vec<_> = domain_class_counts.iter().collect();
+                classes.sort_by_key(|(c, _)| format!("{c:?}"));
+                let classes: Vec<String> = classes
+                    .into_iter()
+                    .map(|(c, n)| format!("{c:?}={n}"))
+                    .collect();
+                eprintln!(
+                    "PROJ_RECOVER_C\tsource_face_id={sid}\t\
+                     declared_face_index={declared_face_index}\tadmitted={recovered_c_points}\t\
+                     residual_min={:.6e}\tresidual_max={:.6e}\ttol={tol:.6e}\tclasses={}",
+                    recovered_c_residual_min,
+                    recovered_c_residual_max,
+                    classes.join(","),
+                );
+            }
         }
         if proj_probe && failed_points > 0 {
             if !deep_point_verdicts.is_empty() {
@@ -4079,6 +4451,7 @@ impl PolyBoundaryPiece {
                     worst_residual_over_tol: (deep_worst_ratio > 0.0).then_some(deep_worst_ratio),
                     winning_route,
                     point_verdicts: verdicts,
+                    point_evidence: std::mem::take(&mut deep_point_evidence),
                     degenerate_hits: deep_degenerate,
                     nonconvergent: deep_nonconvergent,
                     verdict,
@@ -7990,7 +8363,7 @@ mod segment_origin_tests {
 mod proj003_stage_a_tests {
     use super::*;
     use truck_geotrait::algo::surface::SsnpVector;
-    use truck_modeling::{BSplineSurface, KnotVec, Point3, Vector3};
+    use truck_modeling::{BSplineSurface, KnotVec, Line, Point3, RevolutedCurve, Vector3};
 
     /// A 2x2 bilinear patch over `(u, v) in [0,1] x [0,1]` lying in the plane
     /// `z = 0`. Its parameter range is declared by its knot vector, so domain
@@ -8132,5 +8505,211 @@ mod proj003_stage_a_tests {
                 );
             }
         }
+    }
+
+    /// A unit cylinder around the z axis: `subs(u, v)` applies
+    /// `rotation_matrix(v)`, so the `v` axis is genuinely periodic with period
+    /// `2π` and its declared range is `[0, 2π)`.
+    fn unit_cylinder() -> RevolutedCurve<Line<Point3>> {
+        RevolutedCurve::by_revolution(
+            Line::from_origin_direction(Point3::new(1.0, 0.0, 0.0), Vector3::unit_z()),
+            Point3::origin(),
+            Vector3::unit_z(),
+        )
+    }
+
+    fn attempt_with_seed(seed_best: NearestOutcome) -> ProjectionAttempt {
+        let mut attempt = ProjectionAttempt::default();
+        attempt.seed_best = seed_best;
+        attempt
+    }
+
+    // ---- PROJ-003 Stage B ----
+
+    /// A structural-seed candidate that is finite, in-domain, and within the
+    /// caller tolerance is admitted, exactly like a Stage A production-start
+    /// candidate.
+    #[test]
+    fn structural_seed_candidate_is_admitted() {
+        let surface = bilinear_patch();
+        let point = Point3::new(0.5, 0.5, 0.0);
+        let attempt = attempt_with_seed(outcome((0.5, 0.5), 0.0, true, false));
+        let admitted = residual_certified_seed_admission(&surface, point, 1.0e-3, attempt)
+            .expect("a finite, in-domain, within-tol seed iterate must be admitted");
+        assert_eq!(admitted.0, (0.5, 0.5), "the certified candidate's UV is kept");
+        assert!(admitted.1 <= 1.0e-3, "the re-evaluated residual is certified");
+    }
+
+    /// A structural-seed candidate beyond the caller tolerance stays rejected.
+    #[test]
+    fn structural_seed_beyond_tolerance_stays_rejected() {
+        let surface = bilinear_patch();
+        let point = Point3::new(5.0, 5.0, 0.0);
+        let attempt = attempt_with_seed(outcome((0.5, 0.5), 6.4, true, false));
+        assert_eq!(
+            residual_certified_seed_admission(&surface, point, 1.0e-3, attempt),
+            None,
+            "a candidate that re-evaluates beyond tolerance must not be admitted"
+        );
+    }
+
+    /// A structural-seed candidate outside the declared nonperiodic range stays
+    /// rejected: Stage B never normalises or clamps, that is a Stage C
+    /// question.
+    #[test]
+    fn structural_seed_out_of_domain_stays_rejected() {
+        let surface = bilinear_patch();
+        let point = Point3::new(0.0, 0.0, 0.0);
+        let attempt = attempt_with_seed(outcome((2.0, 0.5), 0.0, false, false));
+        assert_eq!(
+            residual_certified_seed_admission(&surface, point, 1.0e-3, attempt),
+            None,
+            "an out-of-domain seed iterate is a Stage C question, not a Stage B admission"
+        );
+    }
+
+    /// A Stage A (production-start) success is not replaced: when the seed
+    /// search never ran, Stage B admits nothing, so the ordering of the chain
+    /// is what keeps Stage A wins intact.
+    #[test]
+    fn stage_a_success_is_not_replaced_by_seed_admission() {
+        let surface = bilinear_patch();
+        let point = Point3::new(0.5, 0.5, 0.0);
+        let mut attempt = ProjectionAttempt::default();
+        attempt.prod_best = outcome((0.5, 0.5), 0.0, true, false);
+        attempt.seed_best = NearestOutcome::NONE;
+        assert_eq!(
+            residual_certified_seed_admission(&surface, point, 1.0e-3, attempt),
+            None,
+            "with no seed search there is no Stage B candidate to certify"
+        );
+    }
+
+    /// A probe that never ran (no finite residual) admits nothing.
+    #[test]
+    fn no_ran_seed_probe_stays_rejected() {
+        let surface = bilinear_patch();
+        assert_eq!(
+            residual_certified_seed_admission(
+                &surface,
+                Point3::origin(),
+                1.0e-3,
+                ProjectionAttempt::default(),
+            ),
+            None,
+            "with seed_best = NONE there is no candidate to certify"
+        );
+    }
+
+    // ---- PROJ-003 Stage C ----
+
+    fn cylinder_lattice() -> CertifiedLattice {
+        use super::super::domain::lattice::Axis;
+        CertifiedLattice::revolution(Axis::V, AxisPeriodStatus::NonPeriodic)
+    }
+
+    /// A candidate on a genuinely periodic axis that differs from an in-range
+    /// representative by one certified period is normalized and admitted. The
+    /// point `(-1, 0, 0.5)` lies on the cylinder at `v = π`; the candidate at
+    /// `v = 3π` is deck-equivalent to it.
+    #[test]
+    fn periodic_equivalent_candidate_is_normalized_and_admitted() {
+        let surface = unit_cylinder();
+        let point = Point3::new(-1.0, 0.0, 0.5);
+        let attempt = attempt_with_seed(outcome((0.5, 3.0 * std::f64::consts::PI), 0.0, false, false));
+        let admitted = residual_certified_domain_recovery(&surface, point, 1.0e-3, attempt, &cylinder_lattice())
+            .expect("a certified-periodic out-of-range candidate must be recoverable");
+        assert_eq!(
+            admitted.0,
+            (0.5, std::f64::consts::PI),
+            "one certified period is subtracted along the periodic axis"
+        );
+        assert_eq!(
+            admitted.2,
+            diagnosis::DomainRecoveryClass::PeriodicEquivalent,
+            "the admission is justified by periodic equivalence"
+        );
+    }
+
+    /// A periodic candidate on an axis the lattice does *not* certify must not
+    /// be normalized: an uncertified period is not a generator. At more than a
+    /// whole declared span outside, the class is the nontrivial range mismatch,
+    /// not a recoverable periodic equivalence.
+    #[test]
+    fn uncertified_period_is_never_normalized() {
+        let surface = unit_cylinder();
+        let point = Point3::new(-1.0, 0.0, 0.5);
+        let attempt = attempt_with_seed(outcome((0.5, 5.0 * std::f64::consts::PI), 0.0, false, false));
+        let non_periodic = CertifiedLattice::NON_PERIODIC;
+        assert_eq!(
+            residual_certified_domain_recovery(&surface, point, 1.0e-3, attempt, &non_periodic),
+            None,
+            "without a certified generator the same candidate is not recoverable"
+        );
+        let class = classify_domain_point(
+            attempt.seed_best,
+            1.0e-3,
+            Some((0.0, 1.0)),
+            Some((0.0, 2.0 * std::f64::consts::PI)),
+            &non_periodic,
+        );
+        assert_eq!(
+            class,
+            diagnosis::DomainRecoveryClass::RepresentationRangeMismatch,
+            "a candidate a whole span outside with no period is a range mismatch"
+        );
+    }
+
+    /// A candidate microscopically outside a closed boundary is classified as
+    /// a boundary epsilon, and clamping it to the boundary still re-evaluates
+    /// within tolerance.
+    #[test]
+    fn boundary_epsilon_is_classified_and_clamped() {
+        let surface = bilinear_patch();
+        // The point is inside the patch; the candidate sits a tiny epsilon
+        // above the u=1 boundary.
+        let point = Point3::new(1.0, 0.5, 0.0);
+        let eps = 1.0e-9;
+        let attempt = attempt_with_seed(outcome((1.0 + eps, 0.5), 0.0, false, false));
+        let class = classify_domain_point(
+            attempt.seed_best,
+            1.0e-3,
+            Some((0.0, 1.0)),
+            Some((0.0, 1.0)),
+            &CertifiedLattice::NON_PERIODIC,
+        );
+        assert_eq!(class, diagnosis::DomainRecoveryClass::BoundaryEpsilon);
+        let admitted = residual_certified_domain_recovery(&surface, point, 1.0e-3, attempt, &CertifiedLattice::NON_PERIODIC)
+            .expect("a microscopically-outside candidate clamps and re-certifies");
+        assert_eq!(admitted.0, (1.0, 0.5), "the coordinate is clamped to the boundary");
+        assert_eq!(admitted.2, diagnosis::DomainRecoveryClass::BoundaryEpsilon);
+    }
+
+    /// A candidate genuinely far outside a nonperiodic range is a
+    /// representation mismatch, and is *not* recovered by Stage C.
+    #[test]
+    fn representation_range_mismatch_is_not_admitted() {
+        let surface = bilinear_patch();
+        let point = Point3::new(0.0, 0.0, 0.0);
+        let attempt = attempt_with_seed(outcome((5.0, 0.5), 0.0, false, false));
+        assert_eq!(
+            residual_certified_domain_recovery(&surface, point, 1.0e-3, attempt, &CertifiedLattice::NON_PERIODIC),
+            None,
+            "a far-outside nonperiodic candidate is diagnostic-only"
+        );
+    }
+
+    /// A candidate whose residual exceeds tolerance is not a domain question
+    /// and is not admitted by Stage C.
+    #[test]
+    fn domain_recovery_respects_tolerance() {
+        let surface = unit_cylinder();
+        let point = Point3::new(-1.0, 0.0, 0.5);
+        let attempt = attempt_with_seed(outcome((0.5, 3.0 * std::f64::consts::PI), 5.0, false, false));
+        assert_eq!(
+            residual_certified_domain_recovery(&surface, point, 1.0e-3, attempt, &cylinder_lattice()),
+            None,
+            "Stage C never widens the caller tolerance"
+        );
     }
 }
