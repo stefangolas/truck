@@ -3794,6 +3794,11 @@ impl PolyBoundaryPiece {
         // it — every witness silently empty.
         let proj_probe = projection_probe_enabled();
         let mut failed_points = 0usize;
+        // PROJ-003 Stage A per-face accumulators: boundary points the residual
+        // recovery admitted, and the certified residual spread across them.
+        let mut recovered_points = 0usize;
+        let mut recovered_residual_min = f64::INFINITY;
+        let mut recovered_residual_max = 0.0f64;
         // PROJ-002 per-face accumulators.
         let mut deep_probed = 0usize;
         let mut deep_point_cap_hit = false;
@@ -3838,43 +3843,55 @@ impl PolyBoundaryPiece {
                 let (mut u, mut v) = match (projected, synthetic) {
                     (Some(uv), _) => uv,
                     (None, true) => continue,
-                    (None, false) if proj_probe => {
-                        let attempt = last_projection_attempt();
-                        failed_points += 1;
-                        failed_links[usize::from(attempt.link).min(5)] += 1;
-                        seeds_offered = seeds_offered.max(attempt.seeds);
-                        if attempt.best_residual.is_finite() {
-                            best_residual = best_residual.min(attempt.best_residual);
-                        }
-                        first_failed_point.get_or_insert(pt);
-                        // PROJ-002. `tol` is known here and not in the closure,
-                        // so the classification has to happen at this end of
-                        // the thread-local.
-                        if attempt.deep {
-                            if deep_probed < DEEP_POINT_CAP {
-                                deep_probed += 1;
-                                deep_seeds_offered = deep_seeds_offered.max(attempt.seeds);
-                                deep_seed_cap_hit |= attempt.seed_cap_hit;
-                                deep_degenerate += attempt.degenerate_hits;
-                                deep_nonconvergent += attempt.nonconvergent;
-                                let prod = attempt.prod_best;
-                                let seed = attempt.seed_best;
-                                let best = better_outcome(prod, seed);
-                                let (verdict, route) = classify_projection_point(prod, seed, tol);
-                                if best.ran() {
-                                    let ratio = best.residual / tol;
-                                    deep_best_ratio = deep_best_ratio.min(ratio);
-                                    deep_worst_ratio = deep_worst_ratio.max(ratio);
-                                }
-                                deep_point_verdicts.push((verdict, route));
-                            } else {
-                                deep_point_cap_hit = true;
-                            }
-                        }
-                        continue;
-                    }
                     (None, false) => {
-                        return Err(TessellationFailureReason::BoundaryProjectionFailed)
+                        let attempt = last_projection_attempt();
+                        // PROJ-003 Stage A: before giving the face up, admit a
+                        // residual-certified iterate from a start production
+                        // already used. Runs only here — after the whole legacy
+                        // chain returned `None` — so it is refinement-only.
+                        if let Some((uv, residual)) =
+                            residual_certified_recovery(surface, pt, tol, attempt)
+                        {
+                            recovered_points += 1;
+                            recovered_residual_min = recovered_residual_min.min(residual);
+                            recovered_residual_max = recovered_residual_max.max(residual);
+                            uv
+                        } else if proj_probe {
+                            failed_points += 1;
+                            failed_links[usize::from(attempt.link).min(5)] += 1;
+                            seeds_offered = seeds_offered.max(attempt.seeds);
+                            if attempt.best_residual.is_finite() {
+                                best_residual = best_residual.min(attempt.best_residual);
+                            }
+                            first_failed_point.get_or_insert(pt);
+                            // PROJ-002. `tol` is known here and not in the closure,
+                            // so the classification has to happen at this end of
+                            // the thread-local.
+                            if attempt.deep {
+                                if deep_probed < DEEP_POINT_CAP {
+                                    deep_probed += 1;
+                                    deep_seeds_offered = deep_seeds_offered.max(attempt.seeds);
+                                    deep_seed_cap_hit |= attempt.seed_cap_hit;
+                                    deep_degenerate += attempt.degenerate_hits;
+                                    deep_nonconvergent += attempt.nonconvergent;
+                                    let prod = attempt.prod_best;
+                                    let seed = attempt.seed_best;
+                                    let best = better_outcome(prod, seed);
+                                    let (verdict, route) = classify_projection_point(prod, seed, tol);
+                                    if best.ran() {
+                                        let ratio = best.residual / tol;
+                                        deep_best_ratio = deep_best_ratio.min(ratio);
+                                        deep_worst_ratio = deep_worst_ratio.max(ratio);
+                                    }
+                                    deep_point_verdicts.push((verdict, route));
+                                } else {
+                                    deep_point_cap_hit = true;
+                                }
+                            }
+                            continue;
+                        } else {
+                            return Err(TessellationFailureReason::BoundaryProjectionFailed)
+                        }
                     }
                 };
                 // A nearest point is not an incidence.
@@ -4013,6 +4030,27 @@ impl PolyBoundaryPiece {
                 previous = Some((u, v));
                 previous_pt = Some(pt);
             }
+        }
+        // PROJ-003 Stage A probe: one record per face with admitted points, so
+        // the reconciliation can track each admission through the downstream
+        // walk to its terminal outcome. Deliberately separate from the PROJ
+        // record above — a face admitted and then lost later needs both lines.
+        if recovered_points > 0 && (proj_probe || std::env::var_os("TRUCK_PROBE_PROJ_RECOVERY").is_some())
+        {
+            let (source_face_id, declared_face_index, _) =
+                PROBE_FACE_CONTEXT.with(std::cell::Cell::get);
+            // The id prints in the ledger's format (`#110020` / `-`) so the
+            // admission record joins cleanly to the census ledger, which keys
+            // faces by `source_face_id=#...`.
+            let sid = source_face_id
+                .map(|id| format!("#{id}"))
+                .unwrap_or_else(|| "-".to_string());
+            eprintln!(
+                "PROJ_RECOVER\tsource_face_id={sid}\t\
+                 declared_face_index={declared_face_index}\tadmitted={recovered_points}\t\
+                 residual_min={:.6e}\tresidual_max={:.6e}\ttol={tol:.6e}",
+                recovered_residual_min, recovered_residual_max,
+            );
         }
         if proj_probe && failed_points > 0 {
             if !deep_point_verdicts.is_empty() {
