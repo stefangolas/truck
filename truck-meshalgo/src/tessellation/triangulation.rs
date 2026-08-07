@@ -3331,6 +3331,11 @@ impl PolyBoundaryPiece {
             pending.clear();
             pending.push((*point, false));
             let mut refinements = 0usize;
+            // The originating real boundary sample for the current bisection
+            // chain. Set when the first real sample is found ambiguous; read at
+            // exhaustion to admit a singular half-period transition on the
+            // original sample (not the synthetic midpoint that exhausted).
+            let mut origin: Option<(f64, f64, Point3)> = None;
             while let Some((pt, synthetic)) = pending.pop() {
                 let projected = sp(surface, pt, previous);
                 // A midpoint is only a device for disambiguating the step, and
@@ -3428,54 +3433,64 @@ impl PolyBoundaryPiece {
                         })
                     };
                 if ambiguous(u, u0, up) || ambiguous(v, v0, vp) {
+                    // Remember the originating real sample for this bisection
+                    // chain. Only the first real sample is the boundary point;
+                    // every later sample in the chain is a synthetic midpoint.
+                    if !synthetic && origin.is_none() {
+                        origin = Some((u, v, pt));
+                    }
+                    if refinements < MAX_LIFT_REFINEMENTS {
+                        refinements += 1;
+                        pending.push((pt, synthetic));
+                        pending.push((previous_point.midpoint(pt), true));
+                        continue;
+                    }
+                    // G2. Bisection is exhausted and the step is still
+                    // ambiguous, so no evidence distinguishes the two
+                    // candidate period copies. Previously control fell
+                    // through here and the ambiguous value was pushed with
+                    // nothing recording that it was a guess — the face then
+                    // proceeded as though the lift were certified. FS
+                    // Def. 14 requires a continuous lift; an unresolved
+                    // branch is not one.
+                    //
                     // Singular-transition recovery (TRUCK_LIFT_SINGULAR_RECOVERY,
-                    // default off). A rank-1 periodic surface whose boundary
-                    // crosses a rank-deficient point -- a cone apex, a sphere
-                    // pole -- reaches here with a *real* on-surface boundary
-                    // sample whose periodic step is an exact half-period tie:
-                    // the two flanking generatrices sit half a period apart, and
-                    // the chord between them crosses the axis off-surface. That
-                    // makes bisection pointless -- every chord midpoint is
-                    // off-surface and projects to one of the two branches, so
-                    // the step never shrinks, and exhaustion is reached on a
-                    // synthetic midpoint rather than on the real sample. At the
-                    // half-period tie the two candidate deck copies are
-                    // equidistant from the previous sample and differ by exactly
-                    // one full period, so the nearest-copy representative
-                    // already chosen by `get_mindiff` is a continuous
-                    // half-period step rather than a full-period fold. Admit it
-                    // directly, before any off-surface midpoint is invented.
+                    // default off): exhaustion is the singularity certificate.
+                    // A regular surface -- e.g. a cylinder -- resolves a
+                    // half-period step via bisection (the chord midpoint
+                    // projects to the mid-angle and the step shrinks), so it
+                    // never reaches this branch and is never admitted. Only a
+                    // rank-deficient transition (cone apex, sphere pole) leaves
+                    // the step unshrunk at exhaustion: the chord midpoint is
+                    // off-surface and projects to one of the two branches. At
+                    // the exact half-period tie the two candidate deck copies
+                    // are equidistant and differ by one full period, so the
+                    // nearest-copy representative is a continuous half-period
+                    // step rather than a full-period fold. Admit the ORIGINAL
+                    // real sample (not the synthetic midpoint that exhausted).
                     let half_period_tie = |now: f64, before: f64, period: Option<f64>| {
                         period.is_some_and(|period| {
                             ((f64::abs(now - before) / period) - 0.5).abs()
                                 <= SINGULAR_HALF_PERIOD_TOL
                         })
                     };
-                    let singular_resolvable = !synthetic
-                        && (!ambiguous(u, u0, up) || half_period_tie(u, u0, up))
-                        && (!ambiguous(v, v0, vp) || half_period_tie(v, v0, vp));
-                    if lift_singular_recovery && singular_resolvable {
-                        // Fall through: push the nearest-copy representative
-                        // exactly as a resolved step would. A face that lifts
-                        // through the legacy path is untouched, because this
-                        // only fires for a sample the legacy path would have
-                        // bisected and then refused.
-                    } else if refinements < MAX_LIFT_REFINEMENTS {
-                        refinements += 1;
-                        pending.push((pt, synthetic));
-                        pending.push((previous_point.midpoint(pt), true));
-                        continue;
-                    } else {
-                        // G2. Bisection is exhausted and the step is still
-                        // ambiguous, so no evidence distinguishes the two
-                        // candidate period copies. Previously control fell
-                        // through here and the ambiguous value was pushed with
-                        // nothing recording that it was a guess — the face then
-                        // proceeded as though the lift were certified. FS
-                        // Def. 14 requires a continuous lift; an unresolved
-                        // branch is not one.
-                        return Err(TessellationFailureReason::AmbiguousLift);
+                    if lift_singular_recovery {
+                        if let Some((ou, ov, opt_pt)) = origin {
+                            let tie = (!ambiguous(ou, u0, up)
+                                || half_period_tie(ou, u0, up))
+                                && (!ambiguous(ov, v0, vp)
+                                    || half_period_tie(ov, v0, vp));
+                            if tie {
+                                vec.push((Point2::new(ou, ov), opt_pt).into());
+                                previous = Some((ou, ov));
+                                previous_pt = Some(opt_pt);
+                                // Discard remaining synthetic midpoints; the
+                                // walk continues from the admitted sample.
+                                break;
+                            }
+                        }
                     }
+                    return Err(TessellationFailureReason::AmbiguousLift);
                 }
                 }
                 vec.push((Point2::new(u, v), pt).into());
