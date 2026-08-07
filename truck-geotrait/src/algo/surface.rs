@@ -108,7 +108,107 @@ impl SsnpVector for Vector3 {
     }
 }
 
+/// The outcome of a nearest-parameter search: Newton's convergence verdict
+/// and the best iterate the iteration actually reached.
+///
+/// The legacy [`search_nearest_parameter`] is `newton::solve(..).ok()`, so its
+/// `None` means only that the convergence test was not met — it says nothing
+/// about how close the surface actually came to the point. This keeps the
+/// iterate that the legacy API throws away, so a caller can distinguish a
+/// numerical convergence failure from a genuine geometric miss.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NearestParameterOutcome {
+    /// The parameter where Newton met its own `near2` convergence test.
+    pub converged: Option<(f64, f64)>,
+    /// The best parameter reached by world residual, or the converged answer
+    /// when there is one.
+    pub best: (f64, f64),
+    /// The world residual `|surface(best) - point|`.
+    pub best_residual: f64,
+    /// Whether the iteration stopped on a singular Jacobian.
+    pub degenerate: bool,
+}
+
+/// Searches the parameter by Newton's method and reports what the iteration
+/// reached even when it did not converge.
+///
+/// The converged answer is taken **from the legacy [`search_nearest_parameter`]
+/// itself**, which is still `newton::solve(..).ok()`, so the legacy contract is
+/// preserved by construction rather than by a transcription of the loop. The
+/// best-iterate tracking is a separate pass over the identical iteration that
+/// records what `newton::solve`'s `Err(log)` discards.
+#[inline(always)]
+pub fn search_nearest_parameter_outcome<P, S>(
+    surface: &S,
+    point: P,
+    hint: (f64, f64),
+    trials: usize,
+) -> NearestParameterOutcome
+where
+    P: EuclideanSpace<Scalar = f64> + MetricSpace<Metric = f64>,
+    P::Diff: SsnpVector<Point = P>,
+    S: ParametricSurface<Point = P, Vector = P::Diff>,
+{
+    // Best-iterate pass: the identical stationarity system
+    // `S(u,v) - P + w (S_u × S_v) = 0`, the identical Newton step, and the
+    // identical `0..=trials` budget and `near2` test as `newton::solve`. It only
+    // records the best world-residual iterate; it never decides the answer.
+    let mut param = P::Diff::from_param(hint);
+    let function = move |p: P::Diff| SsnpVector::subs(surface, point, p);
+    let mut best = (hint, (surface.subs(hint.0, hint.1) - point).magnitude());
+    let mut degenerate = false;
+    let mut converged_at: Option<(f64, f64)> = None;
+    for _ in 0..=trials {
+        let CalcOutput { value, derivation } = function(param);
+        let (u, v) = param.into_param();
+        let residual = (surface.subs(u, v) - point).magnitude();
+        if residual.is_finite() && residual < best.1 {
+            best = ((u, v), residual);
+        }
+        let Some(inverse) = derivation.invert() else {
+            degenerate = true;
+            break;
+        };
+        let next = param - inverse * value;
+        if next.near2(&param) {
+            converged_at = Some(param.into_param());
+            break;
+        }
+        param = next;
+    }
+    // The converged answer comes from the real legacy solve. When the tracking
+    // pass observed a `near2` success it has run the identical iteration, so
+    // `newton::solve` converges too; asking it directly makes the contract
+    // structural. When the tracking pass exhausted, the identical iteration
+    // exhausts for `newton::solve` as well, so `None` is decided here without a
+    // second full solve.
+    let converged = match converged_at {
+        Some(_) => search_nearest_parameter(surface, point, hint, trials),
+        None => None,
+    };
+    // On convergence the converged answer is the answer, even if some
+    // intermediate iterate happened to sit marginally nearer.
+    let (best, best_residual) = match converged {
+        Some(uv) => {
+            let residual = (surface.subs(uv.0, uv.1) - point).magnitude();
+            (uv, residual)
+        }
+        None => (best.0, best.1),
+    };
+    NearestParameterOutcome {
+        converged,
+        best,
+        best_residual,
+        degenerate,
+    }
+}
+
 /// Searches the parameter by Newton's method.
+///
+/// Returns `None` when Newton's own convergence test is not met. For the best
+/// iterate the search actually reached — the difference between a numerical
+/// convergence failure and a genuine geometric miss — use
+/// [`search_nearest_parameter_outcome`].
 #[inline(always)]
 pub fn search_nearest_parameter<P, S>(
     surface: &S,

@@ -908,6 +908,21 @@ pub fn spline_seed_recovery_enabled() -> bool {
     formal_recovery_enabled() && recovery_route_enabled("TRUCK_FORMAL_RECOVERY_SEED")
 }
 
+/// Whether PROJ-003 Stage A is active: residual-certified admission of a
+/// production-start iterate that the legacy projection chain rejected.
+///
+/// Refinement-only in the same structural sense as the routes above: it fires
+/// only where the legacy projection returned `None`, so a face that projected
+/// through the legacy chain is byte-identical with this on or off. The
+/// admission contract is strict — finite UV, inside the declared parameter
+/// range, `|S(u,v) - P| <= tol` — and Newton's `near2` condition is
+/// deliberately not required, because the whole finding is that `near2` throws
+/// away geometrically adequate answers. Set
+/// `TRUCK_FORMAL_RECOVERY_PROJ_STAGE_A=0` to disable (emergency withdrawal).
+pub fn proj_residual_recovery_enabled() -> bool {
+    formal_recovery_enabled() && recovery_route_enabled("TRUCK_FORMAL_RECOVERY_PROJ_STAGE_A")
+}
+
 /// Whether the winding-number reading of material parity is active.
 ///
 /// The parity flood floods over the *set* of realized constraint edges, so an
@@ -1603,6 +1618,7 @@ mod tests {
             overlap_conflicts: Vec::new(),
             unattributed_overlaps: 0,
             cdt_stages: CdtStageVector::default(),
+            projection_witness: None,
             route_decisions: Vec::new(),
             derived_bucket: LossBucket::SourceSourceSameBoundCrossing,
         };

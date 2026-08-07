@@ -22,6 +22,7 @@ use handles::{FixedUndirectedEdgeHandle, FixedVertexHandle};
 use itertools::Itertools;
 use rustc_hash::FxHashMap as HashMap;
 use serde::Serialize;
+use truck_geotrait::algo;
 
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
@@ -207,6 +208,13 @@ fn projection_probe_enabled() -> bool {
     })
 }
 
+/// PROJ-003 Stage A gate, read once for the same reason: the recovery check
+/// runs on the per-boundary-point failure path.
+fn proj_residual_recovery_enabled_cached() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(diagnosis::proj_residual_recovery_enabled)
+}
+
 /// PROJ-002's deep inverse probe. Same reason for the `OnceLock`, and more of
 /// it: this one runs a full Newton solve per seed per failing point.
 fn projection_deep_probe_enabled() -> bool {
@@ -227,9 +235,9 @@ const DEEP_POINT_CAP: usize = 8;
 
 /// The uniform-grid presearch the hintless nearest search starts from.
 ///
-/// Reproduces `algo::surface::presearch` at `truck-geometry`'s division, which
-/// is private to that crate and reached here only through the trait method
-/// whose result is the thing being measured.
+/// Delegates to the shared `algo::surface::presearch` at `truck-geometry`'s
+/// division, which is the same start the hintless production link uses, so the
+/// iterate recorded here is the iterate that link would have seen.
 fn deep_presearch<S>(
     surface: &S,
     point: Point3,
@@ -239,36 +247,16 @@ fn deep_presearch<S>(
 where
     S: ParametricSurface3D,
 {
-    let division = DEEP_PRESEARCH_DIVISION;
-    let mut best = (u0, v0);
-    let mut min = f64::INFINITY;
-    for i in 0..=division {
-        for j in 0..=division {
-            let p = i as f64 / division as f64;
-            let q = j as f64 / division as f64;
-            let u = u0 * (1.0 - p) + u1 * p;
-            let v = v0 * (1.0 - q) + v1 * q;
-            let distance = surface.subs(u, v).distance2(point);
-            if distance < min {
-                min = distance;
-                best = (u, v);
-            }
-        }
-    }
-    best
+    algo::surface::presearch(surface, point, ((u0, u1), (v0, v1)), DEEP_PRESEARCH_DIVISION)
 }
 
-/// An instrumented mirror of `algo::surface::search_nearest_parameter`.
+/// The one nearest-parameter solve the tessellation asks, shared with the
+/// production chain.
 ///
-/// Solves the identical stationarity system — `S(u,v) - P + w (S_u × S_v) = 0`
-/// with the identical 3×3 Jacobian — by the identical Newton step, and stops on
-/// the identical `near2` test. The one difference is that it **keeps the best
-/// iterate instead of discarding it**, which is the whole experiment: a `None`
-/// from the production call means Newton did not converge, and says nothing
-/// whatever about how close the surface actually came to the point.
-///
-/// Nothing here is offered to production. It is a measurement of a solve that
-/// has already failed.
+/// `probe_nearest` used to be a hand-maintained mirror of `newton::solve` that
+/// kept the best iterate; `algo::surface::search_nearest_parameter_outcome` is
+/// now that solve, and this maps its outcome back onto the diagnostic type and
+/// records the parameter-domain status, which is tessellation-specific.
 fn probe_nearest<S>(surface: &S, point: Point3, hint: (f64, f64)) -> NearestOutcome
 where
     S: ParametricSurface3D,
@@ -277,57 +265,15 @@ where
     let in_domain = |(u, v): (f64, f64)| {
         urange.is_none_or(|(a, b)| u >= a && u <= b) && vrange.is_none_or(|(a, b)| v >= a && v <= b)
     };
-    let mut param = Vector3::new(hint.0, hint.1, 0.0);
-    let mut best = NearestOutcome {
-        uv: hint,
-        residual: surface.subs(hint.0, hint.1).distance(point),
-        converged: false,
-        degenerate: false,
-        in_domain: in_domain(hint),
+    let outcome = algo::surface::search_nearest_parameter_outcome(surface, point, hint, DEEP_TRIALS);
+    NearestOutcome {
+        uv: outcome.best,
+        residual: outcome.best_residual,
+        converged: outcome.converged.is_some(),
+        degenerate: outcome.degenerate,
+        in_domain: in_domain(outcome.best),
         iterations: 0,
-    };
-    for iteration in 0..=DEEP_TRIALS {
-        let (u, v, w) = (param.x, param.y, param.z);
-        let diff = surface.subs(u, v) - point;
-        let uder = surface.uder(u, v);
-        let vder = surface.vder(u, v);
-        let uv_cross = uder.cross(vder);
-        let value = diff + uv_cross * w;
-        let derivation = Matrix3::from_cols(
-            uder + (surface.uuder(u, v).cross(vder) + uder.cross(surface.uvder(u, v))) * w,
-            vder + (surface.uvder(u, v).cross(vder) + uder.cross(surface.vvder(u, v))) * w,
-            uv_cross,
-        );
-        let residual = diff.magnitude();
-        if residual.is_finite() && residual < best.residual {
-            best.uv = (u, v);
-            best.residual = residual;
-            best.in_domain = in_domain((u, v));
-            best.iterations = iteration;
-        }
-        let Some(inverse) = derivation.invert() else {
-            best.degenerate = true;
-            return best;
-        };
-        let next = param - inverse * value;
-        if !next.x.is_finite() || !next.y.is_finite() || !next.z.is_finite() {
-            return best;
-        }
-        if next.near2(&param) {
-            best.converged = true;
-            let (u, v) = (param.x, param.y);
-            let residual = surface.subs(u, v).distance(point);
-            // The converged answer is the answer, even if some intermediate
-            // iterate happened to sit marginally nearer.
-            best.uv = (u, v);
-            best.residual = residual;
-            best.in_domain = in_domain((u, v));
-            best.iterations = iteration;
-            return best;
-        }
-        param = next;
     }
-    best
 }
 
 /// Classify one failing boundary point from what the deep probe found.
@@ -405,6 +351,76 @@ fn better_outcome(a: NearestOutcome, b: NearestOutcome) -> NearestOutcome {
     }
 }
 
+/// The Stage A admission contract, without the environment gate.
+///
+/// Split from [`residual_certified_recovery`] so the mechanism tests can
+/// exercise the contract directly instead of depending on a process-global
+/// cached environment flag.
+fn residual_certified_admission<S: PreMeshableSurface>(
+    surface: &S,
+    point: Point3,
+    tol: f64,
+    attempt: ProjectionAttempt,
+) -> Option<((f64, f64), f64)> {
+    let best = attempt.prod_best;
+    if !best.ran() {
+        return None;
+    }
+    let (u, v) = best.uv;
+    if !u.is_finite() || !v.is_finite() {
+        return None;
+    }
+    // Re-verify the domain here, where the surface is in hand. A `None` axis
+    // range means that axis is unbounded and therefore cannot be out of domain.
+    let (urange, vrange) = surface.try_range_tuple();
+    let inside = urange.is_none_or(|(a, b)| u >= a && u <= b)
+        && vrange.is_none_or(|(a, b)| v >= a && v <= b);
+    if !inside {
+        return None;
+    }
+    let evaluated = surface.subs(u, v);
+    if !evaluated.x.is_finite() || !evaluated.y.is_finite() || !evaluated.z.is_finite() {
+        return None;
+    }
+    let residual = evaluated.distance(point);
+    if !residual.is_finite() || residual > tol {
+        return None;
+    }
+    Some(((u, v), residual))
+}
+
+/// PROJ-003 Stage A: residual-certified admission of a production-start
+/// iterate the legacy projection chain rejected.
+///
+/// The legacy chain treats `search_nearest_parameter(..) == newton::solve(..).ok()`
+/// as the projection answer, so its `None` means only that Newton's `near2`
+/// convergence test was not met — not that the surface is far from the boundary
+/// point. PROJ-002 showed ~two thirds of the `BoundaryProjectionFailed`
+/// population is exactly that: a start production already uses reaches a
+/// finite, in-domain parameter whose world residual is within the caller's
+/// tolerance, and Newton's convergence gate threw it away. This admits such a
+/// candidate under the contract in [`residual_certified_admission`]:
+///
+/// - runs only where the legacy chain returned `None` for this point
+/// - the candidate comes only from the caller's hint or the hintless presearch
+///   start — the starts the production chain itself already uses
+/// - Newton's `near2` condition is explicitly NOT required
+///
+/// It is refinement-only by construction: a face that projected through the
+/// legacy chain is byte-identical, because this runs only after that chain
+/// returned `None`. Returns the admitted parameter and its certified residual.
+fn residual_certified_recovery<S: PreMeshableSurface>(
+    surface: &S,
+    point: Point3,
+    tol: f64,
+    attempt: ProjectionAttempt,
+) -> Option<((f64, f64), f64)> {
+    if !proj_residual_recovery_enabled_cached() {
+        return None;
+    }
+    residual_certified_admission(surface, point, tol, attempt)
+}
+
 pub(super) fn by_search_nearest_parameter<S>(
     surface: &S,
     point: Point3,
@@ -413,8 +429,48 @@ pub(super) fn by_search_nearest_parameter<S>(
 where
     S: RobustMeshableSurface,
 {
-    if !projection_probe_enabled() {
-        return surface
+    let mut attempt = ProjectionAttempt::default();
+    attempt.had_hint = hint.is_some();
+    let mut result = None;
+    if projection_probe_enabled() {
+        // The instrumented chain: identical calls in an identical order, with the
+        // link recorded as it is reached. Kept as a separate arm so the production
+        // path stays one expression and cannot drift from it silently.
+        for link in 1..=4u8 {
+            attempt.link = link;
+            result = match link {
+                1 => surface.search_parameter(point, hint, 100),
+                2 => surface.search_parameter(point, None, 100),
+                3 => surface.search_nearest_parameter(point, hint, 100),
+                _ => surface.search_nearest_parameter(point, None, 100),
+            };
+            attempt.link_results[usize::from(link) - 1] = result.is_some();
+            if result.is_some() {
+                break;
+            }
+        }
+        if result.is_none() {
+            attempt.link = 5;
+            let seeds = surface.search_parameter_seeds();
+            attempt.seeds = seeds.len();
+            result = by_structural_seeds(surface, point, hint);
+            // The best residual over the seeds, recomputed rather than threaded out
+            // of `by_structural_seeds` so that route stays exactly as it ships.
+            attempt.best_residual = seeds
+                .into_iter()
+                .filter_map(|seed| surface.search_parameter(point, seed, 100))
+                .map(|uv| surface.subs(uv.0, uv.1).distance(point))
+                .fold(f64::INFINITY, f64::min);
+            if attempt.best_residual.is_infinite() {
+                attempt.best_residual = f64::NAN;
+            }
+        }
+    } else {
+        // Production path: keep the exact legacy expression. Identical calls in
+        // an identical order, so a face that projects today gets the identical
+        // parameter. The thread-local is still filled below, so the
+        // residual-certified recovery can run where the chain returns `None`.
+        result = surface
             .search_parameter(point, hint, 100)
             .or_else(|| surface.search_parameter(point, None, 100))
             .or_else(|| surface.search_nearest_parameter(point, hint, 100))
@@ -425,48 +481,15 @@ where
             // through the identical chain and gets the identical parameter.
             .or_else(|| by_structural_seeds(surface, point, hint));
     }
-    // The instrumented chain: identical calls in an identical order, with the
-    // link recorded as it is reached. Kept as a separate arm so the production
-    // path stays one expression and cannot drift from it silently.
-    let mut attempt = ProjectionAttempt::default();
-    attempt.had_hint = hint.is_some();
-    let mut result = None;
-    for link in 1..=4u8 {
-        attempt.link = link;
-        result = match link {
-            1 => surface.search_parameter(point, hint, 100),
-            2 => surface.search_parameter(point, None, 100),
-            3 => surface.search_nearest_parameter(point, hint, 100),
-            _ => surface.search_nearest_parameter(point, None, 100),
-        };
-        attempt.link_results[usize::from(link) - 1] = result.is_some();
-        if result.is_some() {
-            break;
-        }
-    }
-    if result.is_none() {
-        attempt.link = 5;
-        let seeds = surface.search_parameter_seeds();
-        attempt.seeds = seeds.len();
-        result = by_structural_seeds(surface, point, hint);
-        // The best residual over the seeds, recomputed rather than threaded out
-        // of `by_structural_seeds` so that route stays exactly as it ships.
-        attempt.best_residual = seeds
-            .into_iter()
-            .filter_map(|seed| surface.search_parameter(point, seed, 100))
-            .map(|uv| surface.subs(uv.0, uv.1).distance(point))
-            .fold(f64::INFINITY, f64::min);
-        if attempt.best_residual.is_infinite() {
-            attempt.best_residual = f64::NAN;
-        }
-    }
-    // PROJ-002. Only on a point production has already rejected, and only under
-    // its own gate: this runs a full Newton solve per seed, and the seed count
-    // is per knot span.
-    if result.is_none() && projection_deep_probe_enabled() {
-        attempt.deep = true;
-        // The routes production already uses, re-asked so their *iterate* is
-        // visible rather than only their `Option`.
+    // PROJ-003 Stage A. On a point the whole production chain has already
+    // rejected, record the best iterate reached from the starts production
+    // itself uses — the caller's hint and the hintless presearch start. This
+    // runs whenever the residual-certified recovery is enabled, because the
+    // recovery consumes it, and additionally under the deep probe, whose
+    // witness needs it. It never changes what the chain above returned.
+    if result.is_none()
+        && (proj_residual_recovery_enabled_cached() || projection_deep_probe_enabled())
+    {
         if let Some(hint) = hint {
             attempt.prod_best = better_outcome(attempt.prod_best, probe_nearest(surface, point, hint));
             attempt.searches_run += 1;
@@ -480,6 +503,12 @@ where
                 better_outcome(attempt.prod_best, probe_nearest(surface, point, presearch));
             attempt.searches_run += 1;
         }
+    }
+    // PROJ-002. Only on a point production has already rejected, and only under
+    // its own gate: this runs a full Newton solve per seed, and the seed count
+    // is per knot span.
+    if result.is_none() && projection_deep_probe_enabled() {
+        attempt.deep = true;
         // The structural seeds, asked with the *nearest* search rather than
         // `search_parameter`. PROJ-001 could not answer this: `search_parameter`
         // is all-or-nothing and returns `None` unless the point is already
@@ -7916,5 +7945,154 @@ mod segment_origin_tests {
         ]);
         assert_eq!(loop_.points.len(), loop_.origins.len());
         assert_eq!(loop_.points.len(), 3, "join duplicates are dropped");
+    }
+}
+
+#[cfg(test)]
+mod proj003_stage_a_tests {
+    use super::*;
+    use truck_geotrait::algo::surface::SsnpVector;
+    use truck_modeling::{BSplineSurface, KnotVec, Point3, Vector3};
+
+    /// A 2x2 bilinear patch over `(u, v) in [0,1] x [0,1]` lying in the plane
+    /// `z = 0`. Its parameter range is declared by its knot vector, so domain
+    /// admission is actually testable on it.
+    fn bilinear_patch() -> BSplineSurface<Point3> {
+        let knot = KnotVec::from(vec![0.0, 0.0, 1.0, 1.0]);
+        let ctrl = vec![
+            vec![Point3::new(0.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0)],
+            vec![Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 1.0, 0.0)],
+        ];
+        BSplineSurface::new((knot.clone(), knot), ctrl)
+    }
+
+    fn outcome(uv: (f64, f64), residual: f64, in_domain: bool, converged: bool) -> NearestOutcome {
+        NearestOutcome {
+            uv,
+            residual,
+            converged,
+            degenerate: false,
+            in_domain,
+            iterations: 0,
+        }
+    }
+
+    fn attempt_with(prod_best: NearestOutcome) -> ProjectionAttempt {
+        let mut attempt = ProjectionAttempt::default();
+        attempt.prod_best = prod_best;
+        attempt
+    }
+
+    /// ProductionMiss: Newton did not satisfy its `near2` gate (`converged:
+    /// false`), but the best iterate from a production start is finite, inside
+    /// the declared domain, and evaluates within the caller's tolerance. The
+    /// tessellation recovery must admit it even though the legacy API reports
+    /// the search as not converged.
+    #[test]
+    fn residual_certified_production_start_is_admitted() {
+        let surface = bilinear_patch();
+        let point = Point3::new(0.5, 0.5, 0.0);
+        let attempt = attempt_with(outcome((0.5, 0.5), 0.0, true, false));
+        let admitted = residual_certified_admission(&surface, point, 1.0e-3, attempt)
+            .expect("a finite, in-domain, within-tol iterate must be admitted");
+        assert_eq!(admitted.0, (0.5, 0.5), "the certified candidate's UV is kept");
+        assert!(admitted.1 <= 1.0e-3, "the re-evaluated residual is certified");
+    }
+
+    /// Genuine miss: the best iterate is finite and in-domain, but its world
+    /// residual exceeds the caller's tolerance. Must remain rejected.
+    #[test]
+    fn residual_beyond_tolerance_stays_rejected() {
+        let surface = bilinear_patch();
+        let point = Point3::new(5.0, 5.0, 0.0);
+        let attempt = attempt_with(outcome((0.5, 0.5), 6.4, true, false));
+        assert_eq!(
+            residual_certified_admission(&surface, point, 1.0e-3, attempt),
+            None,
+            "a candidate that re-evaluates beyond tolerance must not be admitted"
+        );
+    }
+
+    /// Domain: a candidate within tolerance but outside the declared nonperiodic
+    /// parameter range must remain rejected. Stage A never normalises or clamps.
+    #[test]
+    fn in_tolerance_but_out_of_domain_stays_rejected() {
+        let surface = bilinear_patch();
+        let point = Point3::new(0.0, 0.0, 0.0);
+        let attempt = attempt_with(outcome((2.0, 0.5), 0.0, false, false));
+        assert_eq!(
+            residual_certified_admission(&surface, point, 1.0e-3, attempt),
+            None,
+            "an out-of-domain parameter is a Stage C question, not a Stage A admission"
+        );
+    }
+
+    /// Non-finite UV must be rejected regardless of the reported residual.
+    #[test]
+    fn non_finite_uv_stays_rejected() {
+        let surface = bilinear_patch();
+        let point = Point3::new(0.5, 0.5, 0.0);
+        let attempt = attempt_with(outcome((f64::NAN, 0.5), 0.0, true, false));
+        assert_eq!(residual_certified_admission(&surface, point, 1.0e-3, attempt), None);
+    }
+
+    /// A probe that never ran (no finite residual) admits nothing.
+    #[test]
+    fn no_ran_probe_stays_rejected() {
+        let surface = bilinear_patch();
+        assert_eq!(
+            residual_certified_admission(&surface, Point3::origin(), 1.0e-3, ProjectionAttempt::default()),
+            None,
+            "with prod_best = NONE there is no candidate to certify"
+        );
+    }
+
+    /// Legacy invariance of the shared solver: `search_nearest_parameter_outcome`
+    /// must report exactly the converged answer the legacy
+    /// `search_nearest_parameter` (and a direct `newton::solve`) do, for every
+    /// input in the battery — converged, non-converged, and degenerate. The
+    /// production chain sees the identical result it always did.
+    #[test]
+    fn shared_outcome_matches_legacy_newton() {
+        use truck_base::newton;
+        let surface = bilinear_patch();
+        let cases = [
+            ((0.3, 0.7, 0.05), (0.2, 0.6)), // on/near the patch, converges
+            ((0.9, 0.1, 0.0), (0.5, 0.5)),   // on the patch
+            ((5.0, 5.0, 5.0), (0.4, 0.4)),   // far away, may not converge
+            ((-3.0, 2.0, 1.0), (0.8, 0.2)),  // far corner, may not converge
+            ((0.0, 0.0, 0.0), (0.1, 0.1)),   // at the patch corner
+            ((0.5, 0.5, -0.05), (0.5, 0.5)), // mirrored side
+        ];
+        for (p, hint) in cases {
+            let point = Point3::new(p.0, p.1, p.2);
+            let outcome = algo::surface::search_nearest_parameter_outcome(&surface, point, hint, 100);
+            let legacy = surface.search_nearest_parameter(point, hint, 100);
+            assert_eq!(
+                outcome.converged, legacy,
+                "outcome.converged must equal legacy search_nearest_parameter"
+            );
+            let function = |q: Vector3| SsnpVector::subs(&surface, point, q);
+            let direct = newton::solve(function, Vector3::new(hint.0, hint.1, 0.0), 100);
+            assert_eq!(
+                outcome.converged,
+                direct.ok().map(|v| (v.x, v.y)),
+                "outcome.converged must come from newton::solve itself"
+            );
+            if let Some(uv) = outcome.converged {
+                let residual = (surface.subs(uv.0, uv.1) - point).magnitude();
+                let nearest = |(a, b): (f64, f64)| (point - surface.subs(a, b)).magnitude();
+                let min_res = [0.0f64, 0.25, 0.5, 0.75, 1.0]
+                    .into_iter()
+                    .flat_map(|a| {
+                        [0.0f64, 0.25, 0.5, 0.75, 1.0].into_iter().map(move |b| nearest((a, b)))
+                    })
+                    .fold(f64::INFINITY, f64::min);
+                assert!(
+                    residual <= min_res + 1.0e-9,
+                    "converged answer is a stationary nearest point (residual {residual})"
+                );
+            }
+        }
     }
 }
