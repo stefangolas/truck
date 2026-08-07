@@ -1301,6 +1301,12 @@ where
                     None => (polygon, failure, None),
                     Some(Ok((mesh, conformance))) => {
                         let triangles = mesh.tri_faces().len();
+                        diagnosis::record_route_decision(
+                            diagnosis::RecoveryRoute::CylinderBand,
+                            true,
+                            diagnosis::RouteOutcome::Recovered,
+                            None,
+                        );
                         (
                             Some(mesh),
                             None,
@@ -1310,10 +1316,29 @@ where
                             }),
                         )
                     }
-                    Some(Err(exit)) => (polygon, failure, Some(CylinderBandAttempt::Refused(exit))),
+                    Some(Err(exit)) => {
+                        diagnosis::record_route_decision(
+                            diagnosis::RecoveryRoute::CylinderBand,
+                            true,
+                            diagnosis::RouteOutcome::Refused,
+                            Some(exit.tag()),
+                        );
+                        (polygon, failure, Some(CylinderBandAttempt::Refused(exit)))
+                    }
                 }
             }
-            _ => (polygon, failure, None),
+            _ => {
+                diagnosis::record_route_decision(
+                    diagnosis::RecoveryRoute::CylinderBand,
+                    band_recovery_gate,
+                    match band_recovery_gate {
+                        true => diagnosis::RouteOutcome::PreconditionUnmet,
+                        false => diagnosis::RouteOutcome::GateClosed,
+                    },
+                    None,
+                );
+                (polygon, failure, None)
+            }
         };
         // The conical essential-band route, on the identical production rule
         // and under the identical gate. It runs only after the cylinder band
@@ -1343,6 +1368,12 @@ where
                     None => (polygon, failure, None),
                     Some(Ok((mesh, nappe, standing))) => {
                         let triangles = mesh.tri_faces().len();
+                        diagnosis::record_route_decision(
+                            diagnosis::RecoveryRoute::ConeBand,
+                            true,
+                            diagnosis::RouteOutcome::Recovered,
+                            None,
+                        );
                         (
                             Some(mesh),
                             None,
@@ -1353,10 +1384,29 @@ where
                             }),
                         )
                     }
-                    Some(Err(exit)) => (polygon, failure, Some(ConeBandAttempt::Refused(exit))),
+                    Some(Err(exit)) => {
+                        diagnosis::record_route_decision(
+                            diagnosis::RecoveryRoute::ConeBand,
+                            true,
+                            diagnosis::RouteOutcome::Refused,
+                            Some(exit.tag()),
+                        );
+                        (polygon, failure, Some(ConeBandAttempt::Refused(exit)))
+                    }
                 }
             }
-            _ => (polygon, failure, None),
+            _ => {
+                diagnosis::record_route_decision(
+                    diagnosis::RecoveryRoute::ConeBand,
+                    band_recovery_gate,
+                    match band_recovery_gate {
+                        true => diagnosis::RouteOutcome::PreconditionUnmet,
+                        false => diagnosis::RouteOutcome::GateClosed,
+                    },
+                    None,
+                );
+                (polygon, failure, None)
+            }
         };
         // The torus annulus route. Two modes:
         //
@@ -1402,6 +1452,12 @@ where
                                 triangles,
                             );
                         }
+                        diagnosis::record_route_decision(
+                            diagnosis::RecoveryRoute::TorusAnnulus,
+                            true,
+                            diagnosis::RouteOutcome::Recovered,
+                            None,
+                        );
                         (
                             Some(mesh),
                             None,
@@ -1423,9 +1479,26 @@ where
                         )
                     }
                 }
-                Some(Err(exit)) => (polygon, failure, Some(TorusAnnulusAttempt::Refused(exit))),
+                Some(Err(exit)) => {
+                    diagnosis::record_route_decision(
+                        diagnosis::RecoveryRoute::TorusAnnulus,
+                        true,
+                        diagnosis::RouteOutcome::Refused,
+                        Some(exit.tag()),
+                    );
+                    (polygon, failure, Some(TorusAnnulusAttempt::Refused(exit)))
+                }
             }
         } else {
+            diagnosis::record_route_decision(
+                diagnosis::RecoveryRoute::TorusAnnulus,
+                torus_recovery_gate,
+                match torus_recovery_gate {
+                    true => diagnosis::RouteOutcome::PreconditionUnmet,
+                    false => diagnosis::RouteOutcome::GateClosed,
+                },
+                None,
+            );
             (polygon, failure, None)
         };
         // The winding retry, and it runs **last** for a reason that cost a
@@ -1457,6 +1530,15 @@ where
                 PARITY_READING.with(|cell| cell.set(ParityReading::TraversalParity));
                 let retried = trimming_tessellation_result(&surface, &boundary, tol, &lattice);
                 PARITY_READING.with(|cell| cell.set(ParityReading::Legacy));
+                diagnosis::record_route_decision(
+                    diagnosis::RecoveryRoute::WindingParity,
+                    true,
+                    match retried {
+                        Ok(_) => diagnosis::RouteOutcome::Recovered,
+                        Err(_) => diagnosis::RouteOutcome::Refused,
+                    },
+                    None,
+                );
                 match retried {
                     Ok(mesh) => {
                         if recovery_log {
@@ -2368,12 +2450,15 @@ fn run_cylinder_band_for_face<S, C>(
         formal::cylinder_band::BandExit,
     >,
 > {
+    use diagnosis::{RecoveryRoute::CylinderBand, RouteIneligible};
     let Ok(cylinder) = cylinder_of(&face.surface) else {
+        diagnosis::record_route_ineligible(CylinderBand, RouteIneligible::SurfaceNotCertified);
         return None;
     };
     let Ok(input) =
         source_face_input_from_compressed(declared_face_index, source_face_id, face, edges)
     else {
+        diagnosis::record_route_ineligible(CylinderBand, RouteIneligible::SourceInputUnavailable);
         return None;
     };
     // Exactly two bounds, and both of them authoritative. A face with a
@@ -2381,6 +2466,7 @@ fn run_cylinder_band_for_face<S, C>(
     // it is a face this route has no evidence for, and it is left alone rather
     // than attempted and refused.
     if input.bounds.len() != 2 || input.regular_bound_count() != 2 {
+        diagnosis::record_route_ineligible(CylinderBand, RouteIneligible::BoundsNotTwoAuthoritative);
         return None;
     }
 
@@ -2525,19 +2611,27 @@ fn run_conical_band_for_face<S, C>(
         formal::cone_band::ConicalBandExit,
     >,
 > {
+    use diagnosis::{RecoveryRoute::ConeBand, RouteIneligible};
     let Ok(cone) = cone_of(&face.surface) else {
+        diagnosis::record_route_ineligible(ConeBand, RouteIneligible::SurfaceNotCertified);
         return None;
     };
     let Ok(input) =
         source_face_input_from_compressed(declared_face_index, source_face_id, face, edges)
     else {
+        diagnosis::record_route_ineligible(ConeBand, RouteIneligible::SourceInputUnavailable);
         return None;
     };
     // Exactly two bounds, and both of them authoritative. A face with a
     // degenerate-evidence bound is not a two-bound face with one bound missing;
     // it is a face this route has no evidence for, and it is left alone rather
     // than attempted and refused.
+    //
+    // This exit is the cone signature: a one-bound apex cone never enters this
+    // route and therefore falls through to the generic lift, which was
+    // invisible while every early return was the same bare `None`.
     if input.bounds.len() != 2 || input.regular_bound_count() != 2 {
+        diagnosis::record_route_ineligible(ConeBand, RouteIneligible::BoundsNotTwoAuthoritative);
         return None;
     }
 
@@ -2697,7 +2791,16 @@ where
 
     // 1. Identify the torus. `None` (not eligible) when the surface is not a
     //    certified toroidal surface.
-    let embedded = torus_of(&face.surface).ok()?;
+    let embedded = match torus_of(&face.surface) {
+        Ok(embedded) => embedded,
+        Err(_) => {
+            diagnosis::record_route_ineligible(
+                diagnosis::RecoveryRoute::TorusAnnulus,
+                diagnosis::RouteIneligible::SurfaceNotCertified,
+            );
+            return None;
+        }
+    };
     let deck = embedded.deck();
     let schema = deck.schema();
     let torus_center = schema.center();
@@ -3191,6 +3294,22 @@ fn shell_create_polygon<S: PreMeshableSurface>(
         new_face.invert();
     }
     new_face
+}
+
+/// The parameter-space endpoints of a presented boundary segment.
+fn segment_endpoints(a: Point2, b: Point2) -> diagnosis::SegmentEndpoints2 {
+    diagnosis::SegmentEndpoints2 {
+        a: (a.x, a.y),
+        b: (b.x, b.y),
+    }
+}
+
+/// The parameter-space endpoints of an edge already in the triangulation.
+fn spade_endpoints(positions: [SPoint2; 2]) -> diagnosis::SegmentEndpoints2 {
+    diagnosis::SegmentEndpoints2 {
+        a: (positions[0].x, positions[0].y),
+        b: (positions[1].x, positions[1].y),
+    }
 }
 
 #[derive(Clone, Copy, Debug, derive_more::Deref, derive_more::DerefMut)]
@@ -4961,6 +5080,13 @@ impl PolyBoundary {
         // not alter insertion order or insertion behaviour.
         let diag = diagnosis::diag_enabled();
         let mut diag_edge_map: HashMap<FixedUndirectedEdgeHandle, u64> = HashMap::default();
+        // The first three entries of the CDT stage vector. Counted
+        // unconditionally — three `usize` increments on a path that already
+        // does a triangulation query per segment — and emitted only under
+        // `diag`.
+        let mut stage_boundary_vertices = 0usize;
+        let mut stage_constraints_presented = 0usize;
+        let mut stage_constraints_inserted = 0usize;
         for (piece_index, piece) in self.0.iter().enumerate() {
             let poly2tri: Vec<Option<FixedVertexHandle>> = piece
                 .points
@@ -4995,6 +5121,9 @@ impl PolyBoundary {
                 continue;
             }
             let len = poly2tri.len();
+            // Counted after the all-or-nothing point check above, so this is
+            // the number of boundary points that actually became vertices.
+            stage_boundary_vertices += len;
             if len < 3 {
                 continue;
             }
@@ -5007,6 +5136,9 @@ impl PolyBoundary {
                     probe_degenerate += 1;
                     continue;
                 }
+                // A segment with two distinct endpoints is a real request; the
+                // collapsed ones above are not presented to Spade at all.
+                stage_constraints_presented += 1;
                 // ARR-003: has *this face* already constrained this exact edge?
                 //
                 // A well-formed loop traverses each edge once. If the direct
@@ -5039,8 +5171,29 @@ impl PolyBoundary {
                     .get_edge_from_neighbors(vi, vj)
                     .filter(|e| e.is_constraint_edge())
                     .map(|e| e.as_undirected().fix())
-                    .is_some_and(|handle| roles.role_of(handle).is_some());
-                if overlapping {
+                    .filter(|handle| roles.role_of(*handle).is_some());
+                if let Some(handle) = overlapping {
+                    // Capture the pair while it still exists. Until now this
+                    // refusal recorded nothing at all, so every face it lost
+                    // reached the terminal enum carrying zero pair evidence and
+                    // was indistinguishable from an unwitnessed one.
+                    //
+                    // The relation is `DuplicateTraversal`, not
+                    // `CollinearOverlap`: the test matched the *direct* edge
+                    // from `vi` to `vj`, so the presented segment's endpoints
+                    // coincide with an existing constraint edge exactly. A
+                    // partial collinear overlap does not reach here.
+                    if diag {
+                        diagnosis::record_overlap_conflict(
+                            diag_seg_id,
+                            diag_edge_map.get(&handle).copied(),
+                            diagnosis::PresentedSegmentRelation::DuplicateTraversal,
+                            Some(segment_endpoints(piece.points[i].uv, piece.points[j].uv)),
+                            Some(spade_endpoints(
+                                triangulation.undirected_edge(handle).positions(),
+                            )),
+                        );
+                    }
                     failure.get_or_insert(TessellationFailureReason::ConstraintOverlapUnsupported);
                     continue;
                 }
@@ -5071,6 +5224,7 @@ impl PolyBoundary {
                 // case that had to be inferred from a Boolean.
                 let chain = triangulation.try_add_constraint(vi, vj);
                 if !chain.is_empty() {
+                    stage_constraints_inserted += 1;
                     for directed in &chain {
                         let handle = triangulation.directed_edge(*directed).as_undirected().fix();
                         // Audit A1: every segment reaching here comes from a
@@ -5172,12 +5326,18 @@ impl PolyBoundary {
                             .get_conflicting_edges_between_vertices(vi, vj)
                             .map(|edge| edge.as_undirected().fix())
                             .collect();
+                        let incoming_endpoints =
+                            segment_endpoints(piece.points[i].uv, piece.points[j].uv);
                         for handle in &diag_conflicts {
                             if let Some(&blocking_id) = diag_edge_map.get(handle) {
                                 diagnosis::record_conflict(
                                     diag_seg_id,
                                     blocking_id,
                                     diagnosis::PresentedSegmentRelation::ProperInteriorCrossing,
+                                    Some(incoming_endpoints),
+                                    Some(spade_endpoints(
+                                        triangulation.undirected_edge(*handle).positions(),
+                                    )),
                                 );
                             }
                         }
@@ -5239,6 +5399,13 @@ impl PolyBoundary {
                  {probe_refused_without_conflicts},{probe_conflicting_edges},\
                  {probe_add_returned_false}",
                 u8::from(failure.is_none()),
+            );
+        }
+        if diag {
+            diagnosis::record_insertion_counts(
+                stage_boundary_vertices,
+                stage_constraints_presented,
+                stage_constraints_inserted,
             );
         }
         match failure {
@@ -6049,30 +6216,49 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
     }
 
     // 3. Material triangles selection (odd parity = 1)
-    let tri_faces_raw: Vec<[usize; 3]> = triangulation
+    //
+    // Selection and validation are two stages, and they are counted as two.
+    // Fused into one chained iterator, as they were, a face where parity chose
+    // no region and a face where parity chose a region that validation then
+    // emptied both arrive at `NoOddParityRegion` indistinguishable — and that
+    // reason carries 342 faces. The behaviour is unchanged: same predicates,
+    // same order, same result.
+    let stage_raw_cdt_triangles = triangulation.inner_faces().count();
+    let material_selected: Vec<[usize; 3]> = triangulation
         .inner_faces()
         .filter(|face| face_parity.get(&face.index()) == Some(&1))
         .map(|tri| tri.vertices())
-        .filter_map(|tri| {
-            let idcs = [
+        .map(|tri| {
+            [
                 vmap[&tri[0].fix()],
                 vmap[&tri[1].fix()],
                 vmap[&tri[2].fix()],
-            ];
+            ]
+        })
+        .collect();
+    let stage_material_selected = material_selected.len();
+    let tri_faces_raw: Vec<[usize; 3]> = material_selected
+        .into_iter()
+        .filter(|idcs| {
             if idcs[0] == idcs[1] || idcs[1] == idcs[2] || idcs[0] == idcs[2] {
-                return None;
+                return false;
             }
             let p0 = positions[idcs[0]];
             let p1 = positions[idcs[1]];
             let p2 = positions[idcs[2]];
             let cross = (p1 - p0).cross(p2 - p0);
             let area = 0.5 * cross.magnitude();
-            if area <= 1e-12 || !area.is_finite() {
-                return None;
-            }
-            Some(idcs)
+            area > 1e-12 && area.is_finite()
         })
         .collect();
+
+    if diagnosis::diag_enabled() {
+        diagnosis::record_cdt_stages(
+            stage_raw_cdt_triangles,
+            stage_material_selected,
+            tri_faces_raw.len(),
+        );
+    }
 
     if tri_faces_raw.is_empty() {
         return TessellationOutcome::Failed(TessellationFailureReason::NoOddParityRegion.into());

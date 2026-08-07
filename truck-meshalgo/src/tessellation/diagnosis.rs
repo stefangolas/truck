@@ -229,6 +229,112 @@ pub struct ParameterEnclosure2 {
     pub v: (f64, f64),
 }
 
+/// The two parameter-space endpoints of one presented segment.
+///
+/// Recorded unconditionally at every conflict site, because the endpoints are
+/// in hand there and are gone by the time the terminal enum is read. Kept
+/// separate from [`ParameterEnclosure2`], which is reserved for a *certified*
+/// enclosure of the intersection and stays opt-in: a bounding box of two
+/// endpoints cannot say which endpoint is which, and the chord-versus-analytic
+/// question needs the ordered pair.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct SegmentEndpoints2 {
+    /// The segment's start, in parameter space.
+    pub a: (f64, f64),
+    /// The segment's end, in parameter space.
+    pub b: (f64, f64),
+}
+
+// ---------------------------------------------------------------------------
+// Route selection
+// ---------------------------------------------------------------------------
+
+/// A formal recovery route, named where the dispatcher considers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum RecoveryRoute {
+    /// The formal cylinder-band fallback.
+    CylinderBand,
+    /// The conical essential-band route.
+    ConeBand,
+    /// The torus annulus route.
+    TorusAnnulus,
+    /// The winding-parity retry.
+    WindingParity,
+}
+
+/// Why a route function declined a face without attempting anything.
+///
+/// These are the bare `None` returns the cone investigation ran into. Exit 3 in
+/// particular — the bound-count test — is exactly "a one-bound apex cone never
+/// enters the two-bound conical-band route, and therefore falls into the
+/// generic lift", which was invisible until it was typed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum RouteIneligible {
+    /// The surface identifier refused: this is not the route's surface.
+    SurfaceNotCertified,
+    /// The source face input could not be read from the compressed face.
+    SourceInputUnavailable,
+    /// The face does not present exactly two authoritative bounds.
+    BoundsNotTwoAuthoritative,
+}
+
+/// What became of one route on one face.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum RouteOutcome {
+    /// The route's environment gate is closed.
+    GateClosed,
+    /// The gate is open, but the dispatcher's precondition did not hold — the
+    /// face already had a mesh, or its loss bucket is not the admitted one.
+    PreconditionUnmet,
+    /// The route was entered and declined the face before attempting anything.
+    Ineligible(RouteIneligible),
+    /// The route attempted the face and returned a typed exit.
+    Refused,
+    /// The route produced a validated mesh that replaced the legacy failure.
+    Recovered,
+}
+
+/// What the dispatcher and one route did about one face.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct RouteDecisionRecord {
+    /// Which route.
+    pub route: RecoveryRoute,
+    /// Whether the route's environment gate was open.
+    pub gate_open: bool,
+    /// What became of it.
+    pub outcome: RouteOutcome,
+    /// The typed exit's stable tag, when the route refused.
+    pub refusal_tag: Option<&'static str>,
+}
+
+/// The six stage counts of the CDT and material pipeline.
+///
+/// Every one of these numbers is already computed and then discarded. The
+/// motivating case is `NoOddParityRegion`, which is raised when the final
+/// triangle vector is empty and therefore **conflates two different
+/// failures**: parity selected no region at all, and parity selected a region
+/// whose triangles were then all removed as degenerate or zero-area. Splitting
+/// the count either side of that filter separates them.
+///
+/// The three CDT counts are `Option` because `insert_to` can refuse before the
+/// triangulation is ever read, and "the stage was not reached" is a different
+/// statement from "the stage produced zero".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct CdtStageVector {
+    /// Boundary points that reached a vertex handle in the triangulation.
+    pub boundary_vertices: usize,
+    /// Constraint segments presented to the triangulation.
+    pub constraints_presented: usize,
+    /// Constraint segments the triangulation realized, as a chain or directly.
+    pub constraints_inserted: usize,
+    /// Triangles in the raw CDT, before any material selection.
+    pub raw_cdt_triangles: Option<usize>,
+    /// Triangles the odd-parity material filter selected.
+    pub material_selected: Option<usize>,
+    /// Triangles surviving the degenerate and zero-area validation.
+    pub final_valid: Option<usize>,
+}
+
 /// One witnessed conflict during constraint insertion.
 ///
 /// For every `ConstraintInsertionIncomplete` failure, at least one witness (or
@@ -248,6 +354,10 @@ pub struct ConstraintConflictWitness {
     pub same_source_edge_use: Option<bool>,
     /// A certified enclosure of the intersection point, when computed.
     pub intersection_enclosure: Option<ParameterEnclosure2>,
+    /// The parameter-space endpoints of the segment being inserted.
+    pub incoming_segment: Option<SegmentEndpoints2>,
+    /// The parameter-space endpoints of the segment that blocked it.
+    pub blocking_segment: Option<SegmentEndpoints2>,
 }
 
 /// Metadata retained on each realized foreign constraint chain edge.
@@ -491,6 +601,18 @@ pub struct FailedFaceDiagnosis {
     /// The structured conflict witnesses, when the failure is an insertion
     /// failure.
     pub insertion_conflicts: Vec<ConstraintConflictWitness>,
+    /// The structured witnesses for constraint *overlaps*, held apart from
+    /// [`Self::insertion_conflicts`] because the loss bucket is derived from
+    /// that vector and must keep meaning what it meant.
+    pub overlap_conflicts: Vec<ConstraintConflictWitness>,
+    /// Overlaps whose blocking edge could not be named. Non-zero means pair
+    /// evidence is genuinely missing, rather than absent because there was no
+    /// overlap.
+    pub unattributed_overlaps: usize,
+    /// The CDT and material pipeline stage counts.
+    pub cdt_stages: CdtStageVector,
+    /// What each formal recovery route decided about this face.
+    pub route_decisions: Vec<RouteDecisionRecord>,
     /// The deterministic loss bucket.
     pub derived_bucket: LossBucket,
 }
@@ -734,6 +856,27 @@ pub fn diag_enabled() -> bool {
 struct DiagnosisSink {
     segments: Vec<SemanticSegmentRef>,
     witnesses: Vec<ConstraintConflictWitness>,
+    /// Overlap witnesses, kept in their **own** vector rather than appended to
+    /// `witnesses`.
+    ///
+    /// This separation is load-bearing, not tidiness. `derive_loss_bucket`
+    /// reads `witnesses`, and the band routes read the derived bucket as an
+    /// admission rule, so a witness added to that vector is a production input.
+    /// `ConstraintOverlapUnsupported` previously recorded nothing at all; had
+    /// these gone into `witnesses`, every face where an overlap follows a
+    /// crossing — the terminal reason there is still
+    /// `ConstraintInsertionIncomplete`, because `failure.get_or_insert` keeps
+    /// the first — would derive a different bucket than it does today, and the
+    /// cylinder and cone bands would admit a different population. Held apart,
+    /// the derivation is bit-identical by construction rather than by review.
+    overlap_witnesses: Vec<ConstraintConflictWitness>,
+    /// Overlaps whose blocking edge could not be attributed to a semantic
+    /// segment this face recorded. Counted rather than dropped, so "no witness"
+    /// stays distinguishable from "no overlap".
+    unattributed_overlaps: usize,
+    /// The CDT and material stage counts. Respects suspension, because the
+    /// record must keep describing the legacy attempt.
+    cdt_stages: CdtStageVector,
     realized_chain: Vec<RealizedConstraintMetadata>,
     vertex_insertion_failed: bool,
     source_segment_count: usize,
@@ -747,6 +890,9 @@ impl DiagnosisSink {
     fn clear(&mut self) {
         self.segments.clear();
         self.witnesses.clear();
+        self.overlap_witnesses.clear();
+        self.unattributed_overlaps = 0;
+        self.cdt_stages = CdtStageVector::default();
         self.realized_chain.clear();
         self.vertex_insertion_failed = false;
         self.source_segment_count = 0;
@@ -762,6 +908,21 @@ std::thread_local! {
         std::cell::RefCell::new(DiagnosisSink::default());
     /// Whether recording is currently suspended. See [`SinkSuspension`].
     static SINK_SUSPENDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Route decisions, in a **separate sub-sink that suspension does not
+    /// silence**.
+    ///
+    /// This split is the one semantic decision in the whole sweep, and getting
+    /// it backwards would be a production behaviour change wearing a
+    /// diagnostic's clothes. Lift, projection, conflict and CDT records must
+    /// respect [`SinkSuspension`]: the loss bucket is derived from them and the
+    /// band routes read that bucket as an admission rule, so a record mixing
+    /// two tessellation attempts changes what those routes admit. A route
+    /// *decision* is the opposite case — the entire point is to know that a
+    /// route was entered, and a route is entered precisely during the window
+    /// suspension covers. Silencing these would record every recovery attempt
+    /// as never having happened.
+    static ROUTE_DECISIONS: std::cell::RefCell<Vec<RouteDecisionRecord>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Suspends recording for as long as it is held.
@@ -797,6 +958,54 @@ fn suspended() -> bool {
 /// Clear the diagnostic sink before a new face.
 pub(crate) fn clear_sink() {
     FACE_DIAGNOSIS_SINK.with(|s| s.borrow_mut().clear());
+    ROUTE_DECISIONS.with(|s| s.borrow_mut().clear());
+}
+
+/// Whether diagnostics are on, decided once.
+///
+/// [`diag_enabled`] reads the environment on every call. That is fine where it
+/// is asked once per face, but the route recorders are called from inside the
+/// route functions, which have no `diag` in scope to be gated by at the call
+/// site. Cached for the same reason `projection_probe_enabled` is: the value
+/// cannot change within a process.
+fn diag_enabled_cached() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(diag_enabled)
+}
+
+/// Record what a route decided about this face.
+///
+/// Deliberately does **not** consult [`suspended`]; see [`ROUTE_DECISIONS`].
+///
+/// It *does* consult [`diag_enabled_cached`], and must: `clear_sink` is only
+/// called when diagnostics are on, so recording unconditionally would grow this
+/// vector for the life of the thread on a run with diagnostics off.
+pub(crate) fn record_route_decision(
+    route: RecoveryRoute,
+    gate_open: bool,
+    outcome: RouteOutcome,
+    refusal_tag: Option<&'static str>,
+) {
+    if !diag_enabled_cached() {
+        return;
+    }
+    ROUTE_DECISIONS.with(|sink| {
+        sink.borrow_mut().push(RouteDecisionRecord {
+            route,
+            gate_open,
+            outcome,
+            refusal_tag,
+        })
+    });
+}
+
+/// Record that a route was entered and declined the face outright.
+///
+/// Called from the route functions in place of a bare `return None`, which is
+/// where the cone signature was hiding: three separate early exits all reported
+/// themselves as the same absence of a record.
+pub(crate) fn record_route_ineligible(route: RecoveryRoute, reason: RouteIneligible) {
+    record_route_decision(route, true, RouteOutcome::Ineligible(reason), None);
 }
 
 /// Record a new semantic segment and return its assigned id.
@@ -856,39 +1065,142 @@ pub(crate) fn record_realized_edge(role: ConstraintRole, semantic_segment_id: u6
     });
 }
 
+/// Build a witness from two recorded segment ids, or `None` if either id does
+/// not name a segment this face recorded.
+fn build_witness(
+    sink: &DiagnosisSink,
+    incoming_id: u64,
+    blocking_id: u64,
+    relation: PresentedSegmentRelation,
+    incoming_segment: Option<SegmentEndpoints2>,
+    blocking_segment: Option<SegmentEndpoints2>,
+) -> Option<ConstraintConflictWitness> {
+    let incoming = sink.segments.get(incoming_id as usize).cloned()?;
+    let blocking = sink.segments.get(blocking_id as usize).cloned()?;
+    let same_bound = match (incoming.boundary_component, blocking.boundary_component) {
+        (Some(a), Some(b)) => Some(a == b),
+        _ => None,
+    };
+    Some(ConstraintConflictWitness {
+        incoming,
+        blocking,
+        relation,
+        same_bound,
+        same_source_edge_use: None,
+        intersection_enclosure: None,
+        incoming_segment,
+        blocking_segment,
+    })
+}
+
 /// Record a conflict witness between two semantic segments.
+///
+/// The two segments' parameter-space endpoints are recorded unconditionally.
+/// They are in hand at the failure site and are unrecoverable afterwards, which
+/// is the same lesson the cone investigation taught about the lift.
 pub(crate) fn record_conflict(
     incoming_id: u64,
     blocking_id: u64,
     relation: PresentedSegmentRelation,
+    incoming_segment: Option<SegmentEndpoints2>,
+    blocking_segment: Option<SegmentEndpoints2>,
 ) {
     if suspended() {
         return;
     }
     FACE_DIAGNOSIS_SINK.with(|sink| {
         let sink = &mut *sink.borrow_mut();
-        let incoming = sink
-            .segments
-            .get(incoming_id as usize)
-            .cloned()
-            .expect("incoming segment id must be valid");
-        let blocking = sink
-            .segments
-            .get(blocking_id as usize)
-            .cloned()
-            .expect("blocking segment id must be valid");
-        let same_bound = match (incoming.boundary_component, blocking.boundary_component) {
-            (Some(a), Some(b)) => Some(a == b),
-            _ => None,
-        };
-        sink.witnesses.push(ConstraintConflictWitness {
-            incoming,
-            blocking,
+        let witness = build_witness(
+            sink,
+            incoming_id,
+            blocking_id,
             relation,
-            same_bound,
-            same_source_edge_use: None,
-            intersection_enclosure: None,
+            incoming_segment,
+            blocking_segment,
+        )
+        .expect("conflict segment ids must be valid");
+        sink.witnesses.push(witness);
+    });
+}
+
+/// Record a witness for a constraint overlap.
+///
+/// `ConstraintOverlapUnsupported` is raised on the segment that would traverse
+/// an edge this face's own role table already claims, and until now it recorded
+/// nothing whatsoever — so the whole population carried zero pair evidence and
+/// was indistinguishable from an unwitnessed insertion failure.
+///
+/// Goes to `overlap_witnesses`, never to `witnesses`; see the field's
+/// documentation for why that separation is a correctness requirement rather
+/// than a filing decision.
+pub(crate) fn record_overlap_conflict(
+    incoming_id: u64,
+    blocking_id: Option<u64>,
+    relation: PresentedSegmentRelation,
+    incoming_segment: Option<SegmentEndpoints2>,
+    blocking_segment: Option<SegmentEndpoints2>,
+) {
+    if suspended() {
+        return;
+    }
+    FACE_DIAGNOSIS_SINK.with(|sink| {
+        let sink = &mut *sink.borrow_mut();
+        let witness = blocking_id.and_then(|blocking_id| {
+            build_witness(
+                sink,
+                incoming_id,
+                blocking_id,
+                relation,
+                incoming_segment,
+                blocking_segment,
+            )
         });
+        match witness {
+            Some(witness) => sink.overlap_witnesses.push(witness),
+            None => sink.unattributed_overlaps += 1,
+        }
+    });
+}
+
+/// Record what `insert_to` presented to the triangulation and what it realized.
+///
+/// Arithmetic, not tracing: three counters the function already maintains in
+/// locals and drops on return.
+pub(crate) fn record_insertion_counts(
+    boundary_vertices: usize,
+    constraints_presented: usize,
+    constraints_inserted: usize,
+) {
+    if suspended() {
+        return;
+    }
+    FACE_DIAGNOSIS_SINK.with(|sink| {
+        let stages = &mut sink.borrow_mut().cdt_stages;
+        stages.boundary_vertices = boundary_vertices;
+        stages.constraints_presented = constraints_presented;
+        stages.constraints_inserted = constraints_inserted;
+    });
+}
+
+/// Record the three triangle counts either side of material selection.
+///
+/// Separating `material_selected` from `final_valid` is the point: they are
+/// computed by one chained iterator today, so a face where parity chose nothing
+/// and a face where parity chose only degenerate triangles both arrive at
+/// `NoOddParityRegion` indistinguishable.
+pub(crate) fn record_cdt_stages(
+    raw_cdt_triangles: usize,
+    material_selected: usize,
+    final_valid: usize,
+) {
+    if suspended() {
+        return;
+    }
+    FACE_DIAGNOSIS_SINK.with(|sink| {
+        let stages = &mut sink.borrow_mut().cdt_stages;
+        stages.raw_cdt_triangles = Some(raw_cdt_triangles);
+        stages.material_selected = Some(material_selected);
+        stages.final_valid = Some(final_valid);
     });
 }
 
@@ -964,6 +1276,10 @@ pub(crate) fn build_face_diagnosis(
         let mut sink = sink.borrow_mut();
         let vertex_insertion_failed = sink.vertex_insertion_failed;
         let witnesses = std::mem::take(&mut sink.witnesses);
+        let overlap_conflicts = std::mem::take(&mut sink.overlap_witnesses);
+        let unattributed_overlaps = sink.unattributed_overlaps;
+        let cdt_stages = sink.cdt_stages;
+        let route_decisions = ROUTE_DECISIONS.with(|s| std::mem::take(&mut *s.borrow_mut()));
         let source_segment_count = sink.source_segment_count;
         let synthetic_segment_count = sink.synthetic_segment_count;
         let seam_segment_count = sink.seam_segment_count;
@@ -992,6 +1308,10 @@ pub(crate) fn build_face_diagnosis(
             two_loop_join,
             seam_mechanism,
             insertion_conflicts: witnesses,
+            overlap_conflicts,
+            unattributed_overlaps,
+            cdt_stages,
+            route_decisions,
             derived_bucket,
         }
     })
@@ -1028,6 +1348,8 @@ mod tests {
             same_bound,
             same_source_edge_use: None,
             intersection_enclosure: None,
+            incoming_segment: None,
+            blocking_segment: None,
         }
     }
 
@@ -1167,6 +1489,10 @@ mod tests {
                 seg_ref(1, SegmentOrigin::Source, Some(0)),
                 Some(true),
             )],
+            overlap_conflicts: Vec::new(),
+            unattributed_overlaps: 0,
+            cdt_stages: CdtStageVector::default(),
+            route_decisions: Vec::new(),
             derived_bucket: LossBucket::SourceSourceSameBoundCrossing,
         };
         let json1 = serde_json::to_string(&diag).unwrap();
