@@ -42,7 +42,7 @@ std::thread_local! {
     /// the retry stage in the per-face chain for why it has to run there and
     /// not where the contradiction is detected.
     static PARITY_READING: std::cell::Cell<ParityReading> =
-        const { std::cell::Cell::new(ParityReading::Legacy) };
+        const { std::cell::Cell::new(ParityReading::TraversalParity) };
 
     static PROBE_FACE_CONTEXT: std::cell::Cell<(Option<u64>, usize, u8)> =
         const { std::cell::Cell::new((None, usize::MAX, 0)) };
@@ -2155,9 +2155,9 @@ where
             {
                 // The DIAG-001 record must keep describing the legacy attempt.
                 let _suspension = diagnosis::SinkSuspension::new();
-                PARITY_READING.with(|cell| cell.set(ParityReading::TraversalParity));
+                // The parity reading is already `TraversalParity` on the primary
+                // path (ARR-SEAM W3), so no set/reset is needed here any more.
                 let retried = trimming_tessellation_result(&surface, &boundary, tol, &lattice);
-                PARITY_READING.with(|cell| cell.set(ParityReading::Legacy));
                 diagnosis::record_route_decision(
                     diagnosis::RecoveryRoute::WindingParity,
                     true,
@@ -5474,7 +5474,20 @@ impl PolyBoundary {
         {
             let area0 = signed_area(&closed[0].points);
             let area1 = signed_area(&closed[1].points);
-            if area0.abs() < DEGENERATE_LOOP_AREA && area1.abs() < DEGENERATE_LOOP_AREA {
+            // ARR-SEAM W2: a valid non-degenerate deck pair must reach this
+            // join too. The legacy area gate admits only the collapsed cohort;
+            // under `DeckConsistent` the semantic predicate is that both loops
+            // are genuine deck walks (non-zero lattice displacement), which
+            // `PolyBoundary::new` never triggers because it passes `Legacy`.
+            // The legacy area condition stays the first disjunct so the primary
+            // path is byte-identical (INV-W2-1); the deck equation and its
+            // `Unresolved`/`Inconsistent` refusal are already computed below.
+            let deck_pair = join_policy == TwoLoopJoinPolicy::DeckConsistent
+                && closed_displacements[0] != [0, 0]
+                && closed_displacements[1] != [0, 0];
+            if (area0.abs() < DEGENERATE_LOOP_AREA && area1.abs() < DEGENERATE_LOOP_AREA)
+                || deck_pair
+            {
                 let loop0_displacement = closed_displacements[0];
                 let loop1_displacement = closed_displacements[1];
                 let mut mean_translate = [0i64, 0i64];
@@ -5952,6 +5965,30 @@ impl PolyBoundary {
                 probe_point_fail += 1;
                 if diag {
                     diagnosis::set_vertex_insertion_failed();
+                    // A failed vertex insertion means no boundary segment of
+                    // this piece was ever presented to the CDT, so no segment
+                    // pair exists to build a conflict witness from. Record a
+                    // `VertexInsertionFailure` witness anyway, so the census
+                    // can attribute the face instead of filing it as no
+                    // evidence (the `gap == 0`, no-witness faces).
+                    //
+                    // This deliberately goes to the overlap witness vector,
+                    // which `derive_loss_bucket` does not read, so the derived
+                    // bucket stays `VertexInsertionFailure` — the record is
+                    // diagnostic-only.
+                    let origin = piece
+                        .origins
+                        .first()
+                        .copied()
+                        .unwrap_or(SegmentOrigin::Source);
+                    let id = diagnosis::record_segment(origin, Some(piece_index), 0);
+                    diagnosis::record_overlap_conflict(
+                        id,
+                        Some(id),
+                        diagnosis::PresentedSegmentRelation::VertexInsertionFailure,
+                        None,
+                        None,
+                    );
                 }
                 failure.get_or_insert(TessellationFailureReason::ConstraintInsertionIncomplete);
                 continue;
@@ -5980,16 +6017,15 @@ impl PolyBoundary {
                 // A well-formed loop traverses each edge once. If the direct
                 // edge is already a constraint that this face's own role table
                 // claims, the boundary is traversing it a second time — a
-                // duplicate or collinear-overlapping segment, which the
-                // envelope does not admit.
+                // duplicate or collinear-overlapping segment. ARR-SEAM W3 admits
+                // these as additional traversals (counted, read mod 2 by the
+                // flood) instead of refusing the whole face; see the arm below.
                 //
-                // The previous code rejected this case, but only as a side
-                // effect of treating "already a constraint" as a failure, which
-                // also refused segments that were legitimately already fully
-                // represented — 5 faces on `00009190`. Separating the two keeps
-                // the refusal and drops the false positive, and gives the
-                // overlap its own typed reason instead of reporting it as an
-                // insertion failure.
+                // This arm used to reject the case outright, which also refused
+                // segments that were legitimately already fully represented —
+                // 5 faces on `00009190`. Keeping the overlap witness but not the
+                // failure is the separation that makes the census able to name
+                // the population without losing the face.
                 // G6: the role this segment is entitled to, decided by where
                 // the segment came from rather than by which vector it ended up
                 // in. `PolyBoundary::new` stitches synthesised closure and seam
@@ -6009,28 +6045,54 @@ impl PolyBoundary {
                     .map(|e| e.as_undirected().fix())
                     .filter(|handle| roles.role_of(*handle).is_some());
                 if let Some(handle) = overlapping {
-                    // Capture the pair while it still exists. Until now this
-                    // refusal recorded nothing at all, so every face it lost
-                    // reached the terminal enum carrying zero pair evidence and
-                    // was indistinguishable from an unwitnessed one.
+                    // ARR-SEAM W3: admit the duplicate traversal instead of
+                    // refusing it. The geometry is already present in the CDT
+                    // and is valid — the refusal was Truck's own precondition,
+                    // not Spade's, and `try_add_constraint` would have returned
+                    // this exact edge in its chain. Represent the second
+                    // declaration as a traversal count; the parity flood reads
+                    // it mod 2, so a doubled edge separates nothing. First
+                    // claim wins and no Spade API is called again.
                     //
-                    // The relation is `DuplicateTraversal`, not
-                    // `CollinearOverlap`: the test matched the *direct* edge
-                    // from `vi` to `vj`, so the presented segment's endpoints
-                    // coincide with an existing constraint edge exactly. A
-                    // partial collinear overlap does not reach here.
+                    // The diagnostic witness is kept exactly as it was: the
+                    // census still needs to see the overlap, it just no longer
+                    // implies a terminal failure.
                     if diag {
+                        let incoming_a = triangulation.vertex(vi).position();
+                        let incoming_b = triangulation.vertex(vj).position();
+                        let blocking_edge = triangulation.undirected_edge(handle);
+                        let blocking_positions = blocking_edge.positions();
+                        let blocking_directed = blocking_edge.as_directed();
+                        let blocking_vertices =
+                            [blocking_directed.from().fix(), blocking_directed.to().fix()];
+                        let relation = classify_presented_relation(
+                            [vi, vj],
+                            blocking_vertices,
+                            incoming_a,
+                            incoming_b,
+                            blocking_positions[0],
+                            blocking_positions[1],
+                        );
                         diagnosis::record_overlap_conflict(
                             diag_seg_id,
                             diag_edge_map.get(&handle).copied(),
-                            diagnosis::PresentedSegmentRelation::DuplicateTraversal,
-                            Some(segment_endpoints(piece.points[i].uv, piece.points[j].uv)),
-                            Some(spade_endpoints(
-                                triangulation.undirected_edge(handle).positions(),
-                            )),
+                            relation,
+                            Some(spade_endpoints([incoming_a, incoming_b])),
+                            Some(spade_endpoints(blocking_positions)),
                         );
                     }
-                    failure.get_or_insert(TessellationFailureReason::ConstraintOverlapUnsupported);
+                    *roles.traversals.entry(handle).or_insert(0) += 1;
+                    roles.record(handle, segment_role);
+                    stage_constraints_inserted += 1;
+                    // INV-W3-4: the single-role mod-2 simplification holds only
+                    // while every multiplicity>1 edge is still material-toggling
+                    // in its role. Read with the `Legacy` reading, which reports
+                    // the role's raw property independent of multiplicity.
+                    debug_assert!(
+                        roles.toggles_material(handle, ParityReading::Legacy) == Some(true),
+                        "a multiplicity>1 edge must still be material-toggling for the \
+                         single-role mod-2 simplification to hold",
+                    );
                     continue;
                 }
                 // G5a: ask once, and label what was actually realized.
@@ -6162,18 +6224,31 @@ impl PolyBoundary {
                             .get_conflicting_edges_between_vertices(vi, vj)
                             .map(|edge| edge.as_undirected().fix())
                             .collect();
-                        let incoming_endpoints =
-                            segment_endpoints(piece.points[i].uv, piece.points[j].uv);
+                        let incoming_a = triangulation.vertex(vi).position();
+                        let incoming_b = triangulation.vertex(vj).position();
                         for handle in &diag_conflicts {
                             if let Some(&blocking_id) = diag_edge_map.get(handle) {
+                                let blocking_edge = triangulation.undirected_edge(*handle);
+                                let blocking_positions = blocking_edge.positions();
+                                let blocking_directed = blocking_edge.as_directed();
+                                let blocking_vertices = [
+                                    blocking_directed.from().fix(),
+                                    blocking_directed.to().fix(),
+                                ];
+                                let relation = classify_presented_relation(
+                                    [vi, vj],
+                                    blocking_vertices,
+                                    incoming_a,
+                                    incoming_b,
+                                    blocking_positions[0],
+                                    blocking_positions[1],
+                                );
                                 diagnosis::record_conflict(
                                     diag_seg_id,
                                     blocking_id,
-                                    diagnosis::PresentedSegmentRelation::ProperInteriorCrossing,
-                                    Some(incoming_endpoints),
-                                    Some(spade_endpoints(
-                                        triangulation.undirected_edge(*handle).positions(),
-                                    )),
+                                    relation,
+                                    Some(spade_endpoints([incoming_a, incoming_b])),
+                                    Some(spade_endpoints(blocking_positions)),
                                 );
                             }
                         }
@@ -6256,6 +6331,63 @@ fn spade_round(x: f64) -> f64 {
         true => 0.0,
         false => x,
     }
+}
+
+/// The geometric relation between a presented segment and the constraint edge
+/// that blocks it, measured on the coordinates Spade actually stores.
+///
+/// Both segments' endpoints come from the CDT — `triangulation.vertex(..)` and
+/// `triangulation.undirected_edge(..).positions()` — so the two are in the same
+/// coordinate space. Raw lifted UV (`piece.points[i].uv`) and Spade's snapped
+/// positions differ by up to the 1e-6 vertex snap radius, which is exactly the
+/// asymmetry that used to mislabel `no-intersection` witnesses.
+///
+/// Exact predicates only (`robust`, the same library Spade uses internally):
+/// no tolerance, no snap-radius comparison, no grazing classifier. The relation
+/// describes what Spade sees. Predicate order is significant:
+///
+/// 1. same undirected vertex pair -> the same geometric edge traversed again;
+/// 2. all four collinear (both blocking endpoints on the incoming line) -> the
+///    segments lie on one line and Spade said they conflict, so they overlap;
+/// 3. any endpoint exactly on the other segment's supporting line;
+/// 4. strict transversal sign crossing;
+/// 5. otherwise `Unknown`.
+fn classify_presented_relation(
+    incoming: [FixedVertexHandle; 2],
+    blocking: [FixedVertexHandle; 2],
+    a: SPoint2,
+    b: SPoint2,
+    c: SPoint2,
+    d: SPoint2,
+) -> diagnosis::PresentedSegmentRelation {
+    use diagnosis::PresentedSegmentRelation as R;
+    let same_undirected_pair =
+        (incoming[0] == blocking[0] && incoming[1] == blocking[1])
+            || (incoming[0] == blocking[1] && incoming[1] == blocking[0]);
+    if same_undirected_pair {
+        return R::DuplicateTraversal;
+    }
+    let orient = |p: SPoint2, q: SPoint2, r: SPoint2| {
+        robust::orient2d(
+            robust::Coord { x: p.x, y: p.y },
+            robust::Coord { x: q.x, y: q.y },
+            robust::Coord { x: r.x, y: r.y },
+        )
+    };
+    let o1 = orient(a, b, c);
+    let o2 = orient(a, b, d);
+    if o1 == 0.0 && o2 == 0.0 {
+        return R::CollinearOverlap;
+    }
+    let o3 = orient(c, d, a);
+    let o4 = orient(c, d, b);
+    if o1 == 0.0 || o2 == 0.0 || o3 == 0.0 || o4 == 0.0 {
+        return R::EndpointOnInterior;
+    }
+    if (o1 < 0.0) != (o2 < 0.0) && (o3 < 0.0) != (o4 < 0.0) {
+        return R::ProperInteriorCrossing;
+    }
+    R::Unknown
 }
 
 /// What a Spade constraint edge *means*, so that material semantics can be
@@ -7838,6 +7970,507 @@ mod cone_topology_tests {
             "Self-overlapping degenerate loop must fail or produce empty mesh"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // ARR-SEAM W2 — the widened DeckConsistent two-loop join
+    // -----------------------------------------------------------------------
+
+    /// Two periodic walks whose loops enclose genuine UV area, unlike the
+    /// degenerate fixed-`u` circles of [`opposite_winding_band_pieces`]. They
+    /// wind opposite ways, so the deck equation resolves forward.
+    ///
+    /// The `u` coordinate bulges out and back along the `v` walk, so the lifted
+    /// loop encloses `|signed_area| ≈ 2 · amp · π`, far above the
+    /// `DEGENERATE_LOOP_AREA` gate, while still closing in 3D at `v = 0` and
+    /// `v = 2π`.
+    fn non_degenerate_band_pieces() -> (RevolutedCurve<Line<Point3>>, Vec<PolyBoundaryPiece>) {
+        let cylinder = RevolutedCurve::by_revolution(
+            Line(Point3::new(10.0, 0.0, 0.0), Point3::new(10.0, 0.0, 10.0)),
+            Point3::origin(),
+            Vector3::unit_z(),
+        );
+        let bump_circle = |u0: f64, amp: f64, sign: f64| -> PolyBoundaryPiece {
+            PolyBoundaryPiece(
+                (0..=32)
+                    .map(|i| {
+                        let t = i as f64 / 32.0;
+                        let v = sign * t * 2.0 * PI;
+                        let u = u0 + amp * 2.0 * t.min(1.0 - t);
+                        let uv = Point2::new(u, v);
+                        (uv, cylinder.subs(uv.x, uv.y)).into()
+                    })
+                    .collect(),
+            )
+        };
+        (cylinder, vec![bump_circle(0.2, 0.05, 1.0), bump_circle(0.8, 0.05, -1.0)])
+    }
+
+    /// A non-degenerate deck pair is joined under `DeckConsistent`.
+    #[test]
+    fn non_degenerate_deck_pair_is_joined_under_deck_consistent() {
+        let (cylinder, pieces) = non_degenerate_band_pieces();
+        let lattice = unevidenced_lattice(&cylinder);
+        let (_, outcome) = PolyBoundary::new_with_join(
+            pieces,
+            &cylinder,
+            0.01,
+            &lattice,
+            TwoLoopJoinPolicy::DeckConsistent,
+        );
+        assert_eq!(
+            outcome,
+            TwoLoopJoinOutcome::ForwardResolves { applied: true },
+            "a non-degenerate deck pair must be joined under DeckConsistent",
+        );
+    }
+
+    /// The same pair is **not** joined under `Legacy` — INV-W2-1, the regression
+    /// guard for the widened gate.
+    #[test]
+    fn non_degenerate_deck_pair_is_not_joined_under_legacy() {
+        let (cylinder, pieces) = non_degenerate_band_pieces();
+        let lattice = unevidenced_lattice(&cylinder);
+        let (_, outcome) = PolyBoundary::new_with_join(
+            pieces,
+            &cylinder,
+            0.01,
+            &lattice,
+            TwoLoopJoinPolicy::Legacy,
+        );
+        assert_eq!(
+            outcome,
+            TwoLoopJoinOutcome::NotAttempted,
+            "the legacy policy must not admit a non-degenerate deck pair",
+        );
+    }
+
+    /// INV-W2-2: the joined loop contains no segment spanning a full period.
+    #[test]
+    fn joined_loop_has_no_period_spanning_segment() {
+        let (cylinder, pieces) = non_degenerate_band_pieces();
+        let lattice = unevidenced_lattice(&cylinder);
+        let (boundary, outcome) = PolyBoundary::new_with_join(
+            pieces,
+            &cylinder,
+            0.01,
+            &lattice,
+            TwoLoopJoinPolicy::DeckConsistent,
+        );
+        assert_eq!(outcome, TwoLoopJoinOutcome::ForwardResolves { applied: true });
+        assert_eq!(boundary.0.len(), 1, "the join yields one closed loop");
+        let period = lattice.declared_v_period().unwrap_or(2.0 * PI);
+        let loop_ = &boundary.0[0];
+        for k in 0..loop_.points.len() {
+            let a = loop_.points[k].uv;
+            let b = loop_.points[(k + 1) % loop_.points.len()].uv;
+            assert!(
+                a.distance(b) < period,
+                "no joined segment may span a full parameter period (INV-W2-2)",
+            );
+        }
+    }
+
+    /// INV-W2-3: exactly the two chart-edge bridges carry `Seam`.
+    #[test]
+    fn joined_loop_has_exactly_two_seam_origins() {
+        let (cylinder, pieces) = non_degenerate_band_pieces();
+        let lattice = unevidenced_lattice(&cylinder);
+        let (boundary, outcome) = PolyBoundary::new_with_join(
+            pieces,
+            &cylinder,
+            0.01,
+            &lattice,
+            TwoLoopJoinPolicy::DeckConsistent,
+        );
+        assert_eq!(outcome, TwoLoopJoinOutcome::ForwardResolves { applied: true });
+        assert_eq!(boundary.0.len(), 1);
+        let loop_ = &boundary.0[0];
+        let seams = loop_
+            .origins
+            .iter()
+            .filter(|origin| **origin == SegmentOrigin::Seam)
+            .count();
+        assert_eq!(
+            seams, 2,
+            "exactly the two artificial bridges are Seam (INV-W2-3)",
+        );
+    }
+
+    /// INV-W2-4: a zero-displacement (Euclidean-closed) pair is not admitted by
+    /// the deck-pair disjunct.
+    #[test]
+    fn zero_displacement_pair_is_refused() {
+        let cylinder = RevolutedCurve::by_revolution(
+            Line(Point3::new(10.0, 0.0, 0.0), Point3::new(10.0, 0.0, 10.0)),
+            Point3::origin(),
+            Vector3::unit_z(),
+        );
+        // Two ordinary UV-closed circles on the periodic chart, each enclosing
+        // area >> 1e-4. Their displacements are [0, 0], so neither the legacy
+        // area gate nor the deck-pair disjunct fires.
+        let circle = |u: f64| -> PolyBoundaryPiece {
+            PolyBoundaryPiece(
+                (0..=32)
+                    .map(|i| {
+                        let theta = (i as f64 / 32.0) * 2.0 * PI;
+                        let uv = Point2::new(u + 0.2 * theta.cos(), PI + 0.2 * theta.sin());
+                        (uv, cylinder.subs(uv.x, uv.y)).into()
+                    })
+                    .collect(),
+            )
+        };
+        let (_, outcome) = PolyBoundary::new_with_join(
+            vec![circle(0.4), circle(0.6)],
+            &cylinder,
+            0.01,
+            &unevidenced_lattice(&cylinder),
+            TwoLoopJoinPolicy::DeckConsistent,
+        );
+        assert_eq!(
+            outcome,
+            TwoLoopJoinOutcome::NotAttempted,
+            "a zero-displacement pair must not be admitted (INV-W2-4)",
+        );
+    }
+
+    /// INV-W2-4: an inconsistent deck equation is refused. Reproduces
+    /// `00009190#34764` with `d0 = (0, 2)`, `d1 = (0, -1)`.
+    #[test]
+    fn inconsistent_displacements_are_refused() {
+        let cylinder = RevolutedCurve::by_revolution(
+            Line(Point3::new(10.0, 0.0, 0.0), Point3::new(10.0, 0.0, 10.0)),
+            Point3::origin(),
+            Vector3::unit_z(),
+        );
+        let winding_circle = |u0: f64, windings: i64| -> PolyBoundaryPiece {
+            PolyBoundaryPiece(
+                (0..=32)
+                    .map(|i| {
+                        let t = i as f64 / 32.0;
+                        let v = (windings as f64) * t * 2.0 * PI;
+                        let u = u0 + 0.05 * 2.0 * t.min(1.0 - t);
+                        let uv = Point2::new(u, v);
+                        (uv, cylinder.subs(uv.x, uv.y)).into()
+                    })
+                    .collect(),
+            )
+        };
+        let (_, outcome) = PolyBoundary::new_with_join(
+            vec![winding_circle(0.2, 2), winding_circle(0.8, -1)],
+            &cylinder,
+            0.01,
+            &unevidenced_lattice(&cylinder),
+            TwoLoopJoinPolicy::DeckConsistent,
+        );
+        assert_eq!(
+            outcome,
+            TwoLoopJoinOutcome::Inconsistent,
+            "the (0,2)/(0,-1) deck is inconsistent and must be refused",
+        );
+    }
+
+    /// End to end: the joined non-degenerate band tessellates to a non-empty
+    /// mesh. This is the residual risk W2 accepts — the join is unchanged, the
+    /// population is not.
+    #[test]
+    fn joined_band_tessellates_to_a_nonempty_mesh() {
+        let (cylinder, pieces) = non_degenerate_band_pieces();
+        let lattice = unevidenced_lattice(&cylinder);
+        let (boundary, outcome) = PolyBoundary::new_with_join(
+            pieces,
+            &cylinder,
+            0.01,
+            &lattice,
+            TwoLoopJoinPolicy::DeckConsistent,
+        );
+        assert_eq!(outcome, TwoLoopJoinOutcome::ForwardResolves { applied: true });
+        let mesh = trimming_tessellation_result(&cylinder, &boundary, 0.01, &lattice)
+            .expect("the joined non-degenerate band tessellates");
+        assert!(
+            !mesh.faces().tri_faces().is_empty(),
+            "and produces triangles",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ARR-SEAM W3 — duplicate traversal, multiplicity mod 2
+    // -----------------------------------------------------------------------
+
+    fn parity_plane() -> truck_geometry::prelude::Plane {
+        use truck_geometry::prelude::*;
+        Plane::new(
+            Point3::origin(),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        )
+    }
+
+    fn square(visits: u32) -> Vec<SurfacePoint> {
+        let corner = |x: f64, y: f64| -> SurfacePoint {
+            (Point2::new(x, y), Point3::new(x, y, 0.0)).into()
+        };
+        (0..visits)
+            .flat_map(|_| {
+                [
+                    corner(0.0, 0.0),
+                    corner(10.0, 0.0),
+                    corner(10.0, 10.0),
+                    corner(0.0, 10.0),
+                ]
+            })
+            .chain([corner(0.0, 0.0)])
+            .collect()
+    }
+
+    /// C1's regression test: a single-traversal disk still bounds material under
+    /// `TraversalParity` (identical to `Legacy` when every edge is traversed
+    /// once).
+    #[test]
+    fn single_traversal_still_bounds_material() {
+        let plane = parity_plane();
+        let tol = 0.01;
+        let boundary = PolyBoundary::new(
+            vec![PolyBoundaryPiece(square(1))],
+            &plane,
+            tol,
+            &unevidenced_lattice(&plane),
+        );
+        let mesh = trimming_tessellation(&plane, &boundary, tol, &unevidenced_lattice(&plane));
+        assert!(!mesh.faces().is_empty());
+    }
+
+    /// A boundary declared twice cancels to no material and reports
+    /// `NoOddParityRegion` — never `ConstraintOverlapUnsupported`.
+    #[test]
+    fn double_traversal_cancels() {
+        let plane = parity_plane();
+        let tol = 0.01;
+        let boundary = PolyBoundary::new(
+            vec![PolyBoundaryPiece(square(2))],
+            &plane,
+            tol,
+            &unevidenced_lattice(&plane),
+        );
+        let reason = trimming_tessellation_result(&plane, &boundary, tol, &unevidenced_lattice(&plane))
+            .err()
+            .map(|failure| failure.reason);
+        assert_eq!(
+            reason,
+            Some(TessellationFailureReason::NoOddParityRegion),
+            "a fully-doubled boundary cancels to no material",
+        );
+    }
+
+    /// Three traversals equal one: parity is multiplicity mod 2.
+    #[test]
+    fn triple_traversal_equals_single() {
+        let plane = parity_plane();
+        let tol = 0.01;
+        let single = PolyBoundary::new(
+            vec![PolyBoundaryPiece(square(1))],
+            &plane,
+            tol,
+            &unevidenced_lattice(&plane),
+        );
+        let triple = PolyBoundary::new(
+            vec![PolyBoundaryPiece(square(3))],
+            &plane,
+            tol,
+            &unevidenced_lattice(&plane),
+        );
+        let single_mesh = trimming_tessellation(&plane, &single, tol, &unevidenced_lattice(&plane));
+        let triple_mesh = trimming_tessellation(&plane, &triple, tol, &unevidenced_lattice(&plane));
+        assert!(!single_mesh.faces().is_empty());
+        assert!(!triple_mesh.faces().is_empty());
+        assert_eq!(
+            single_mesh.faces().tri_faces().len(),
+            triple_mesh.faces().tri_faces().len(),
+            "three traversals equal one: parity is multiplicity mod 2",
+        );
+    }
+
+    /// INV-W3-1: a duplicate is never refused as `ConstraintOverlapUnsupported`.
+    #[test]
+    fn duplicate_edge_is_not_constraint_overlap_unsupported() {
+        let plane = parity_plane();
+        let tol = 0.01;
+        let corner = |x: f64, y: f64| -> SurfacePoint {
+            (Point2::new(x, y), Point3::new(x, y, 0.0)).into()
+        };
+        // The edge (0,0)-(10,0) is claimed three times; the loop otherwise
+        // bounds the square (0,0)-(10,0)-(10,10)-(0,10).
+        let loop0: Vec<SurfacePoint> = vec![
+            corner(0.0, 0.0),
+            corner(10.0, 0.0),
+            corner(0.0, 0.0),
+            corner(10.0, 0.0),
+            corner(10.0, 10.0),
+            corner(0.0, 10.0),
+            corner(0.0, 0.0),
+        ];
+        let boundary = PolyBoundary::new(
+            vec![PolyBoundaryPiece(loop0)],
+            &plane,
+            tol,
+            &unevidenced_lattice(&plane),
+        );
+        let reason = trimming_tessellation_result(&plane, &boundary, tol, &unevidenced_lattice(&plane))
+            .err()
+            .map(|failure| failure.reason);
+        assert_ne!(
+            reason,
+            Some(TessellationFailureReason::ConstraintOverlapUnsupported),
+            "a duplicate traversal must not be refused as an unsupported overlap",
+        );
+    }
+
+    /// INV-W3-2/3: a duplicated traversal creates no second CDT edge, and the
+    /// traversal sum matches the inserted count.
+    #[test]
+    fn duplicate_edge_creates_no_second_cdt_edge() {
+        let plane = parity_plane();
+        let tol = 0.01;
+        let corner = |x: f64, y: f64| -> SurfacePoint {
+            (Point2::new(x, y), Point3::new(x, y, 0.0)).into()
+        };
+        let loop0: Vec<SurfacePoint> = vec![
+            corner(0.0, 0.0),
+            corner(10.0, 0.0),
+            corner(0.0, 0.0),
+            corner(10.0, 0.0),
+            corner(5.0, 10.0),
+        ];
+        let boundary = PolyBoundary::new(
+            vec![PolyBoundaryPiece(loop0)],
+            &plane,
+            tol,
+            &unevidenced_lattice(&plane),
+        );
+        let mut triangulation = Cdt::new();
+        let mut boundary_map = HashMap::<FixedVertexHandle, Point3>::default();
+        let mut roles = ConstraintRoles::default();
+        boundary
+            .insert_to(&mut triangulation, &mut boundary_map, &mut roles)
+            .expect("duplicates are admitted, not rejected");
+        assert_eq!(
+            triangulation.num_constraints(),
+            3,
+            "a duplicated traversal creates no second CDT edge (INV-W3-2)",
+        );
+        let v0 = triangulation
+            .vertices()
+            .find(|v| v.as_ref() == &SPoint2::new(0.0, 0.0))
+            .expect("vertex (0,0) exists")
+            .fix();
+        let v1 = triangulation
+            .vertices()
+            .find(|v| v.as_ref() == &SPoint2::new(10.0, 0.0))
+            .expect("vertex (10,0) exists")
+            .fix();
+        let e_bottom = triangulation
+            .get_edge_from_neighbors(v0, v1)
+            .expect("edge (0,0)-(10,0) exists")
+            .as_undirected()
+            .fix();
+        assert_eq!(
+            roles.traversals.get(&e_bottom),
+            Some(&3),
+            "the duplicated edge is traversed three times",
+        );
+        assert_eq!(
+            roles.traversals.values().sum::<usize>(),
+            5,
+            "sum of traversals equals the inserted semantic traversals (INV-W3-3)",
+        );
+    }
+
+    /// The out-and-back slit cancels mod 2 but the disk survives: the 165-face
+    /// recovery case, distinguished from the 675-face total cancellation.
+    #[test]
+    fn slit_cancels_but_disk_survives() {
+        let plane = parity_plane();
+        let tol = 0.01;
+        let corner = |x: f64, y: f64| -> SurfacePoint {
+            (Point2::new(x, y), Point3::new(x, y, 0.0)).into()
+        };
+        // A square with an interior spur across it: (0,5)->(10,5)->(0,5).
+        let loop0: Vec<SurfacePoint> = vec![
+            corner(0.0, 0.0),
+            corner(10.0, 0.0),
+            corner(10.0, 10.0),
+            corner(0.0, 10.0),
+            corner(0.0, 5.0),
+            corner(10.0, 5.0),
+            corner(0.0, 5.0),
+            corner(0.0, 0.0),
+        ];
+        let boundary = PolyBoundary::new(
+            vec![PolyBoundaryPiece(loop0)],
+            &plane,
+            tol,
+            &unevidenced_lattice(&plane),
+        );
+        let mesh = trimming_tessellation(&plane, &boundary, tol, &unevidenced_lattice(&plane));
+        assert!(
+            !mesh.faces().is_empty(),
+            "the out-and-back slit cancels but the disk must survive",
+        );
+    }
+
+    /// INV-W3-4: a duplicate from a different role keeps the first claim, and
+    /// the multiplicity stays counted.
+    #[test]
+    fn different_role_duplicate_keeps_first_claim() {
+        let corner = |x: f64, y: f64| -> SurfacePoint {
+            (Point2::new(x, y), Point3::new(x, y, 0.0)).into()
+        };
+        // Edge (0,0)-(10,0) claimed as Source (first), then SyntheticClosure,
+        // then Source again.
+        let loop_ = BoundaryLoop::new(
+            vec![
+                corner(0.0, 0.0),
+                corner(10.0, 0.0),
+                corner(0.0, 0.0),
+                corner(10.0, 0.0),
+                corner(5.0, 10.0),
+            ],
+            vec![
+                SegmentOrigin::Source,
+                SegmentOrigin::SyntheticClosure,
+                SegmentOrigin::Source,
+                SegmentOrigin::Source,
+                SegmentOrigin::Source,
+            ],
+        );
+        let boundary = PolyBoundary(vec![loop_]);
+        let mut triangulation = Cdt::new();
+        let mut boundary_map = HashMap::<FixedVertexHandle, Point3>::default();
+        let mut roles = ConstraintRoles::default();
+        boundary
+            .insert_to(&mut triangulation, &mut boundary_map, &mut roles)
+            .expect("the duplicate is admitted");
+        let v0 = triangulation
+            .vertices()
+            .find(|v| v.as_ref() == &SPoint2::new(0.0, 0.0))
+            .expect("vertex (0,0) exists")
+            .fix();
+        let v1 = triangulation
+            .vertices()
+            .find(|v| v.as_ref() == &SPoint2::new(10.0, 0.0))
+            .expect("vertex (10,0) exists")
+            .fix();
+        let e = triangulation
+            .get_edge_from_neighbors(v0, v1)
+            .expect("edge (0,0)-(10,0) exists")
+            .as_undirected()
+            .fix();
+        assert_eq!(
+            roles.role_of(e),
+            Some(ConstraintRole::PhysicalBoundary),
+            "the first (Source) claim wins",
+        );
+        assert_eq!(roles.traversals.get(&e), Some(&3), "multiplicity is counted");
+    }
 }
 
 #[cfg(test)]
@@ -8356,6 +8989,185 @@ mod segment_origin_tests {
         ]);
         assert_eq!(loop_.points.len(), loop_.origins.len());
         assert_eq!(loop_.points.len(), 3, "join duplicates are dropped");
+    }
+}
+
+/// Pure tests for [`classify_presented_relation`]: exact predicates only, no
+/// CDT required.
+///
+/// The handle pairs are fabrications — `from_index` — because the classifier
+/// reads nothing from the triangulation; the positions drive every predicate.
+#[cfg(test)]
+mod presented_relation_tests {
+    use super::*;
+
+    fn p(x: f64, y: f64) -> SPoint2 {
+        SPoint2::new(x, y)
+    }
+
+    fn handles(a: usize, b: usize) -> [FixedVertexHandle; 2] {
+        [FixedVertexHandle::from_index(a), FixedVertexHandle::from_index(b)]
+    }
+
+    /// Same undirected vertex pair is a duplicate traversal, in either order.
+    #[test]
+    fn identical_vertex_pair_is_duplicate() {
+        assert_eq!(
+            classify_presented_relation(
+                handles(0, 1),
+                handles(1, 0),
+                p(0.0, 0.0),
+                p(1.0, 0.0),
+                p(1.0, 0.0),
+                p(0.0, 0.0),
+            ),
+            diagnosis::PresentedSegmentRelation::DuplicateTraversal,
+        );
+        assert_eq!(
+            classify_presented_relation(
+                handles(0, 1),
+                handles(0, 1),
+                p(0.0, 0.0),
+                p(1.0, 0.0),
+                p(0.0, 0.0),
+                p(1.0, 0.0),
+            ),
+            diagnosis::PresentedSegmentRelation::DuplicateTraversal,
+        );
+    }
+
+    /// `(0,0)-(2,0)` vs `(1,0)-(3,0)`: all four collinear, no shared endpoint.
+    #[test]
+    fn collinear_overlapping_is_collinear_overlap() {
+        assert_eq!(
+            classify_presented_relation(
+                handles(0, 1),
+                handles(2, 3),
+                p(0.0, 0.0),
+                p(2.0, 0.0),
+                p(1.0, 0.0),
+                p(3.0, 0.0),
+            ),
+            diagnosis::PresentedSegmentRelation::CollinearOverlap,
+        );
+    }
+
+    /// `(0,0)-(2,0)` vs `(1,0)-(1,1)`: endpoint `(1,0)` lies exactly on the
+    /// first segment's interior.
+    #[test]
+    fn endpoint_exactly_on_interior() {
+        assert_eq!(
+            classify_presented_relation(
+                handles(0, 1),
+                handles(2, 3),
+                p(0.0, 0.0),
+                p(2.0, 0.0),
+                p(1.0, 0.0),
+                p(1.0, 1.0),
+            ),
+            diagnosis::PresentedSegmentRelation::EndpointOnInterior,
+        );
+    }
+
+    /// `(0,0)-(2,2)` vs `(0,2)-(2,0)`: a deep transversal crossing at `(1,1)`.
+    #[test]
+    fn transversal_is_proper_interior_crossing() {
+        assert_eq!(
+            classify_presented_relation(
+                handles(0, 1),
+                handles(2, 3),
+                p(0.0, 0.0),
+                p(2.0, 2.0),
+                p(0.0, 2.0),
+                p(2.0, 0.0),
+            ),
+            diagnosis::PresentedSegmentRelation::ProperInteriorCrossing,
+        );
+    }
+
+    /// One ULP off the exact incidence is still a proper crossing. This pins
+    /// the "exact predicates only" contract: no tolerance may fold a near-miss
+    /// into `EndpointOnInterior`.
+    #[test]
+    fn near_miss_is_still_a_crossing() {
+        let eps = f64::EPSILON;
+        assert_eq!(
+            classify_presented_relation(
+                handles(0, 1),
+                handles(2, 3),
+                p(0.0, 0.0),
+                p(2.0, 0.0),
+                p(1.0, 0.0),
+                p(1.0, 1.0),
+            ),
+            diagnosis::PresentedSegmentRelation::EndpointOnInterior,
+            "sanity: the exact incidence is recognized",
+        );
+        // Shift the incident endpoint one ULP below the supporting line: the
+        // vertical segment now genuinely straddles the horizontal one, and the
+        // exact predicates see a proper crossing — never an incidence.
+        assert_eq!(
+            classify_presented_relation(
+                handles(0, 1),
+                handles(2, 3),
+                p(0.0, 0.0),
+                p(2.0, 0.0),
+                p(1.0, -eps),
+                p(1.0, 1.0),
+            ),
+            diagnosis::PresentedSegmentRelation::ProperInteriorCrossing,
+            "1 ULP below the line must still read as a proper crossing",
+        );
+    }
+
+    /// A known-failing face produces the same terminal reason whether the
+    /// diagnostic classifier runs or not. W1 must move no face.
+    #[test]
+    fn classifier_does_not_change_outcome() {
+        use truck_geometry::prelude::*;
+        let plane = Plane::new(
+            Point3::origin(),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        );
+        let tol = 0.01;
+        let lattice = unevidenced_lattice(&plane);
+        // Bowtie: the segments `(0,0)->(10,10)` and `(10,0)->(0,10)` cross at
+        // `(5,5)`, so `try_add_constraint` refuses and the face fails with
+        // `ConstraintInsertionIncomplete`.
+        let loop0: Vec<SurfacePoint> = vec![
+            (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
+            (Point2::new(10.0, 10.0), Point3::new(10.0, 10.0, 0.0)).into(),
+            (Point2::new(10.0, 0.0), Point3::new(10.0, 0.0, 0.0)).into(),
+            (Point2::new(0.0, 10.0), Point3::new(0.0, 10.0, 0.0)).into(),
+            (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
+        ];
+        let boundary = PolyBoundary::new(
+            vec![PolyBoundaryPiece(loop0)],
+            &plane,
+            tol,
+            &lattice,
+        );
+        let terminal = |diag: bool| {
+            if diag {
+                std::env::set_var("TRUCK_FACE_DIAG_JSONL", "presented_relation.jsonl");
+            } else {
+                std::env::remove_var("TRUCK_FACE_DIAG_JSONL");
+            }
+            let reason = trimming_tessellation_result(&plane, &boundary, tol, &lattice)
+                .err()
+                .map(|failure| failure.reason);
+            std::env::remove_var("TRUCK_FACE_DIAG_JSONL");
+            reason
+        };
+        let without = terminal(false);
+        let with = terminal(true);
+        assert!(without.is_some(), "the bowtie loop must fail");
+        assert_eq!(
+            without,
+            with,
+            "diagnostics must not change the terminal failure reason",
+        );
     }
 }
 
