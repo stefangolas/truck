@@ -95,15 +95,92 @@ pub(super) struct ProjectionAttempt {
     /// Residuals clustered just above `tol` mean the class is a tolerance
     /// question rather than an initialisation one.
     pub best_residual: f64,
+    /// PROJ-002 fields below. Filled only under `TRUCK_PROBE_PROJ_DEEP`.
+    pub deep: bool,
+    /// Whether each production link returned a parameter. Links are already
+    /// tracked; their individual *results* were not.
+    pub link_results: [bool; 4],
+    /// Whether the caller supplied a previous-UV hint.
+    pub had_hint: bool,
+    /// Structural seeds actually probed, after the cap.
+    pub seeds_tested: usize,
+    /// Whether the seed cap truncated the probe.
+    pub seed_cap_hit: bool,
+    /// The best instrumented nearest search launched from the routes
+    /// production already uses — the caller's hint and the presearch start.
+    pub prod_best: NearestOutcome,
+    /// The best instrumented nearest search launched from a structural seed.
+    pub seed_best: NearestOutcome,
+    /// Which seed produced `seed_best`.
+    pub seed_best_index: usize,
+    /// Searches abandoned on a singular Jacobian.
+    pub degenerate_hits: usize,
+    /// Searches that exhausted their trial budget without meeting `near2`.
+    pub nonconvergent: usize,
+    /// Instrumented searches run for this point.
+    pub searches_run: usize,
+}
+
+/// What one instrumented nearest-parameter search reached.
+///
+/// The production call cannot answer this. `search_nearest_parameter` is
+/// `newton::solve(..).ok()`, so its `None` means **the iteration did not
+/// converge**, not that the nearest point is far away — and in a release build
+/// `NewtonLog` stores nothing, so the iterate it gave up on is unrecoverable
+/// through the existing API. This records the iterate itself.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct NearestOutcome {
+    /// The best parameter the iteration reached.
+    pub uv: (f64, f64),
+    /// World-space `|surface(u, v) - point|` there. `NAN` if nothing ran.
+    pub residual: f64,
+    /// Whether Newton met its own `near2` convergence test.
+    pub converged: bool,
+    /// Whether the iteration stopped on a singular Jacobian.
+    pub degenerate: bool,
+    /// Whether `uv` lies inside the surface's declared parameter range.
+    pub in_domain: bool,
+    /// Iterations consumed.
+    pub iterations: usize,
+}
+
+impl NearestOutcome {
+    const NONE: Self = Self {
+        uv: (f64::NAN, f64::NAN),
+        residual: f64::NAN,
+        converged: false,
+        degenerate: false,
+        in_domain: false,
+        iterations: 0,
+    };
+
+    fn ran(&self) -> bool {
+        self.residual.is_finite()
+    }
+}
+
+impl ProjectionAttempt {
+    const EMPTY: Self = Self {
+        link: 0,
+        seeds: 0,
+        best_residual: f64::NAN,
+        deep: false,
+        link_results: [false; 4],
+        had_hint: false,
+        seeds_tested: 0,
+        seed_cap_hit: false,
+        prod_best: NearestOutcome::NONE,
+        seed_best: NearestOutcome::NONE,
+        seed_best_index: usize::MAX,
+        degenerate_hits: 0,
+        nonconvergent: 0,
+        searches_run: 0,
+    };
 }
 
 impl Default for ProjectionAttempt {
     fn default() -> Self {
-        Self {
-            link: 0,
-            seeds: 0,
-            best_residual: f64::NAN,
-        }
+        Self::EMPTY
     }
 }
 
@@ -114,7 +191,7 @@ thread_local! {
     /// sites are far apart and the signature between them is shared with paths
     /// that must stay untouched.
     static PROJECTION_ATTEMPT: std::cell::Cell<ProjectionAttempt> =
-        const { std::cell::Cell::new(ProjectionAttempt { link: 0, seeds: 0, best_residual: f64::NAN }) };
+        const { std::cell::Cell::new(ProjectionAttempt::EMPTY) };
 }
 
 pub(super) fn last_projection_attempt() -> ProjectionAttempt {
@@ -125,7 +202,207 @@ pub(super) fn last_projection_attempt() -> ProjectionAttempt {
 /// `env::var_os` per call would be a syscall per point across the whole model.
 fn projection_probe_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("TRUCK_PROBE_PROJ").is_some())
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("TRUCK_PROBE_PROJ").is_some() || projection_deep_probe_enabled()
+    })
+}
+
+/// PROJ-002's deep inverse probe. Same reason for the `OnceLock`, and more of
+/// it: this one runs a full Newton solve per seed per failing point.
+fn projection_deep_probe_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("TRUCK_PROBE_PROJ_DEEP").is_some())
+}
+
+/// Structural seeds probed per failing point.
+const DEEP_SEED_CAP: usize = 24;
+/// Newton iterations per instrumented search, matching the production budget.
+const DEEP_TRIALS: usize = 100;
+/// Presearch grid, matching `truck-geometry`'s private `PRESEARCH_DIVISION`.
+const DEEP_PRESEARCH_DIVISION: usize = 50;
+/// Failing points deep-probed per face. The probe is for population-level
+/// mechanism classification, not for optimizing every point, and `00000414`
+/// alone carries 1,175 NURBS projection faces.
+const DEEP_POINT_CAP: usize = 8;
+
+/// The uniform-grid presearch the hintless nearest search starts from.
+///
+/// Reproduces `algo::surface::presearch` at `truck-geometry`'s division, which
+/// is private to that crate and reached here only through the trait method
+/// whose result is the thing being measured.
+fn deep_presearch<S>(
+    surface: &S,
+    point: Point3,
+    (u0, u1): (f64, f64),
+    (v0, v1): (f64, f64),
+) -> (f64, f64)
+where
+    S: ParametricSurface3D,
+{
+    let division = DEEP_PRESEARCH_DIVISION;
+    let mut best = (u0, v0);
+    let mut min = f64::INFINITY;
+    for i in 0..=division {
+        for j in 0..=division {
+            let p = i as f64 / division as f64;
+            let q = j as f64 / division as f64;
+            let u = u0 * (1.0 - p) + u1 * p;
+            let v = v0 * (1.0 - q) + v1 * q;
+            let distance = surface.subs(u, v).distance2(point);
+            if distance < min {
+                min = distance;
+                best = (u, v);
+            }
+        }
+    }
+    best
+}
+
+/// An instrumented mirror of `algo::surface::search_nearest_parameter`.
+///
+/// Solves the identical stationarity system — `S(u,v) - P + w (S_u × S_v) = 0`
+/// with the identical 3×3 Jacobian — by the identical Newton step, and stops on
+/// the identical `near2` test. The one difference is that it **keeps the best
+/// iterate instead of discarding it**, which is the whole experiment: a `None`
+/// from the production call means Newton did not converge, and says nothing
+/// whatever about how close the surface actually came to the point.
+///
+/// Nothing here is offered to production. It is a measurement of a solve that
+/// has already failed.
+fn probe_nearest<S>(surface: &S, point: Point3, hint: (f64, f64)) -> NearestOutcome
+where
+    S: ParametricSurface3D,
+{
+    let (urange, vrange) = surface.try_range_tuple();
+    let in_domain = |(u, v): (f64, f64)| {
+        urange.is_none_or(|(a, b)| u >= a && u <= b) && vrange.is_none_or(|(a, b)| v >= a && v <= b)
+    };
+    let mut param = Vector3::new(hint.0, hint.1, 0.0);
+    let mut best = NearestOutcome {
+        uv: hint,
+        residual: surface.subs(hint.0, hint.1).distance(point),
+        converged: false,
+        degenerate: false,
+        in_domain: in_domain(hint),
+        iterations: 0,
+    };
+    for iteration in 0..=DEEP_TRIALS {
+        let (u, v, w) = (param.x, param.y, param.z);
+        let diff = surface.subs(u, v) - point;
+        let uder = surface.uder(u, v);
+        let vder = surface.vder(u, v);
+        let uv_cross = uder.cross(vder);
+        let value = diff + uv_cross * w;
+        let derivation = Matrix3::from_cols(
+            uder + (surface.uuder(u, v).cross(vder) + uder.cross(surface.uvder(u, v))) * w,
+            vder + (surface.uvder(u, v).cross(vder) + uder.cross(surface.vvder(u, v))) * w,
+            uv_cross,
+        );
+        let residual = diff.magnitude();
+        if residual.is_finite() && residual < best.residual {
+            best.uv = (u, v);
+            best.residual = residual;
+            best.in_domain = in_domain((u, v));
+            best.iterations = iteration;
+        }
+        let Some(inverse) = derivation.invert() else {
+            best.degenerate = true;
+            return best;
+        };
+        let next = param - inverse * value;
+        if !next.x.is_finite() || !next.y.is_finite() || !next.z.is_finite() {
+            return best;
+        }
+        if next.near2(&param) {
+            best.converged = true;
+            let (u, v) = (param.x, param.y);
+            let residual = surface.subs(u, v).distance(point);
+            // The converged answer is the answer, even if some intermediate
+            // iterate happened to sit marginally nearer.
+            best.uv = (u, v);
+            best.residual = residual;
+            best.in_domain = in_domain((u, v));
+            best.iterations = iteration;
+            return best;
+        }
+        param = next;
+    }
+    best
+}
+
+/// Classify one failing boundary point from what the deep probe found.
+///
+/// `prod` is the best over the starts production's own chain already uses; the
+/// point of separating it from `seed` is that the two imply different fixes.
+/// If a production start already reaches within tolerance, nothing needs new
+/// seeds — the convergence test threw a good answer away. Only if it does not,
+/// and a structural seed does, is this an initialisation problem.
+fn classify_projection_point(
+    prod: NearestOutcome,
+    seed: NearestOutcome,
+    tol: f64,
+) -> (diagnosis::PointVerdict, diagnosis::NearestRoute) {
+    use diagnosis::{NearestRoute, PointVerdict};
+    if !tol.is_finite() || tol <= 0.0 {
+        return (PointVerdict::Inconclusive, NearestRoute::None);
+    }
+    let within = |o: &NearestOutcome| o.ran() && o.residual <= tol;
+    // A solution inside tolerance *and* inside the declared domain is the only
+    // one that would be admissible; one inside tolerance but outside the range
+    // is a domain question, not a search question.
+    if within(&prod) && prod.in_domain {
+        return (PointVerdict::ProductionMiss, NearestRoute::ProductionStart);
+    }
+    if within(&seed) && seed.in_domain {
+        return (PointVerdict::SeedBasinGap, NearestRoute::StructuralSeed);
+    }
+    if within(&prod) {
+        return (
+            PointVerdict::DomainOrContractIssue,
+            NearestRoute::ProductionStart,
+        );
+    }
+    if within(&seed) {
+        return (
+            PointVerdict::DomainOrContractIssue,
+            NearestRoute::StructuralSeed,
+        );
+    }
+    let best = better_outcome(prod, seed);
+    if !best.ran() {
+        return (PointVerdict::NoInverseFound, NearestRoute::None);
+    }
+    let route = if best.residual == seed.residual && seed.ran() {
+        NearestRoute::StructuralSeed
+    } else {
+        NearestRoute::ProductionStart
+    };
+    // A converged stationary point whose residual exceeds tolerance is a
+    // geometric statement about the face: the boundary does not lie on this
+    // surface. An unconverged one is not — it is only where the iteration got
+    // to, so it cannot certify a distance.
+    match best.converged {
+        true => (PointVerdict::NearestTooFar, route),
+        false => (PointVerdict::Inconclusive, route),
+    }
+}
+
+/// Keep whichever outcome is the better answer: converged beats unconverged,
+/// then in-domain beats out, then smaller residual.
+fn better_outcome(a: NearestOutcome, b: NearestOutcome) -> NearestOutcome {
+    if !b.ran() {
+        return a;
+    }
+    if !a.ran() {
+        return b;
+    }
+    let rank = |o: &NearestOutcome| (o.converged, o.in_domain);
+    match rank(&b).cmp(&rank(&a)) {
+        std::cmp::Ordering::Greater => b,
+        std::cmp::Ordering::Less => a,
+        std::cmp::Ordering::Equal if b.residual < a.residual => b,
+        std::cmp::Ordering::Equal => a,
+    }
 }
 
 pub(super) fn by_search_nearest_parameter<S>(
@@ -152,6 +429,7 @@ where
     // link recorded as it is reached. Kept as a separate arm so the production
     // path stays one expression and cannot drift from it silently.
     let mut attempt = ProjectionAttempt::default();
+    attempt.had_hint = hint.is_some();
     let mut result = None;
     for link in 1..=4u8 {
         attempt.link = link;
@@ -161,6 +439,7 @@ where
             3 => surface.search_nearest_parameter(point, hint, 100),
             _ => surface.search_nearest_parameter(point, None, 100),
         };
+        attempt.link_results[usize::from(link) - 1] = result.is_some();
         if result.is_some() {
             break;
         }
@@ -179,6 +458,51 @@ where
             .fold(f64::INFINITY, f64::min);
         if attempt.best_residual.is_infinite() {
             attempt.best_residual = f64::NAN;
+        }
+    }
+    // PROJ-002. Only on a point production has already rejected, and only under
+    // its own gate: this runs a full Newton solve per seed, and the seed count
+    // is per knot span.
+    if result.is_none() && projection_deep_probe_enabled() {
+        attempt.deep = true;
+        // The routes production already uses, re-asked so their *iterate* is
+        // visible rather than only their `Option`.
+        if let Some(hint) = hint {
+            attempt.prod_best = better_outcome(attempt.prod_best, probe_nearest(surface, point, hint));
+            attempt.searches_run += 1;
+        }
+        // The hintless route's start. `search_nearest_parameter(point, None, _)`
+        // presearches a uniform grid over the declared range and iterates from
+        // the best cell; reproduced here so its iterate is visible too.
+        if let (Some(urange), Some(vrange)) = surface.try_range_tuple() {
+            let presearch = deep_presearch(surface, point, urange, vrange);
+            attempt.prod_best =
+                better_outcome(attempt.prod_best, probe_nearest(surface, point, presearch));
+            attempt.searches_run += 1;
+        }
+        // The structural seeds, asked with the *nearest* search rather than
+        // `search_parameter`. PROJ-001 could not answer this: `search_parameter`
+        // is all-or-nothing and returns `None` unless the point is already
+        // within tolerance, so a failing point yielded no residual at all.
+        let seeds = surface.search_parameter_seeds();
+        attempt.seeds = attempt.seeds.max(seeds.len());
+        attempt.seed_cap_hit = seeds.len() > DEEP_SEED_CAP;
+        for (index, seed) in seeds.into_iter().take(DEEP_SEED_CAP).enumerate() {
+            let outcome = probe_nearest(surface, point, seed);
+            attempt.searches_run += 1;
+            attempt.seeds_tested += 1;
+            let merged = better_outcome(attempt.seed_best, outcome);
+            if merged.residual == outcome.residual && merged.uv == outcome.uv {
+                attempt.seed_best_index = index;
+            }
+            attempt.seed_best = merged;
+        }
+        for outcome in [attempt.prod_best, attempt.seed_best] {
+            if outcome.degenerate {
+                attempt.degenerate_hits += 1;
+            } else if outcome.ran() && !outcome.converged {
+                attempt.nonconvergent += 1;
+            }
         }
     }
     PROJECTION_ATTEMPT.with(|cell| cell.set(attempt));
@@ -3433,8 +3757,25 @@ impl PolyBoundaryPiece {
         // measurement, and three failures out of 400 is a different diagnosis
         // from three out of five. The face still fails, at the bottom of the
         // loop, with the same reason.
-        let proj_probe = std::env::var_os("TRUCK_PROBE_PROJ").is_some();
+        // The same gate the projection closure uses, so `TRUCK_PROBE_PROJ_DEEP`
+        // alone is sufficient. Read through the shared helper rather than the
+        // raw variable: this site and `by_search_nearest_parameter` have to
+        // agree, and when they did not, the deep probe filled its thread-local
+        // for every failing point and the walk returned before reading any of
+        // it — every witness silently empty.
+        let proj_probe = projection_probe_enabled();
         let mut failed_points = 0usize;
+        // PROJ-002 per-face accumulators.
+        let mut deep_probed = 0usize;
+        let mut deep_point_cap_hit = false;
+        let mut deep_seed_cap_hit = false;
+        let mut deep_seeds_offered = 0usize;
+        let mut deep_degenerate = 0usize;
+        let mut deep_nonconvergent = 0usize;
+        let mut deep_best_ratio = f64::INFINITY;
+        let mut deep_worst_ratio = 0.0f64;
+        let mut deep_point_verdicts: Vec<(diagnosis::PointVerdict, diagnosis::NearestRoute)> =
+            Vec::new();
         let mut failed_links = [0usize; 6];
         let mut seeds_offered = 0usize;
         let mut best_residual = f64::INFINITY;
@@ -3477,6 +3818,30 @@ impl PolyBoundaryPiece {
                             best_residual = best_residual.min(attempt.best_residual);
                         }
                         first_failed_point.get_or_insert(pt);
+                        // PROJ-002. `tol` is known here and not in the closure,
+                        // so the classification has to happen at this end of
+                        // the thread-local.
+                        if attempt.deep {
+                            if deep_probed < DEEP_POINT_CAP {
+                                deep_probed += 1;
+                                deep_seeds_offered = deep_seeds_offered.max(attempt.seeds);
+                                deep_seed_cap_hit |= attempt.seed_cap_hit;
+                                deep_degenerate += attempt.degenerate_hits;
+                                deep_nonconvergent += attempt.nonconvergent;
+                                let prod = attempt.prod_best;
+                                let seed = attempt.seed_best;
+                                let best = better_outcome(prod, seed);
+                                let (verdict, route) = classify_projection_point(prod, seed, tol);
+                                if best.ran() {
+                                    let ratio = best.residual / tol;
+                                    deep_best_ratio = deep_best_ratio.min(ratio);
+                                    deep_worst_ratio = deep_worst_ratio.max(ratio);
+                                }
+                                deep_point_verdicts.push((verdict, route));
+                            } else {
+                                deep_point_cap_hit = true;
+                            }
+                        }
                         continue;
                     }
                     (None, false) => {
@@ -3621,6 +3986,37 @@ impl PolyBoundaryPiece {
             }
         }
         if proj_probe && failed_points > 0 {
+            if !deep_point_verdicts.is_empty() {
+                let verdicts: Vec<_> = deep_point_verdicts.iter().map(|(v, _)| *v).collect();
+                let verdict = diagnosis::derive_face_verdict(&verdicts);
+                // The route reported is the one belonging to the point that
+                // decided the face, not a majority over points that do not
+                // matter: the face is lost by its worst point.
+                let winning_route = deep_point_verdicts
+                    .iter()
+                    .find(|(v, _)| *v == verdict)
+                    .map(|(_, r)| *r)
+                    .unwrap_or(diagnosis::NearestRoute::None);
+                diagnosis::record_projection_witness(diagnosis::ProjectionWitness {
+                    failed_points,
+                    boundary_points: bdry3d.len(),
+                    probed_points: deep_probed,
+                    point_cap_hit: deep_point_cap_hit,
+                    seed_cap_hit: deep_seed_cap_hit,
+                    seeds_offered: deep_seeds_offered,
+                    tolerance: tol,
+                    best_residual: deep_best_ratio
+                        .is_finite()
+                        .then(|| deep_best_ratio * tol),
+                    best_residual_over_tol: deep_best_ratio.is_finite().then_some(deep_best_ratio),
+                    worst_residual_over_tol: (deep_worst_ratio > 0.0).then_some(deep_worst_ratio),
+                    winning_route,
+                    point_verdicts: verdicts,
+                    degenerate_hits: deep_degenerate,
+                    nonconvergent: deep_nonconvergent,
+                    verdict,
+                });
+            }
             let (source_face_id, declared_face_index, _) =
                 PROBE_FACE_CONTEXT.with(std::cell::Cell::get);
             let p = first_failed_point.unwrap_or_else(Point3::origin);

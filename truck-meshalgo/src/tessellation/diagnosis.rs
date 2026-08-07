@@ -246,6 +246,99 @@ pub struct SegmentEndpoints2 {
 }
 
 // ---------------------------------------------------------------------------
+// Projection witness (PROJ-002)
+// ---------------------------------------------------------------------------
+
+/// Which start produced the best nearest solution for a failing point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum NearestRoute {
+    /// The caller's previous-UV hint, or the hintless presearch start — the two
+    /// starts production's own chain already uses.
+    ProductionStart,
+    /// A structural (knot-span) seed.
+    StructuralSeed,
+    /// No search produced a usable solution.
+    None,
+}
+
+/// What the deep inverse probe found for one failing boundary point.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub enum PointVerdict {
+    /// A start production already uses reaches `residual <= tol`. Production
+    /// rejected the point only because Newton's convergence test was not met.
+    ProductionMiss,
+    /// Only a structural seed reaches `residual <= tol`.
+    SeedBasinGap,
+    /// A stable solution exists and its world residual genuinely exceeds `tol`.
+    NearestTooFar,
+    /// A solution within `tol` exists but lies outside the declared parameter
+    /// range.
+    DomainOrContractIssue,
+    /// No search produced a credible nearest solution.
+    NoInverseFound,
+    /// A probe cap or non-finite numerics prevents classification.
+    Inconclusive,
+}
+
+/// The face-level projection witness, aggregated over its probed points.
+#[derive(Clone, Debug, Serialize)]
+pub struct ProjectionWitness {
+    /// Boundary points the walk failed to project.
+    pub failed_points: usize,
+    /// Boundary points the walk presented.
+    pub boundary_points: usize,
+    /// Failing points the deep probe examined, after the per-face cap.
+    pub probed_points: usize,
+    /// Whether the per-face point cap truncated the probe.
+    pub point_cap_hit: bool,
+    /// Whether any probed point hit the per-point seed cap.
+    pub seed_cap_hit: bool,
+    /// Structural seeds the surface offered. Zero means the seed route cannot
+    /// help this family at all.
+    pub seeds_offered: usize,
+    /// The caller's chord tolerance.
+    pub tolerance: f64,
+    /// Best world residual over every probed point's best solution.
+    pub best_residual: Option<f64>,
+    /// `best_residual / tolerance`.
+    pub best_residual_over_tol: Option<f64>,
+    /// The worst of the per-point best residuals — the point that would still
+    /// fail if the best solution were admitted everywhere.
+    pub worst_residual_over_tol: Option<f64>,
+    /// Which start won on the point that decided the face verdict.
+    pub winning_route: NearestRoute,
+    /// Per-point verdict counts, in the face's own order of severity.
+    pub point_verdicts: Vec<PointVerdict>,
+    /// Searches that stopped on a singular Jacobian.
+    pub degenerate_hits: usize,
+    /// Searches that exhausted their trial budget.
+    pub nonconvergent: usize,
+    /// The face verdict, derived from the point verdicts.
+    pub verdict: PointVerdict,
+}
+
+/// Derive the face verdict from its points.
+///
+/// The face is only recoverable if **every** failing point is: one bad point
+/// fails the face just as thoroughly as all of them. So the face takes its
+/// worst point's verdict, ordered by how much would have to change to fix it.
+pub fn derive_face_verdict(points: &[PointVerdict]) -> PointVerdict {
+    let severity = |v: &PointVerdict| match v {
+        PointVerdict::ProductionMiss => 0,
+        PointVerdict::SeedBasinGap => 1,
+        PointVerdict::DomainOrContractIssue => 2,
+        PointVerdict::NearestTooFar => 3,
+        PointVerdict::NoInverseFound => 4,
+        PointVerdict::Inconclusive => 5,
+    };
+    points
+        .iter()
+        .copied()
+        .max_by_key(|v| severity(v))
+        .unwrap_or(PointVerdict::Inconclusive)
+}
+
+// ---------------------------------------------------------------------------
 // Route selection
 // ---------------------------------------------------------------------------
 
@@ -611,6 +704,8 @@ pub struct FailedFaceDiagnosis {
     pub unattributed_overlaps: usize,
     /// The CDT and material pipeline stage counts.
     pub cdt_stages: CdtStageVector,
+    /// The deep projection witness (PROJ-002), when the probe ran.
+    pub projection_witness: Option<ProjectionWitness>,
     /// What each formal recovery route decided about this face.
     pub route_decisions: Vec<RouteDecisionRecord>,
     /// The deterministic loss bucket.
@@ -877,6 +972,8 @@ struct DiagnosisSink {
     /// The CDT and material stage counts. Respects suspension, because the
     /// record must keep describing the legacy attempt.
     cdt_stages: CdtStageVector,
+    /// The deep projection witness, when the probe ran.
+    projection_witness: Option<ProjectionWitness>,
     realized_chain: Vec<RealizedConstraintMetadata>,
     vertex_insertion_failed: bool,
     source_segment_count: usize,
@@ -893,6 +990,7 @@ impl DiagnosisSink {
         self.overlap_witnesses.clear();
         self.unattributed_overlaps = 0;
         self.cdt_stages = CdtStageVector::default();
+        self.projection_witness = None;
         self.realized_chain.clear();
         self.vertex_insertion_failed = false;
         self.source_segment_count = 0;
@@ -1182,6 +1280,17 @@ pub(crate) fn record_insertion_counts(
     });
 }
 
+/// Record the deep projection witness for a face.
+///
+/// Respects suspension, like every other evidence record: the row must keep
+/// describing the legacy attempt.
+pub(crate) fn record_projection_witness(witness: ProjectionWitness) {
+    if suspended() {
+        return;
+    }
+    FACE_DIAGNOSIS_SINK.with(|sink| sink.borrow_mut().projection_witness = Some(witness));
+}
+
 /// Record the three triangle counts either side of material selection.
 ///
 /// Separating `material_selected` from `final_valid` is the point: they are
@@ -1279,6 +1388,7 @@ pub(crate) fn build_face_diagnosis(
         let overlap_conflicts = std::mem::take(&mut sink.overlap_witnesses);
         let unattributed_overlaps = sink.unattributed_overlaps;
         let cdt_stages = sink.cdt_stages;
+        let projection_witness = sink.projection_witness.take();
         let route_decisions = ROUTE_DECISIONS.with(|s| std::mem::take(&mut *s.borrow_mut()));
         let source_segment_count = sink.source_segment_count;
         let synthetic_segment_count = sink.synthetic_segment_count;
@@ -1311,6 +1421,7 @@ pub(crate) fn build_face_diagnosis(
             overlap_conflicts,
             unattributed_overlaps,
             cdt_stages,
+            projection_witness,
             route_decisions,
             derived_bucket,
         }
