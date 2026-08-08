@@ -210,6 +210,22 @@ pub trait BoundedSurface: ParametricSurface {
             vrange.expect(UNBOUNDED_ERROR),
         )
     }
+    /// Return the ends of the surface's actually evaluable parameter domain.
+    ///
+    /// For a B-spline or NURBS surface this is the *interior* knot rectangle —
+    /// the domain on which the basis is a partition of unity — which can be
+    /// strictly narrower than `range_tuple()`. A STEP surface whose end knots
+    /// are not clamped extends its knot vectors beyond the shape it draws (a
+    /// U range of `(-0.0625, 1.0625)` for a surface whose support is `[0, 1]`);
+    /// the extension is a degenerate sliver whose metric can collapse. A
+    /// parameter search that presearches the raw `range_tuple()` can put its
+    /// best cell there and then diverge, while searching the interior domain
+    /// finds the real answer. Every other surface family is fully evaluable
+    /// over its declared range, so this defaults to `range_tuple()`.
+    #[inline(always)]
+    fn evaluation_range(&self) -> ((f64, f64), (f64, f64)) {
+        self.range_tuple()
+    }
 }
 
 impl<S: BoundedSurface> BoundedSurface for &S {}

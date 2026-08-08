@@ -407,7 +407,19 @@ impl<P: ControlPoint<f64>> ParametricCurve for BSplineCurve<P> {
     }
 }
 
-impl<P: ControlPoint<f64>> BoundedCurve for BSplineCurve<P> {}
+impl<P: ControlPoint<f64>> BoundedCurve for BSplineCurve<P> {
+    #[inline(always)]
+    fn evaluation_range(&self) -> (f64, f64) {
+        let knots = &self.knot_vec;
+        let degree = self.degree();
+        let n = knots.len();
+        if n >= 2 * (degree + 1) {
+            (knots[degree], knots[n - 1 - degree])
+        } else {
+            (knots[0], knots[n - 1])
+        }
+    }
+}
 
 impl<P: ControlPoint<f64> + Tolerance> BSplineCurve<P> {
     /// Returns whether all control points are the same or not.

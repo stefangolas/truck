@@ -560,7 +560,12 @@ impl<V: Homogeneous<Scalar = f64> + ControlPoint<f64, Diff = V>> ParametricCurve
     }
 }
 
-impl<V: Homogeneous<Scalar = f64> + ControlPoint<f64, Diff = V>> BoundedCurve for NurbsCurve<V> {}
+impl<V: Homogeneous<Scalar = f64> + ControlPoint<f64, Diff = V>> BoundedCurve for NurbsCurve<V> {
+    #[inline(always)]
+    fn evaluation_range(&self) -> (f64, f64) {
+        self.0.evaluation_range()
+    }
+}
 
 impl<V: Clone> Invertible for NurbsCurve<V> {
     #[inline(always)]

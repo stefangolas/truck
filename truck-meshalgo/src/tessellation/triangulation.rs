@@ -916,7 +916,7 @@ where
             let v0 = vmap.get(&edge.absolute_front().id()).unwrap();
             let v1 = vmap.get(&edge.absolute_back().id()).unwrap();
             let curve = edge.curve();
-            let poly = PolylineCurve::from_curve(&curve, curve.range_tuple(), tol);
+            let poly = PolylineCurve::from_curve(&curve, curve.evaluation_range(), tol);
             (id, Edge::debug_new(v0, v1, poly))
         })
         .collect();
@@ -974,7 +974,7 @@ where
             let vb = edge.absolute_back();
             let v1 = vmap.entry_or_insert(vb).clone();
             let curve = edge.curve();
-            let poly = PolylineCurve::from_curve(&curve, curve.range_tuple(), tol);
+            let poly = PolylineCurve::from_curve(&curve, curve.evaluation_range(), tol);
             Edge::debug_new(&v0, &v1, poly)
         },
     );
@@ -1493,7 +1493,7 @@ where
                 fitted.map(|r| (r * 1.0e5).round() / 1.0e5),
             );
         }
-        let mut range = curve.range_tuple();
+        let mut range = curve.evaluation_range();
         if edge.vertices.0 == edge.vertices.1 && (range.1 - range.0).abs() < 1e-4 {
             if let Some(period) = curve.period() {
                 if period > 1e-4 {
@@ -8256,6 +8256,82 @@ fn test_global_quotient_lift_solver() {
     assert!(resolved.is_some());
     let res = resolved.unwrap();
     assert_eq!(res.certificate.period_shifts, vec![(0, 0)]);
+}
+
+/// P1: a closed cubic B-spline with *unclamped* end knots (each end multiplicity
+/// 2, not 4) extends its knot vector beyond the shape it draws. `range_tuple()`
+/// reports the bare knot extremes `[-0.03125, 1.0625]`, where the basis is not a
+/// partition of unity and `subs` returns the origin. The boundary polyline must
+/// be sampled over the actually evaluable interior span `[0, 1]` instead.
+#[test]
+fn closed_spline_boundary_is_sampled_over_the_evaluable_knot_domain() {
+    use truck_geometry::prelude::ParametricCurve;
+    use truck_modeling::{BSplineCurve, KnotVec};
+
+    let degree = 3;
+    let distinct = [
+        -0.03125, 0.0, 0.0625, 0.125, 0.1875, 0.25, 0.3125, 0.375, 0.4375, 0.5, 0.5625,
+        0.625, 0.6875, 0.75, 0.8125, 0.875, 0.9375, 1.0, 1.0625,
+    ];
+    let mut knots = Vec::new();
+    for k in distinct {
+        knots.push(k);
+        knots.push(k);
+    }
+    let knot_vec = KnotVec::from(knots);
+    assert_eq!(knot_vec.len(), 2 * distinct.len());
+    // A closed control net: the last `degree` points wrap the first `degree`,
+    // as STEP's closed curve encoding does.
+    let mut ctrl: Vec<Point3> = (0..=30)
+        .map(|i| {
+            let a = i as f64 / 30.0 * std::f64::consts::TAU;
+            Point3::new(5.0 * a.cos(), 3.0 * a.sin(), 0.0)
+        })
+        .collect();
+    let wrap = ctrl[..degree].to_vec();
+    ctrl.extend(wrap);
+    assert_eq!(knot_vec.len(), ctrl.len() + degree + 1);
+    let curve = BSplineCurve::new(knot_vec, ctrl);
+
+    // The representational range extends past the evaluable support.
+    assert_eq!(curve.range_tuple(), (-0.03125, 1.0625));
+    assert_eq!(curve.evaluation_range(), (0.0, 1.0));
+    // The off-support extremes evaluate to the zero vector.
+    assert!(curve.subs(-0.03125).to_vec().magnitude() < 1e-12);
+    assert!(curve.subs(1.0625).to_vec().magnitude() < 1e-12);
+    // Interior samples are genuinely on the curve.
+    assert!(curve.subs(0.0).to_vec().magnitude() > 1.0);
+    assert!(curve.subs(1.0).to_vec().magnitude() > 1.0);
+
+    // The boundary polyline built over `evaluation_range()` carries the real
+    // boundary only: no origin samples, and the two ends are the curve's own
+    // values at the corrected domain ends -- the closure point is retained,
+    // never dropped and never replaced by the synthetic origin.
+    let (er0, er1) = curve.evaluation_range();
+    let poly = PolylineCurve::from_curve(&curve, (er0, er1), 0.01);
+    assert!(poly.len() > 4, "interior sampling must not collapse");
+    assert!(
+        poly.iter().all(|p| p.to_vec().magnitude() > 1e-3),
+        "no boundary sample may be the synthetic origin"
+    );
+    assert!(
+        poly[0].distance(curve.subs(er0)) < 1e-6
+            && poly[poly.len() - 1].distance(curve.subs(er1)) < 1e-6,
+        "the polyline ends must be the curve's own domain-end values"
+    );
+    // The curve's own start/end gap, whatever the exporter's closure precision,
+    // is preserved by the sampling rather than amplified to the origin.
+    assert!(
+        poly[0].distance(poly[poly.len() - 1]) <= curve.subs(er0).distance(curve.subs(er1)) + 1e-9
+    );
+
+    // The bare `range_tuple()` extremes would inject the origin endpoints that
+    // the projection stage then fails on -- the exact bug being fixed.
+    let bad = PolylineCurve::from_curve(&curve, curve.range_tuple(), 0.01);
+    assert!(
+        bad.iter().any(|p| p.to_vec().magnitude() < 1e-9),
+        "the pre-fix range must reproduce the off-support origin sample"
+    );
 }
 
 /*

@@ -51,6 +51,22 @@ pub trait BoundedCurve: ParametricCurve {
     fn range_tuple(&self) -> (f64, f64) {
         self.try_range_tuple().expect(UNBOUNDED_ERROR)
     }
+    /// Return the ends of the curve's actually evaluable parameter domain.
+    ///
+    /// For a B-spline or NURBS curve this is the *interior* knot span — the
+    /// interval on which the basis is a partition of unity — which can be
+    /// strictly narrower than `range_tuple()`. A closed STEP curve whose end
+    /// knots are not clamped extends its knot vector beyond the shape it draws
+    /// (`[-0.03125, 1.0625]` for a curve whose support is `[0, 1]`); evaluating
+    /// outside the support yields a zero basis and the origin. Sampling the
+    /// boundary over `range_tuple()` therefore invents off-surface endpoints,
+    /// while `evaluation_range()` samples exactly the drawn curve and keeps
+    /// the closure. Every other curve family evaluates over its whole declared
+    /// range, so this defaults to `range_tuple()`.
+    #[inline(always)]
+    fn evaluation_range(&self) -> (f64, f64) {
+        self.range_tuple()
+    }
     /// The front end point of the curve.
     #[inline(always)]
     fn front(&self) -> Self::Point {

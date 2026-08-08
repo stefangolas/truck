@@ -566,7 +566,7 @@ where
                 algo::surface::presearch(self, point, (range0, range1), PRESEARCH_DIVISION)
             }
             SPHint2D::None => {
-                algo::surface::presearch(self, point, self.range_tuple(), PRESEARCH_DIVISION)
+                algo::surface::presearch(self, point, self.evaluation_range(), PRESEARCH_DIVISION)
             }
         };
         algo::surface::search_nearest_parameter(self, point, hint, trials)
@@ -679,7 +679,17 @@ where
     }
 }
 
-impl<V> BoundedSurface for NurbsSurface<V> where Self: ParametricSurface {}
+impl<V> BoundedSurface for NurbsSurface<V> where Self: ParametricSurface {
+    #[inline(always)]
+    fn evaluation_range(&self) -> ((f64, f64), (f64, f64)) {
+        bspsurface::surface_knot_domain(
+            self.uknot_vec(),
+            self.0.udegree(),
+            self.vknot_vec(),
+            self.0.vdegree(),
+        )
+    }
+}
 
 impl IncludeCurve<NurbsCurve<Vector3>> for NurbsSurface<Vector3> {
     #[inline(always)]
@@ -840,7 +850,7 @@ where
                 algo::surface::presearch(self, point, (range0, range1), PRESEARCH_DIVISION)
             }
             SPHint2D::None => {
-                algo::surface::presearch(self, point, self.range_tuple(), PRESEARCH_DIVISION)
+                algo::surface::presearch(self, point, self.evaluation_range(), PRESEARCH_DIVISION)
             }
         };
         algo::surface::search_parameter(self, point, hint, trials)

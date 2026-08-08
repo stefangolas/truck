@@ -1632,7 +1632,17 @@ where
 
 impl ParametricSurface3D for BSplineSurface<Point3> {}
 
-impl<V> BoundedSurface for BSplineSurface<V> where BSplineSurface<V>: ParametricSurface {}
+impl<V> BoundedSurface for BSplineSurface<V> where BSplineSurface<V>: ParametricSurface {
+    #[inline(always)]
+    fn evaluation_range(&self) -> ((f64, f64), (f64, f64)) {
+        surface_knot_domain(
+            self.uknot_vec(),
+            self.udegree(),
+            self.vknot_vec(),
+            self.vdegree(),
+        )
+    }
+}
 
 impl<V: Clone> Invertible for BSplineSurface<V> {
     #[inline(always)]
@@ -1662,7 +1672,7 @@ where
                 algo::surface::presearch(self, point, (range0, range1), PRESEARCH_DIVISION)
             }
             SPHint2D::None => {
-                algo::surface::presearch(self, point, self.range_tuple(), PRESEARCH_DIVISION)
+                algo::surface::presearch(self, point, self.evaluation_range(), PRESEARCH_DIVISION)
             }
         };
         algo::surface::search_parameter(self, point, hint, trials)
@@ -1679,6 +1689,34 @@ where
     fn search_parameter_seeds(&self) -> Vec<(f64, f64)> {
         knot_span_midpoints(self.uknot_vec(), self.vknot_vec())
     }
+}
+
+/// The interior knot rectangle a B-spline surface is genuinely evaluable over.
+///
+/// A degree-`p` B-spline's basis is a partition of unity only between its
+/// `p`-th and its `p`-th-from-last knot. A STEP surface whose end knots are
+/// not clamped extends its knot vectors past that support; the extension is a
+/// degenerate sliver whose metric can collapse, and a parameter search whose
+/// presearch covers it can land there and diverge. The interior rectangle is
+/// the domain the face's own boundary actually lives in.
+pub(super) fn surface_knot_domain(
+    uknots: &KnotVec,
+    udegree: usize,
+    vknots: &KnotVec,
+    vdegree: usize,
+) -> ((f64, f64), (f64, f64)) {
+    let axis = |knots: &KnotVec, degree: usize| -> (f64, f64) {
+        let n = knots.len();
+        if n >= 2 * (degree + 1) {
+            (knots[degree], knots[n - 1 - degree])
+        } else {
+            (knots[0], knots[n - 1])
+        }
+    };
+    (
+        axis(uknots, udegree),
+        axis(vknots, vdegree),
+    )
 }
 
 /// The midpoints of the cells two knot vectors cut a domain into.
@@ -1768,7 +1806,7 @@ where
                 algo::surface::presearch(self, point, (range0, range1), PRESEARCH_DIVISION)
             }
             SPHint2D::None => {
-                algo::surface::presearch(self, point, self.range_tuple(), PRESEARCH_DIVISION)
+                algo::surface::presearch(self, point, self.evaluation_range(), PRESEARCH_DIVISION)
             }
         };
         algo::surface::search_nearest_parameter(self, point, hint, trials)
@@ -1778,7 +1816,7 @@ where
 impl IncludeCurve<BSplineCurve<Point2>> for BSplineSurface<Point2> {
     fn include(&self, curve: &BSplineCurve<Point2>) -> bool {
         let pt = curve.front();
-        let mut hint = algo::surface::presearch(self, pt, self.range_tuple(), PRESEARCH_DIVISION);
+        let mut hint = algo::surface::presearch(self, pt, self.evaluation_range(), PRESEARCH_DIVISION);
         hint = match algo::surface::search_parameter(self, pt, hint, INCLUDE_CURVE_TRIALS) {
             Some(got) => got,
             None => return false,
@@ -1813,7 +1851,7 @@ impl IncludeCurve<BSplineCurve<Point2>> for BSplineSurface<Point2> {
 impl IncludeCurve<BSplineCurve<Point3>> for BSplineSurface<Point3> {
     fn include(&self, curve: &BSplineCurve<Point3>) -> bool {
         let pt = curve.front();
-        let mut hint = algo::surface::presearch(self, pt, self.range_tuple(), PRESEARCH_DIVISION);
+        let mut hint = algo::surface::presearch(self, pt, self.evaluation_range(), PRESEARCH_DIVISION);
         hint = match algo::surface::search_parameter(self, pt, hint, INCLUDE_CURVE_TRIALS) {
             Some(got) => got,
             None => return false,
@@ -1848,7 +1886,7 @@ impl IncludeCurve<BSplineCurve<Point3>> for BSplineSurface<Point3> {
 impl IncludeCurve<NurbsCurve<Vector4>> for BSplineSurface<Point3> {
     fn include(&self, curve: &NurbsCurve<Vector4>) -> bool {
         let pt = curve.subs(curve.knot_vec()[0]);
-        let mut hint = algo::surface::presearch(self, pt, self.range_tuple(), PRESEARCH_DIVISION);
+        let mut hint = algo::surface::presearch(self, pt, self.evaluation_range(), PRESEARCH_DIVISION);
         hint = match algo::surface::search_parameter(self, pt, hint, INCLUDE_CURVE_TRIALS) {
             Some(got) => got,
             None => return false,

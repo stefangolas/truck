@@ -206,6 +206,7 @@ pub fn derive_bounded_curve(input: TokenStream) -> TokenStream {
             let methods = methods! {
                 variants, trait_name,
                 fn range_tuple(&self,) -> (f64, f64),
+                fn evaluation_range(&self,) -> (f64, f64),
                 fn front(&self,) -> Self::Point,
                 fn back(&self,) -> Self::Point,
             };
@@ -236,6 +237,7 @@ pub fn derive_bounded_curve(input: TokenStream) -> TokenStream {
                     Self: truck_geotrait::ParametricCurve<Point
                         = <#field_type as truck_geotrait::ParametricCurve>::Point>, {
                     fn range_tuple(&self) -> (f64, f64) { self.0.range_tuple() }
+                    fn evaluation_range(&self) -> (f64, f64) { self.0.evaluation_range() }
                     fn front(&self) -> Self::Point { self.0.front() }
                     fn back(&self) -> Self::Point { self.0.back() }
                 }
@@ -262,6 +264,7 @@ pub fn derive_bounded_surface(input: TokenStream) -> TokenStream {
             let methods = methods! {
                 variants, trait_name,
                 fn range_tuple(&self,) -> ((f64, f64), (f64, f64)),
+                fn evaluation_range(&self,) -> ((f64, f64), (f64, f64)),
             };
             quote! {
                 #[automatically_derived]
@@ -287,6 +290,9 @@ pub fn derive_bounded_surface(input: TokenStream) -> TokenStream {
                     #field_type: #trait_name {
                     fn range_tuple(&self) -> ((f64, f64), (f64, f64)) {
                         self.0.range_tuple()
+                    }
+                    fn evaluation_range(&self) -> ((f64, f64), (f64, f64)) {
+                        self.0.evaluation_range()
                     }
                 }
             }
