@@ -14,6 +14,7 @@ use super::source_evidence::{
     SourceBoundInput, SourceEdgeOrientationEvidence, SourceEdgeUse, SourceEdgeUseInput,
     SourceEvidenceError, SourceFaceInput, SourceFaceOrientationEvidence, SourceVertexKey,
 };
+use super::validity;
 use super::*;
 use crate::filters::NormalFilters;
 use crate::Point2;
@@ -1675,6 +1676,18 @@ where
         let deck_join_candidate = deck_join_gate
             && (lattice.declared_u_period().is_some() || lattice.declared_v_period().is_some())
             && preboundary.as_ref().is_ok_and(|pieces| pieces.len() == 2);
+        // FACE-VALIDITY Detector B: measure the constructed boundary pieces and
+        // reject a certified degenerate face before it enters the CDT or any
+        // formal recovery route. Off by default; the census sweep enables it to
+        // measure the population against the `rendered -> rejected = 0` gate.
+        // A rejection is the one terminal state no recovery route may touch:
+        // a zero-area trim must not be "recovered" into triangles.
+        let validity_certificate: Option<FaceValidityCertificate> =
+            match (validity::rejection_enabled(), preboundary.as_ref()) {
+                (true, Ok(pieces)) => detect_degenerate_trim(pieces, surface),
+                _ => None,
+            };
+        let rejected = validity_certificate.is_some();
         // The legacy boundary, kept only for a face whose parity flood
         // contradicted itself, so the winding retry at the end of this chain
         // has something to re-tessellate. Nothing else reads it, and on every
@@ -1682,6 +1695,19 @@ where
         let mut parity_retry_boundary: Option<PolyBoundary> = None;
         let (polygon, failure) = match preboundary {
             Err(reason) => (None, Some(TessellationFailure::from(reason))),
+            Ok(_preboundary) if rejected => {
+                // The certificate travels with the diagnosis record; the census
+                // reads it to classify the face as `rejected_intrinsic`.
+                if let Some(cert) = validity_certificate {
+                    diagnosis::record_face_rejection(cert);
+                }
+                (
+                    None,
+                    Some(TessellationFailure::from(
+                        TessellationFailureReason::RejectedDegenerate,
+                    )),
+                )
+            }
             Ok(preboundary) => {
                 let retained = deck_join_candidate.then(|| preboundary.clone());
                 let boundary = PolyBoundary::new(preboundary, &surface, tol, &lattice);
@@ -1759,7 +1785,7 @@ where
         // structural schemas; it reads nothing the legacy path produced, so a
         // face's formal verdict is independent of whether the legacy path
         // succeeded.
-        let (polygon, failure) = if !run_slice {
+        let (polygon, failure) = if !run_slice || rejected {
             (polygon, failure)
         } else {
             let outcome = run_slice_for_face(
@@ -1874,7 +1900,7 @@ where
         // has already had its chance, and it only ever replaces a face the
         // legacy path *still* has no mesh for â€” never a face the planar
         // rank-0 path just recovered, and never a successful legacy mesh.
-        let (polygon, failure) = if !run_cylinder_slice {
+        let (polygon, failure) = if !run_cylinder_slice || rejected {
             (polygon, failure)
         } else {
             let record = run_cylinder_slice_for_face(
@@ -1935,7 +1961,7 @@ where
             failure.is_some(),
             legacy_bucket == Some(diagnosis::LossBucket::SyntheticSyntheticCrossing),
         ) {
-            (true, true, true) => {
+            (true, true, true) if !rejected => {
                 match run_cylinder_band_for_face(
                     declared_face_index,
                     source_face_id,
@@ -2002,7 +2028,7 @@ where
             failure.is_some(),
             legacy_bucket == Some(diagnosis::LossBucket::SyntheticSyntheticCrossing),
         ) {
-            (true, true, true) => {
+            (true, true, true) if !rejected => {
                 match run_conical_band_for_face(
                     declared_face_index,
                     source_face_id,
@@ -2074,8 +2100,9 @@ where
         // The torus route runs after the cone route and only on a face that
         // is a toroidal surface â€” `torus_of` refuses every non-torus surface
         // by name, so `cylinder_of`, `cone_of`, and `torus_of` are mutually
-        // exclusive on any one surface.
-        let (polygon, failure, torus_band_attempt) = if run_torus {
+        // exclusive on any one surface. A certified-degenerate face skips the
+        // route entirely: it is the one state no recovery route may touch.
+        let (polygon, failure, torus_band_attempt) = if run_torus && !rejected {
             match run_torus_annulus_for_face(
                 declared_face_index,
                 source_face_id,
@@ -4828,6 +4855,49 @@ impl PolyBoundaryPiece {
     }
 }
 
+/// FACE-VALIDITY Detector B: measure the constructed boundary pieces and return
+/// a degenerate-trim certificate when one is defensible.
+///
+/// Runs after projection/lift/stitch, on the same pieces `PolyBoundary::new`
+/// consumes. The certificate is the world-space numerical rank of the boundary:
+/// a boundary whose points all lie on a point or a line (rank < 2, within a
+/// floating-point conditioning bound) is rejected; every boundary with two real
+/// world directions — however small or thin — survives. The meshing tolerance
+/// is not a degeneracy threshold.
+fn detect_degenerate_trim<S: PreMeshableSurface>(
+    pieces: &[PolyBoundaryPiece],
+    surface: &S,
+) -> Option<FaceValidityCertificate> {
+    let samples: Vec<Vec<validity::TrimSample>> = pieces
+        .iter()
+        .map(|PolyBoundaryPiece(points, _)| {
+            points
+                .iter()
+                .map(|p| validity::TrimSample {
+                    uv: p.uv,
+                    world: p.point,
+                })
+                .collect()
+        })
+        .collect();
+    let metric_scale = {
+        // Cap the metric evaluation so a Nurbs heavy shell does not pay one
+        // derivative pair per boundary sample. The scale is diagnostic
+        // evidence; a bounded sample is enough.
+        let mut probe: Vec<validity::TrimSample> = Vec::new();
+        for piece in &samples {
+            let step = (piece.len() / 24).max(1);
+            probe.extend(piece.iter().step_by(step).take(24));
+            if probe.len() >= 24 {
+                break;
+            }
+        }
+        validity::metric_scale_of(|u, v| surface.uder(u, v), |u, v| surface.vder(u, v), &probe)
+    };
+    let measurement = validity::measure_trim(&samples, metric_scale)?;
+    validity::classify_trim_geometry(pieces.len(), &measurement)
+}
+
 fn get_mindiff(u: f64, u0: f64, up: f64) -> f64 {
     // The nearest periodic copy outright, rather than the nearest among five.
     // The old search covered only two periods either side, so a boundary that
@@ -7185,6 +7255,15 @@ pub enum TessellationFailureReason {
     /// The flood completed but selected no material cell, so there is nothing
     /// to mesh.
     NoOddParityRegion,
+    /// The face was certified intrinsically degenerate by FACE-VALIDITY
+    /// (Detector B) and rejected before tessellation. The geometric evidence
+    /// travels in the face's diagnosis `validity_certificate`; this variant
+    /// carries no payload so the reason enum stays `Copy`.
+    ///
+    /// A rejected face is not a rendered face and not a generic tessellation
+    /// failure: the census must classify it as `rejected_intrinsic`, never as
+    /// a mesh or as an unexplained loss.
+    RejectedDegenerate,
     /// A constraint chain did not close. **Never constructed.**
     ConstraintChainNotClosed,
     /// At least one boundary segment could not be represented as a constraint.

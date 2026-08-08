@@ -697,6 +697,9 @@ pub enum LossBucket {
     MixedConstraintConflict,
     /// No usable witness exists.
     InsertionUnknown,
+    /// A FACE-VALIDITY hard rejection: the face was certified intrinsically
+    /// degenerate before tessellation.
+    IntrinsicDegenerate,
     /// A typed failure not in the above categories.
     OtherTypedFailure,
 }
@@ -728,6 +731,9 @@ pub enum ArrFailureStage {
     LiftAmbiguous,
     /// The parity flood contradicted itself.
     ParityContradiction,
+    /// The face was certified intrinsically degenerate (FACE-VALIDITY) and
+    /// rejected before tessellation.
+    RejectedDegenerate,
     /// The stage could not be established from retained evidence.
     #[default]
     Unknown,
@@ -883,6 +889,9 @@ pub struct FailedFaceDiagnosis {
     pub cdt_stages: CdtStageVector,
     /// The deep projection witness (PROJ-002), when the probe ran.
     pub projection_witness: Option<ProjectionWitness>,
+    /// FACE-VALIDITY: the certificate backing a hard degenerate rejection,
+    /// when the face was rejected as intrinsically non-renderable.
+    pub validity_certificate: Option<crate::tessellation::validity::FaceValidityCertificate>,
     /// What each formal recovery route decided about this face.
     pub route_decisions: Vec<RouteDecisionRecord>,
     /// The deterministic loss bucket.
@@ -911,6 +920,7 @@ pub fn derive_loss_bucket(
         R::ConstraintOverlapUnsupported => LossBucket::UnsupportedOverlap,
         R::ContradictoryDualParity => LossBucket::ParityContradiction,
         R::NoOddParityRegion => LossBucket::NoMaterialRegion,
+        R::RejectedDegenerate => LossBucket::IntrinsicDegenerate,
         R::ConstraintInsertionIncomplete => {
             derive_insertion_bucket(witnesses, vertex_insertion_failed)
         }
@@ -1201,6 +1211,9 @@ struct DiagnosisSink {
     cdt_stages: CdtStageVector,
     /// The deep projection witness, when the probe ran.
     projection_witness: Option<ProjectionWitness>,
+    /// FACE-VALIDITY: the certificate backing a hard degenerate rejection, when
+    /// one was produced.
+    validity_certificate: Option<crate::tessellation::validity::FaceValidityCertificate>,
     realized_chain: Vec<RealizedConstraintMetadata>,
     vertex_insertion_failed: bool,
     source_segment_count: usize,
@@ -1218,6 +1231,7 @@ impl DiagnosisSink {
         self.unattributed_overlaps = 0;
         self.cdt_stages = CdtStageVector::default();
         self.projection_witness = None;
+        self.validity_certificate = None;
         self.realized_chain.clear();
         self.vertex_insertion_failed = false;
         self.source_segment_count = 0;
@@ -1530,6 +1544,20 @@ pub(crate) fn record_two_loop_join(record: TwoLoopJoinRecord) {
     FACE_DIAGNOSIS_SINK.with(|sink| sink.borrow_mut().two_loop_join = Some(record));
 }
 
+/// Record the FACE-VALIDITY certificate backing a hard degenerate rejection.
+///
+/// The certificate is the evidence that no positive-area trim region exists at
+/// tolerance; it rides in the face's diagnosis so a census can classify the
+/// face as `rejected_intrinsic` rather than as a generic tessellation failure.
+pub(crate) fn record_face_rejection(
+    certificate: crate::tessellation::validity::FaceValidityCertificate,
+) {
+    if suspended() {
+        return;
+    }
+    FACE_DIAGNOSIS_SINK.with(|sink| sink.borrow_mut().validity_certificate = Some(certificate));
+}
+
 /// Record that a vertex insertion failed.
 pub(crate) fn set_vertex_insertion_failed() {
     FACE_DIAGNOSIS_SINK.with(|sink| {
@@ -1600,6 +1628,7 @@ fn derive_arr_signature(
             ArrFailureStage::BoundaryConstruction
         }
         R::AmbiguousLift => ArrFailureStage::LiftAmbiguous,
+        R::RejectedDegenerate => ArrFailureStage::RejectedDegenerate,
         R::ConstraintOverlapUnsupported => ArrFailureStage::ConstraintRejected,
         R::ConstraintInsertionIncomplete => ArrFailureStage::ConstraintIncomplete,
         R::ContradictoryDualParity => ArrFailureStage::ParityContradiction,
@@ -1689,6 +1718,7 @@ pub(crate) fn build_face_diagnosis(
         let unattributed_overlaps = sink.unattributed_overlaps;
         let cdt_stages = sink.cdt_stages;
         let projection_witness = sink.projection_witness.take();
+        let validity_certificate = sink.validity_certificate.take();
         let route_decisions = ROUTE_DECISIONS.with(|s| std::mem::take(&mut *s.borrow_mut()));
         let source_segment_count = sink.source_segment_count;
         let synthetic_segment_count = sink.synthetic_segment_count;
@@ -1732,6 +1762,7 @@ pub(crate) fn build_face_diagnosis(
             unattributed_overlaps,
             cdt_stages,
             projection_witness,
+            validity_certificate,
             route_decisions,
             derived_bucket,
             arr,
@@ -1915,6 +1946,7 @@ mod tests {
             unattributed_overlaps: 0,
             cdt_stages: CdtStageVector::default(),
             projection_witness: None,
+            validity_certificate: None,
             route_decisions: Vec::new(),
             derived_bucket: LossBucket::SourceSourceSameBoundCrossing,
             arr: ArrSignature::default(),

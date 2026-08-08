@@ -672,11 +672,16 @@ pub mod domain;
 pub mod formal;
 pub mod source_evidence;
 mod triangulation;
+pub mod validity;
 
 use domain::lattice::CertifiedLattice;
 pub use triangulation::{
     ConeBandAttempt, ConstraintRole, CylinderBandAttempt, MeshedShellOutcome, SegmentOrigin,
     TessellationFailure, TessellationFailureReason, TorusAnnulusAttempt,
+};
+pub use validity::{
+    AmbiguousFaceReason, DegenerateFaceReason, FaceAdmissibility, FaceValidityCertificate,
+    InconsistentFaceReason,
 };
 
 /// The lattice a surface reports through its bare accessors, with no evidence.
