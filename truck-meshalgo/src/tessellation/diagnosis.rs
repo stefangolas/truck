@@ -700,6 +700,10 @@ pub enum LossBucket {
     /// A FACE-VALIDITY hard rejection: the face was certified intrinsically
     /// degenerate before tessellation.
     IntrinsicDegenerate,
+    /// A P2 certified rejection: the face was certified singular-ambiguous at a
+    /// rank-deficient periodic transition where the incident source geometry
+    /// underdetermines the continuation.
+    IntrinsicAmbiguous,
     /// A typed failure not in the above categories.
     OtherTypedFailure,
 }
@@ -734,6 +738,10 @@ pub enum ArrFailureStage {
     /// The face was certified intrinsically degenerate (FACE-VALIDITY) and
     /// rejected before tessellation.
     RejectedDegenerate,
+    /// The face was certified singular-ambiguous (P2) and rejected before
+    /// material solving: a rank-deficient periodic transition whose incident
+    /// source geometry underdetermines the lift branch.
+    RejectedAmbiguous,
     /// The stage could not be established from retained evidence.
     #[default]
     Unknown,
@@ -921,6 +929,7 @@ pub fn derive_loss_bucket(
         R::ContradictoryDualParity => LossBucket::ParityContradiction,
         R::NoOddParityRegion => LossBucket::NoMaterialRegion,
         R::RejectedDegenerate => LossBucket::IntrinsicDegenerate,
+        R::RejectedAmbiguous => LossBucket::IntrinsicAmbiguous,
         R::ConstraintInsertionIncomplete => {
             derive_insertion_bucket(witnesses, vertex_insertion_failed)
         }
@@ -1000,7 +1009,9 @@ pub fn compute_lift_status(
     if !periodic_axes.u && !periodic_axes.v {
         return ObservedLiftStatus::NotPeriodic;
     }
-    if reason == TessellationFailureReason::AmbiguousLift {
+    if reason == TessellationFailureReason::AmbiguousLift
+        || reason == TessellationFailureReason::RejectedAmbiguous
+    {
         return ObservedLiftStatus::Ambiguous;
     }
     if all_periods_certified {
@@ -1629,6 +1640,7 @@ fn derive_arr_signature(
         }
         R::AmbiguousLift => ArrFailureStage::LiftAmbiguous,
         R::RejectedDegenerate => ArrFailureStage::RejectedDegenerate,
+        R::RejectedAmbiguous => ArrFailureStage::RejectedAmbiguous,
         R::ConstraintOverlapUnsupported => ArrFailureStage::ConstraintRejected,
         R::ConstraintInsertionIncomplete => ArrFailureStage::ConstraintIncomplete,
         R::ContradictoryDualParity => ArrFailureStage::ParityContradiction,

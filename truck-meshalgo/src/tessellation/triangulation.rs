@@ -1770,6 +1770,19 @@ where
                 }
             }
         };
+        // A certified rejection -- intrinsic degenerate (FACE-VALIDITY) or
+        // singular-ambiguous (P2) -- is the one terminal state no recovery
+        // route may touch. `rejected` covers the pre-tessellation validity
+        // certificate; a P2 `RejectedAmbiguous` arrives as the lift's own
+        // failure reason, so the routes below gate on the union.
+        let rejected_terminal = rejected
+            || matches!(
+                failure,
+                Some(TessellationFailure {
+                    reason: TessellationFailureReason::RejectedAmbiguous,
+                    ..
+                })
+            );
         // The legacy verdict, classified here and not later: the cylinder-band
         // fallback admits one loss bucket, the bucket is derived from conflict
         // witnesses the sink holds, and `build_face_diagnosis` below consumes
@@ -1785,7 +1798,7 @@ where
         // structural schemas; it reads nothing the legacy path produced, so a
         // face's formal verdict is independent of whether the legacy path
         // succeeded.
-        let (polygon, failure) = if !run_slice || rejected {
+        let (polygon, failure) = if !run_slice || rejected_terminal {
             (polygon, failure)
         } else {
             let outcome = run_slice_for_face(
@@ -1900,7 +1913,7 @@ where
         // has already had its chance, and it only ever replaces a face the
         // legacy path *still* has no mesh for â€” never a face the planar
         // rank-0 path just recovered, and never a successful legacy mesh.
-        let (polygon, failure) = if !run_cylinder_slice || rejected {
+        let (polygon, failure) = if !run_cylinder_slice || rejected_terminal {
             (polygon, failure)
         } else {
             let record = run_cylinder_slice_for_face(
@@ -1961,7 +1974,7 @@ where
             failure.is_some(),
             legacy_bucket == Some(diagnosis::LossBucket::SyntheticSyntheticCrossing),
         ) {
-            (true, true, true) if !rejected => {
+            (true, true, true) if !rejected_terminal => {
                 match run_cylinder_band_for_face(
                     declared_face_index,
                     source_face_id,
@@ -2028,7 +2041,7 @@ where
             failure.is_some(),
             legacy_bucket == Some(diagnosis::LossBucket::SyntheticSyntheticCrossing),
         ) {
-            (true, true, true) if !rejected => {
+            (true, true, true) if !rejected_terminal => {
                 match run_conical_band_for_face(
                     declared_face_index,
                     source_face_id,
@@ -2102,7 +2115,7 @@ where
         // by name, so `cylinder_of`, `cone_of`, and `torus_of` are mutually
         // exclusive on any one surface. A certified-degenerate face skips the
         // route entirely: it is the one state no recovery route may touch.
-        let (polygon, failure, torus_band_attempt) = if run_torus && !rejected {
+        let (polygon, failure, torus_band_attempt) = if run_torus && !rejected_terminal {
             match run_torus_annulus_for_face(
                 declared_face_index,
                 source_face_id,
@@ -4481,6 +4494,82 @@ impl PolyBoundaryPiece {
                                     // walk continues from the admitted sample.
                                     break;
                                 }
+                                // P2. The half-period tie is one special case of
+                                // a rank-deficient periodic transition. Where the
+                                // exhausted step departs from (or enters) a chart
+                                // singularity in the *longitude* direction -- the
+                                // sphere pole -- bisection can never shrink it,
+                                // and the branch is fixed by the leaving edge's
+                                // plane rather than by the pole's own
+                                // (undefined) longitude. Recover the branch from
+                                // the oriented incident geometry; a transition
+                                // whose plane does not determine it is a
+                                // certified singular ambiguity, and a transition
+                                // that is not this mechanism stays unresolved.
+                                if let (Some((u0, v0)), Some(previous_point)) =
+                                    (previous, previous_pt)
+                                {
+                                    match singular_transition_branch(
+                                        surface,
+                                        &sp,
+                                        up,
+                                        vp,
+                                        (u0, v0),
+                                        previous_point,
+                                        (ou, ov, opt_pt),
+                                        &vec,
+                                        &bdry3d,
+                                    ) {
+                                        SingularTransitionOutcome::Continue {
+                                            pole_uv,
+                                            pole_point,
+                                            resume_point,
+                                        } => {
+                                            // The pole is the sample the step
+                                            // left from; it was already
+                                            // admitted, so correct its
+                                            // bookkeeping longitude rather than
+                                            // admitting a duplicate.
+                                            let pole_matches = vec.last().is_some_and(|p| {
+                                                p.point.distance(pole_point) < 1.0e-3
+                                            });
+                                            if pole_matches {
+                                                if let Some(last) = vec.last_mut() {
+                                                    last.uv = pole_uv;
+                                                }
+                                            } else {
+                                                vec.push((pole_uv, pole_point).into());
+                                                lifted_tags.push(origin_tag);
+                                            }
+                                            previous = Some((pole_uv.x, pole_uv.y));
+                                            previous_pt = Some(pole_point);
+                                            // Resume the ordinary lift from the
+                                            // leaving edge's first real sample,
+                                            // discarding the synthetic midpoints
+                                            // that bisection invented.
+                                            let resume_tag = if resume_point.distance(opt_pt)
+                                                < 1.0e-3
+                                            {
+                                                origin_tag
+                                            } else {
+                                                bdry3d
+                                                    .iter()
+                                                    .position(|p| p.distance(resume_point) < 1.0e-3)
+                                                    .map(|i| source_tags[i + 1])
+                                                    .flatten()
+                                            };
+                                            pending.clear();
+                                            pending.push((resume_point, false, resume_tag));
+                                            continue;
+                                        }
+                                        SingularTransitionOutcome::CertifiedAmbiguous => {
+                                            return Err(
+                                                TessellationFailureReason::RejectedAmbiguous,
+                                            );
+                                        }
+                                        SingularTransitionOutcome::NotApplicable => {}
+                                    }
+                                }
                             }
                         }
                         return Err(TessellationFailureReason::AmbiguousLift);
@@ -4971,6 +5060,170 @@ const MAX_LIFT_REFINEMENTS: usize = 8;
 /// a step at, say, `0.6` of a period is a real branch ambiguity and remains
 /// `AmbiguousLift`.
 const SINGULAR_HALF_PERIOD_TOL: f64 = 0.02;
+
+/// The outcome of a singular periodic-transition branch analysis (P2).
+///
+/// At an exhausted ambiguous lift step whose start sample is a rank-deficient
+/// point of the *periodic* direction (a sphere pole, or the collapsed row of
+/// any revolution), bisection cannot separate the two candidate period copies:
+/// the chord midpoint is off the surface and projects onto one branch or the
+/// other, so refinement never shrinks the step. The branch is not a numerical
+/// fact but a source one -- a great circle through a pole has constant
+/// longitude equal to the azimuth of its plane -- so the *leaving edge* fixes
+/// the outgoing longitude regardless of the pole's own (undefined) coordinate.
+/// Recovering the branch from the oriented incident geometry, never from the
+/// pole's own parameter, is the L1/L2 gate:
+///
+/// - a uniquely determined continuation renders (recover and continue);
+/// - a singular transition whose incident geometry underdetermines the branch
+///   is a source-level ambiguity and becomes a `RejectedAmbiguous` certificate;
+/// - a transition that is not this mechanism leaves the lift unresolved.
+enum SingularTransitionOutcome {
+    /// The branch is uniquely determined by the leaving edge's plane. Resume
+    /// the lift from `resume_point` after assigning the pole the corrected
+    /// bookkeeping coordinate `pole_uv`.
+    Continue {
+        pole_uv: Point2,
+        pole_point: Point3,
+        resume_point: Point3,
+    },
+    /// The singular transition underdetermines the continuation: a certified
+    /// source-level `RejectedAmbiguous` outcome.
+    CertifiedAmbiguous,
+    /// Not a recoverable singular periodic transition; leave the lift
+    /// unresolved.
+    NotApplicable,
+}
+
+/// Which parameter axis a chart's longitude lives on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LongitudeAxis {
+    U,
+    V,
+}
+
+impl LongitudeAxis {
+    /// The periodic coordinate of a UV point on this axis.
+    fn coordinate(self, uv: Point2) -> f64 {
+        match self {
+            Self::U => uv.x,
+            Self::V => uv.y,
+        }
+    }
+}
+
+/// The P2 singular periodic-transition analysis.
+///
+/// `previous` is the accepted sample the ambiguous step departs from and
+/// `origin` the real boundary sample that first triggered the ambiguity (the
+/// leaving edge's first non-pole sample in the observed cases). `accepted` is
+/// the lift built so far and `bdry3d` the flat boundary run, both used to
+/// recover the *incoming* longitude: the branch is selected as the period copy
+/// of the outgoing longitude nearest the already-lifted incoming longitude,
+/// never from the pole's own (arbitrary) coordinate.
+fn singular_transition_branch<S>(
+    surface: &S,
+    sp: &impl SP<S>,
+    up: Option<f64>,
+    vp: Option<f64>,
+    previous: (f64, f64),
+    previous_point: Point3,
+    origin: (f64, f64, Point3),
+    accepted: &[SurfacePoint],
+    bdry3d: &[Point3],
+) -> SingularTransitionOutcome
+where
+    S: PreMeshableSurface,
+{
+    // The pole is a chart point where the *periodic* axis's partial collapses
+    // (at a sphere pole the longitude is undefined, so moving in it moves
+    // nothing). Detecting the collapse on the periodic axis is what separates
+    // this from a regular half-period step: a cylinder never reaches here, a
+    // cone apex and sphere pole do.
+    let collapsed_axis = |u: f64, v: f64| -> Option<LongitudeAxis> {
+        if vp.is_some() && surface.vder(u, v).so_small() {
+            Some(LongitudeAxis::V)
+        } else if up.is_some() && surface.uder(u, v).so_small() {
+            Some(LongitudeAxis::U)
+        } else {
+            None
+        }
+    };
+    // The accepted sample's longitude is the already-lifted incoming one.
+    let incoming_longitude = |axis: LongitudeAxis| -> Option<f64> {
+        accepted
+            .iter()
+            .rev()
+            .find(|p| !collapsed_axis(p.uv.x, p.uv.y).is_some())
+            .map(|p| axis.coordinate(p.uv))
+    };
+    // Resolve the branch from the leaving edge's own plane: `get_mindiff`
+    // picks the copy of the outgoing longitude nearest the incoming one.
+    let branch = |axis: LongitudeAxis, outgoing: f64, incoming: f64| match axis {
+        LongitudeAxis::V => get_mindiff(outgoing, incoming, vp.unwrap()),
+        LongitudeAxis::U => get_mindiff(outgoing, incoming, up.unwrap()),
+    };
+
+    let (ou, ov, opt_pt) = origin;
+    match collapsed_axis(previous.0, previous.1) {
+        // Case A: the step departs from the pole; the origin is the leaving
+        // edge's first non-pole sample.
+        Some(axis) => {
+            if collapsed_axis(ou, ov).is_some() {
+                // The leaving edge's own first sample is also a pole, so its
+                // longitude is undefined and the plane does not determine a
+                // unique continuation. Source-level singular ambiguity.
+                return SingularTransitionOutcome::CertifiedAmbiguous;
+            }
+            let outgoing = axis.coordinate(Point2::new(ou, ov));
+            let Some(incoming) = incoming_longitude(axis) else {
+                return SingularTransitionOutcome::NotApplicable;
+            };
+            let pole_uv = match axis {
+                LongitudeAxis::V => Point2::new(previous.0, branch(axis, outgoing, incoming)),
+                LongitudeAxis::U => Point2::new(branch(axis, outgoing, incoming), previous.1),
+            };
+            SingularTransitionOutcome::Continue {
+                pole_uv,
+                pole_point: previous_point,
+                resume_point: opt_pt,
+            }
+        }
+        // Case B: the step enters the pole (the origin is the pole). The
+        // leaving edge must be found ahead on the flat boundary run.
+        None => match collapsed_axis(origin.0, origin.1) {
+            Some(axis) => {
+                let pole_idx = bdry3d.iter().position(|p| p.distance(opt_pt) < 1.0e-3);
+                let leaving = pole_idx.and_then(|i| bdry3d.get(i + 1).copied());
+                let Some(leaving_pt) = leaving else {
+                    return SingularTransitionOutcome::CertifiedAmbiguous;
+                };
+                // The leaving edge's first non-pole sample; the closed-form
+                // inverse fixes its longitude.
+                let (lu, lv) = match sp(surface, leaving_pt, None) {
+                    Some(uv) => uv,
+                    None => return SingularTransitionOutcome::NotApplicable,
+                };
+                if collapsed_axis(lu, lv).is_some() {
+                    return SingularTransitionOutcome::CertifiedAmbiguous;
+                }
+                let outgoing = axis.coordinate(Point2::new(lu, lv));
+                // The step's start is the already-lifted incoming longitude.
+                let incoming = axis.coordinate(Point2::new(previous.0, previous.1));
+                let pole_uv = match axis {
+                    LongitudeAxis::V => Point2::new(origin.0, branch(axis, outgoing, incoming)),
+                    LongitudeAxis::U => Point2::new(branch(axis, outgoing, incoming), origin.1),
+                };
+                SingularTransitionOutcome::Continue {
+                    pole_uv,
+                    pole_point: opt_pt,
+                    resume_point: leaving_pt,
+                }
+            }
+            None => SingularTransitionOutcome::NotApplicable,
+        },
+    }
+}
 
 /// How many independent ray directions [`PolyBoundary::include`] may try before
 /// reporting that containment is undecidable at a point.
@@ -7264,6 +7517,17 @@ pub enum TessellationFailureReason {
     /// failure: the census must classify it as `rejected_intrinsic`, never as
     /// a mesh or as an unexplained loss.
     RejectedDegenerate,
+    /// The face was certified singular-ambiguous: a rank-deficient periodic
+    /// transition (a sphere pole) where the oriented incident source geometry
+    /// does not determine a unique continuation, so the lift branch is a
+    /// *source-level* ambiguity rather than a numerical one.
+    ///
+    /// This is the only `Ambiguous` classification a face may carry: an
+    /// ordinary [`Self::AmbiguousLift`] is a tessellation outcome, not an
+    /// ambiguity certificate. Like [`Self::RejectedDegenerate`] this is a
+    /// terminal state no recovery route may touch; the certificate's
+    /// supporting evidence travels in the face diagnosis.
+    RejectedAmbiguous,
     /// A constraint chain did not close. **Never constructed.**
     ConstraintChainNotClosed,
     /// At least one boundary segment could not be represented as a constraint.
@@ -8270,8 +8534,8 @@ fn closed_spline_boundary_is_sampled_over_the_evaluable_knot_domain() {
 
     let degree = 3;
     let distinct = [
-        -0.03125, 0.0, 0.0625, 0.125, 0.1875, 0.25, 0.3125, 0.375, 0.4375, 0.5, 0.5625,
-        0.625, 0.6875, 0.75, 0.8125, 0.875, 0.9375, 1.0, 1.0625,
+        -0.03125, 0.0, 0.0625, 0.125, 0.1875, 0.25, 0.3125, 0.375, 0.4375, 0.5, 0.5625, 0.625,
+        0.6875, 0.75, 0.8125, 0.875, 0.9375, 1.0, 1.0625,
     ];
     let mut knots = Vec::new();
     for k in distinct {
@@ -11814,6 +12078,254 @@ mod proj003_stage_a_tests {
             ),
             None,
             "Stage C never widens the caller tolerance"
+        );
+    }
+}
+
+#[cfg(test)]
+mod sphere_pole_recovery_tests {
+    use super::*;
+    use std::f64::consts::FRAC_PI_4;
+    use std::f64::consts::FRAC_PI_8;
+    use truck_geometry::prelude::Sphere;
+
+    const R: f64 = 10.0;
+
+    fn sphere() -> Sphere {
+        Sphere::new(Point3::origin(), R)
+    }
+
+    fn spt(u: f64, v: f64) -> Point3 {
+        sphere().subs(u, v)
+    }
+
+    fn use_(bound: usize, index: usize, orientation: bool) -> SourceEdgeUse {
+        SourceEdgeUse {
+            bound: BoundId(bound),
+            index,
+            orientation,
+        }
+    }
+
+    fn wire_edge(
+        pts: Vec<Point3>,
+        bound: usize,
+        index: usize,
+        orientation: bool,
+    ) -> SourcePolyline {
+        SourcePolyline {
+            curve: PolylineCurve(pts),
+            source: use_(bound, index, orientation),
+        }
+    }
+
+    /// The canonical great-circle triangle through the north pole: vertices at
+    /// the pole, (colatitude 45 deg, longitude 0) and (colatitude 45 deg,
+    /// longitude 3.3). The two meridians are the pole edges; the third edge is
+    /// the great circle between the two non-pole vertices. The pole is the
+    /// shared vertex where the walk must cross the undefined longitude.
+    fn north_pole_wire() -> Vec<SourcePolyline> {
+        let p = spt(0.0, 0.0);
+        let a = spt(FRAC_PI_4, 0.0);
+        let b = spt(FRAC_PI_4, 3.3);
+        let mid0 = spt(FRAC_PI_8, 0.0);
+        let mid1 = spt(FRAC_PI_8, 3.3);
+        vec![
+            // meridian v = 0, A -> P; the pole is the wire's last point and is
+            // dropped, so the walk enters the pole from longitude 0.
+            wire_edge(vec![a, mid0, p], 0, 0, true),
+            // meridian v = 3.3, P -> B; the pole is the polyline's first point.
+            wire_edge(vec![p, mid1, b], 0, 1, true),
+            // great circle B -> A, expanded to a chord by `try_new`.
+            wire_edge(vec![b, a], 0, 2, true),
+        ]
+    }
+
+    /// The same triangle reflected through the equator: the pole vertex is the
+    /// south pole (u = pi).
+    fn south_pole_wire() -> Vec<SourcePolyline> {
+        let p = spt(std::f64::consts::PI, 0.0);
+        let a = spt(std::f64::consts::PI - FRAC_PI_4, 0.0);
+        let b = spt(std::f64::consts::PI - FRAC_PI_4, 3.3);
+        let mid0 = spt(std::f64::consts::PI - FRAC_PI_8, 0.0);
+        let mid1 = spt(std::f64::consts::PI - FRAC_PI_8, 3.3);
+        vec![
+            wire_edge(vec![a, mid0, p], 0, 0, true),
+            wire_edge(vec![p, mid1, b], 0, 1, true),
+            wire_edge(vec![b, a], 0, 2, true),
+        ]
+    }
+
+    /// The same triangle, walked the other way around: the wire starts at the
+    /// great-circle edge and crosses the pole at the end.
+    fn reversed_pole_wire() -> Vec<SourcePolyline> {
+        let p = spt(0.0, 0.0);
+        let a = spt(FRAC_PI_4, 0.0);
+        let b = spt(FRAC_PI_4, 3.3);
+        let mid0 = spt(FRAC_PI_8, 0.0);
+        let mid1 = spt(FRAC_PI_8, 3.3);
+        vec![
+            // great circle A -> B.
+            wire_edge(vec![a, b], 0, 0, true),
+            // meridian v = 3.3, B -> P.
+            wire_edge(vec![b, mid1, p], 0, 1, true),
+            // meridian v = 0, P -> A; the pole is the polyline's first point.
+            wire_edge(vec![p, mid0, a], 0, 2, true),
+        ]
+    }
+
+    fn lift(wire: Vec<SourcePolyline>) -> PolyBoundaryPiece {
+        let s = sphere();
+        let lattice = unevidenced_lattice(&s);
+        PolyBoundaryPiece::try_new(
+            &s,
+            wire.into_iter(),
+            by_search_nearest_parameter,
+            1.0e-6,
+            &lattice,
+        )
+        .expect("the sphere-pole triangle must lift through the branch recovery")
+    }
+
+    fn assert_lift_is_closed_and_finite(piece: &PolyBoundaryPiece) {
+        assert!(piece
+            .0
+            .iter()
+            .all(|p| p.uv.x.is_finite() && p.uv.y.is_finite()));
+        assert!(
+            piece.0.len() >= 3,
+            "the lifted boundary must be a non-degenerate loop",
+        );
+        // The walk closes back on its start in world space; the UV may return
+        // to a different period copy, which the closure classifier resolves.
+        assert!(
+            piece.0[0].point.distance(piece.0.last().unwrap().point) <= 1.0e-6,
+            "the lifted boundary must close in world space",
+        );
+    }
+
+    /// The periodic axis must never make a half-period-or-larger step between
+    /// consecutive *non-pole* samples. The pole's own longitude is bookkeeping
+    /// (it is undefined at the chart singularity), so the single edge into it
+    /// may legitimately span a wide longitude gap when the two incident
+    /// longitudes are themselves far apart; the recovery's job is that the
+    /// *continuation* out of the pole is clean and no regular step re-enters
+    /// the ambiguity band.
+    fn assert_continuous_longitude(piece: &PolyBoundaryPiece) {
+        const V_PERIOD: f64 = 2.0 * std::f64::consts::PI;
+        let is_pole =
+            |p: &SurfacePoint| p.uv.x.so_small() || (p.uv.x - std::f64::consts::PI).abs() < 1.0e-6;
+        for w in piece.0.windows(2) {
+            if is_pole(&w[0]) || is_pole(&w[1]) {
+                continue;
+            }
+            let step = f64::abs(w[1].uv.y - w[0].uv.y);
+            assert!(
+                step < AMBIGUOUS_STEP_FRACTION * V_PERIOD,
+                "longitude step {} at [{:?}] -> [{:?}] must stay under the ambiguity band",
+                step,
+                w[0].uv,
+                w[1].uv,
+            );
+        }
+    }
+
+    #[test]
+    fn north_pole_great_circle_triangle_recovers() {
+        let piece = lift(north_pole_wire());
+        assert_lift_is_closed_and_finite(&piece);
+        assert_continuous_longitude(&piece);
+        let pole = piece.0.iter().find(|p| p.uv.x.so_small());
+        assert!(
+            pole.is_some(),
+            "the pole vertex must be present in the lift"
+        );
+    }
+
+    #[test]
+    fn south_pole_great_circle_triangle_recovers() {
+        let piece = lift(south_pole_wire());
+        assert_lift_is_closed_and_finite(&piece);
+        assert_continuous_longitude(&piece);
+        let pole = piece
+            .0
+            .iter()
+            .find(|p| (p.uv.x - std::f64::consts::PI).abs() < 1.0e-6);
+        assert!(pole.is_some(), "the south pole vertex must be present");
+    }
+
+    #[test]
+    fn reversed_pole_traversal_recovers() {
+        let piece = lift(reversed_pole_wire());
+        assert_lift_is_closed_and_finite(&piece);
+        assert_continuous_longitude(&piece);
+    }
+
+    #[test]
+    fn ordinary_sphere_triangle_away_from_pole_lifts() {
+        // Three vertices all at colatitude 60 deg with moderate longitude
+        // spans: no pole is touched, so the lift completes by projection.
+        let a = spt(std::f64::consts::FRAC_PI_3, 0.0);
+        let b = spt(std::f64::consts::FRAC_PI_3, 1.0);
+        let c = spt(std::f64::consts::FRAC_PI_3, 2.0);
+        let wire = vec![
+            wire_edge(vec![a, b], 0, 0, true),
+            wire_edge(vec![b, c], 0, 1, true),
+            wire_edge(vec![c, a], 0, 2, true),
+        ];
+        let piece = lift(wire);
+        assert_lift_is_closed_and_finite(&piece);
+    }
+
+    #[test]
+    fn non_singular_step_is_not_recovered() {
+        // A step whose start sample is not a chart singularity (the sphere at
+        // colatitude 45 deg has full rank) must be refused by the branch
+        // analysis: this is the near-pole / regular crossing gate.
+        let s = sphere();
+        let previous = (FRAC_PI_4, 0.0);
+        let origin = (FRAC_PI_4, 3.3, spt(FRAC_PI_4, 3.3));
+        let outcome = singular_transition_branch(
+            &s,
+            &by_search_nearest_parameter,
+            None,
+            Some(2.0 * std::f64::consts::PI),
+            previous,
+            spt(FRAC_PI_4, 0.0),
+            origin,
+            &[],
+            &[],
+        );
+        assert!(
+            matches!(outcome, SingularTransitionOutcome::NotApplicable),
+            "a non-singular step must not be recovered",
+        );
+    }
+
+    #[test]
+    fn underdetermined_leaving_edge_is_certified_ambiguous() {
+        // The step departs from the pole, but the leaving edge's own first
+        // sample is also the pole: its longitude is undefined, so the source
+        // geometry does not determine a unique continuation. That is the
+        // certificate case, never a render.
+        let s = sphere();
+        let pole = spt(0.0, 0.0);
+        let previous = (0.0, 0.0);
+        let origin = (0.0, 3.3, pole);
+        let outcome = singular_transition_branch(
+            &s,
+            &by_search_nearest_parameter,
+            None,
+            Some(2.0 * std::f64::consts::PI),
+            previous,
+            pole,
+            origin,
+            &[],
+            &[],
+        );
+        assert!(
+            matches!(outcome, SingularTransitionOutcome::CertifiedAmbiguous),
+            "an underdetermined pole continuation must carry the certificate",
         );
     }
 }
