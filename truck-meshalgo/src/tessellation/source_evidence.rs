@@ -81,6 +81,38 @@ impl EdgeUseId {
     }
 }
 
+/// The synthetic source identity of one presented boundary edge use.
+///
+/// This is the identity the legacy path can still recover at
+/// `create_boundary`/`create_edge` time, before the wire's polylines are
+/// flattened: the bound's position in `face.boundaries`, the edge use's
+/// position within that bound, and the composed `s_b · s_o` orientation that
+/// was applied to the curve. No STEP edge entity survives this far; the
+/// `(BoundId, EdgeUseId)` pair is the identity PLANAR-C's arrangement layer
+/// needs, so it is carried rather than reconstructed.
+///
+/// This is deliberately not [`SourceEdgeUseInput`]: that type describes the
+/// evidence seam for the formal pipeline, while this is the light provenance
+/// the legacy boundary path records. They answer different questions and are
+/// never mixed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SourceEdgeUse {
+    /// The bound this use belongs to.
+    pub bound: BoundId,
+    /// Position within that bound, in source traversal order.
+    pub index: usize,
+    /// Whether the presented curve runs in the bound's own orientation.
+    /// `false` means `curve.inverse()` was applied (`s_b · s_o` = reversed).
+    pub orientation: bool,
+}
+
+impl SourceEdgeUse {
+    /// The [`EdgeUseId`] this use names.
+    pub const fn edge_use_id(self) -> EdgeUseId {
+        EdgeUseId::new(self.bound, self.index)
+    }
+}
+
 /// A source vertex identity.
 ///
 /// Never a coordinate. Two `VERTEX_POINT` entities at the same position are two

@@ -1418,36 +1418,6 @@ fn build_witness(
     })
 }
 
-/// Record a conflict witness between two semantic segments.
-///
-/// The two segments' parameter-space endpoints are recorded unconditionally.
-/// They are in hand at the failure site and are unrecoverable afterwards, which
-/// is the same lesson the cone investigation taught about the lift.
-pub(crate) fn record_conflict(
-    incoming_id: u64,
-    blocking_id: u64,
-    relation: PresentedSegmentRelation,
-    incoming_segment: Option<SegmentEndpoints2>,
-    blocking_segment: Option<SegmentEndpoints2>,
-) {
-    if suspended() {
-        return;
-    }
-    FACE_DIAGNOSIS_SINK.with(|sink| {
-        let sink = &mut *sink.borrow_mut();
-        let witness = build_witness(
-            sink,
-            incoming_id,
-            blocking_id,
-            relation,
-            incoming_segment,
-            blocking_segment,
-        )
-        .expect("conflict segment ids must be valid");
-        sink.witnesses.push(witness);
-    });
-}
-
 /// Record a witness for a constraint overlap.
 ///
 /// `ConstraintOverlapUnsupported` is raised on the segment that would traverse
@@ -1673,11 +1643,8 @@ fn derive_arr_signature(
             _ => ArrProvenanceClass::SourceSynthetic,
         }
     };
-    let dominant = pair_relation.and_then(|relation| {
-        all.iter()
-            .find(|w| w.relation == relation)
-            .copied()
-    });
+    let dominant =
+        pair_relation.and_then(|relation| all.iter().find(|w| w.relation == relation).copied());
     let (pair_provenance, same_bound) = match dominant {
         Some(w) => (provenance_of(w), w.same_bound),
         None => (ArrProvenanceClass::None, None),

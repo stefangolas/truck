@@ -11,16 +11,17 @@ use super::domain::lattice::CertifiedLattice;
 use super::formal;
 use super::source_evidence::{
     BoundId, EdgeUseId, ErasedOrientationMechanism, OrientationEvidence, OrientationOrigin,
-    SourceBoundInput, SourceEdgeOrientationEvidence, SourceEdgeUseInput, SourceEvidenceError,
-    SourceFaceInput, SourceFaceOrientationEvidence, SourceVertexKey,
+    SourceBoundInput, SourceEdgeOrientationEvidence, SourceEdgeUse, SourceEdgeUseInput,
+    SourceEvidenceError, SourceFaceInput, SourceFaceOrientationEvidence, SourceVertexKey,
 };
 use super::*;
 use crate::filters::NormalFilters;
 use crate::Point2;
 use array_macro::array;
-use handles::{FixedUndirectedEdgeHandle, FixedVertexHandle};
+use handles::{FixedDirectedEdgeHandle, FixedUndirectedEdgeHandle, FixedVertexHandle};
 use itertools::Itertools;
 use rustc_hash::FxHashMap as HashMap;
+use rustc_hash::FxHashSet as HashSet;
 use serde::Serialize;
 use truck_geotrait::algo;
 
@@ -28,7 +29,7 @@ use truck_geotrait::algo;
 use rayon::prelude::*;
 
 type SPoint2 = spade::Point2<f64>;
-type Cdt = ConstrainedDelaunayTriangulation<SPoint2>;
+type Cdt = ConstrainedDelaunayTriangulation<SPoint2, (), ConstraintEdgeData>;
 std::thread_local! {
     /// Optional document-local source face id, declared face index, and
     /// parameter-space periodic rank for probes.
@@ -38,7 +39,7 @@ std::thread_local! {
     /// A thread-local rather than a parameter because the reading has to reach
     /// a function seven call levels down whose signature is shared with the
     /// legacy path, and because the winding retry is a *second* whole
-    /// tessellation of one face rather than a branch inside the first — see
+    /// tessellation of one face rather than a branch inside the first â€” see
     /// the retry stage in the per-face chain for why it has to run there and
     /// not where the contradiction is detected.
     static PARITY_READING: std::cell::Cell<ParityReading> =
@@ -82,7 +83,7 @@ where
 /// readings apart that decide what to do about them: a chain that stopped
 /// early, a seed route that ran but had only one seed to offer (and so did
 /// nothing the plain call had not already done), and a seed route that
-/// converged to just outside tolerance — which is a tolerance question, not an
+/// converged to just outside tolerance â€” which is a tolerance question, not an
 /// initialisation one.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ProjectionAttempt {
@@ -108,7 +109,7 @@ pub(super) struct ProjectionAttempt {
     /// Whether the seed cap truncated the probe.
     pub seed_cap_hit: bool,
     /// The best instrumented nearest search launched from the routes
-    /// production already uses — the caller's hint and the presearch start.
+    /// production already uses â€” the caller's hint and the presearch start.
     pub prod_best: NearestOutcome,
     /// The best instrumented nearest search launched from a structural seed.
     pub seed_best: NearestOutcome,
@@ -126,7 +127,7 @@ pub(super) struct ProjectionAttempt {
 ///
 /// The production call cannot answer this. `search_nearest_parameter` is
 /// `newton::solve(..).ok()`, so its `None` means **the iteration did not
-/// converge**, not that the nearest point is far away — and in a release build
+/// converge**, not that the nearest point is far away â€” and in a release build
 /// `NewtonLog` stores nothing, so the iterate it gave up on is unrecoverable
 /// through the existing API. This records the iterate itself.
 #[derive(Clone, Copy, Debug)]
@@ -259,7 +260,12 @@ fn deep_presearch<S>(
 where
     S: ParametricSurface3D,
 {
-    algo::surface::presearch(surface, point, ((u0, u1), (v0, v1)), DEEP_PRESEARCH_DIVISION)
+    algo::surface::presearch(
+        surface,
+        point,
+        ((u0, u1), (v0, v1)),
+        DEEP_PRESEARCH_DIVISION,
+    )
 }
 
 /// The one nearest-parameter solve the tessellation asks, shared with the
@@ -277,7 +283,8 @@ where
     let in_domain = |(u, v): (f64, f64)| {
         urange.is_none_or(|(a, b)| u >= a && u <= b) && vrange.is_none_or(|(a, b)| v >= a && v <= b)
     };
-    let outcome = algo::surface::search_nearest_parameter_outcome(surface, point, hint, DEEP_TRIALS);
+    let outcome =
+        algo::surface::search_nearest_parameter_outcome(surface, point, hint, DEEP_TRIALS);
     NearestOutcome {
         uv: outcome.best,
         residual: outcome.best_residual,
@@ -324,7 +331,7 @@ where
 /// `prod` is the best over the starts production's own chain already uses; the
 /// point of separating it from `seed` is that the two imply different fixes.
 /// If a production start already reaches within tolerance, nothing needs new
-/// seeds — the convergence test threw a good answer away. Only if it does not,
+/// seeds â€” the convergence test threw a good answer away. Only if it does not,
 /// and a structural seed does, is this an initialisation problem.
 fn classify_projection_point(
     prod: NearestOutcome,
@@ -368,7 +375,7 @@ fn classify_projection_point(
     };
     // A converged stationary point whose residual exceeds tolerance is a
     // geometric statement about the face: the boundary does not lie on this
-    // surface. An unconverged one is not — it is only where the iteration got
+    // surface. An unconverged one is not â€” it is only where the iteration got
     // to, so it cannot certify a distance.
     match best.converged {
         true => (PointVerdict::NearestTooFar, route),
@@ -452,7 +459,7 @@ fn residual_certified_admission<S: PreMeshableSurface>(
 ///
 /// The legacy chain treats `search_nearest_parameter(..) == newton::solve(..).ok()`
 /// as the projection answer, so its `None` means only that Newton's `near2`
-/// convergence test was not met — not that the surface is far from the boundary
+/// convergence test was not met â€” not that the surface is far from the boundary
 /// point. PROJ-002 showed ~two thirds of the `BoundaryProjectionFailed`
 /// population is exactly that: a start production already uses reaches a
 /// finite, in-domain parameter whose world residual is within the caller's
@@ -461,7 +468,7 @@ fn residual_certified_admission<S: PreMeshableSurface>(
 ///
 /// - runs only where the legacy chain returned `None` for this point
 /// - the candidate comes only from the caller's hint or the hintless presearch
-///   start — the starts the production chain itself already uses
+///   start â€” the starts the production chain itself already uses
 /// - Newton's `near2` condition is explicitly NOT required
 ///
 /// It is refinement-only by construction: a face that projected through the
@@ -595,7 +602,11 @@ fn classify_domain_point(
                 C::RepresentationRangeMismatch => 1,
                 _ => 0,
             };
-            if rank(a) >= rank(b) { a } else { b }
+            if rank(a) >= rank(b) {
+                a
+            } else {
+                b
+            }
         }
     }
 }
@@ -635,10 +646,7 @@ fn residual_certified_domain_recovery<S: PreMeshableSurface>(
         let (urange, vrange) = surface.try_range_tuple();
         let class = classify_domain_point(candidate, tol, urange, vrange, lattice);
         let (u, v) = candidate.uv;
-        let transform = |coord: f64,
-                         range: Option<(f64, f64)>,
-                         gen: Option<f64>|
-         -> Option<f64> {
+        let transform = |coord: f64, range: Option<(f64, f64)>, gen: Option<f64>| -> Option<f64> {
             let (lo, hi) = range?;
             if coord >= lo && coord <= hi {
                 return Some(coord);
@@ -657,7 +665,7 @@ fn residual_certified_domain_recovery<S: PreMeshableSurface>(
         let (nu, nv) = match class {
             // Normalize every out-of-range axis by certified periods. An axis
             // that is out of range and *not* periodically reducible refuses the
-            // whole admission — Stage C never mixes a periodic shift with a
+            // whole admission â€” Stage C never mixes a periodic shift with a
             // clamp or an epsilon to force a candidate in.
             C::PeriodicEquivalent => {
                 let nu = transform(u, urange, lattice.u_generator())?;
@@ -758,14 +766,14 @@ where
             .or_else(|| surface.search_nearest_parameter(point, hint, 100))
             .or_else(|| surface.search_nearest_parameter(point, None, 100))
             // Last, so it is reached only where every existing attempt returned
-            // `None` — which is exactly the population that becomes
+            // `None` â€” which is exactly the population that becomes
             // `BoundaryProjectionFailed`. A face that projects today projects
             // through the identical chain and gets the identical parameter.
             .or_else(|| by_structural_seeds(surface, point, hint));
     }
     // PROJ-003 Stage A. On a point the whole production chain has already
     // rejected, record the best iterate reached from the starts production
-    // itself uses — the caller's hint and the hintless presearch start. This
+    // itself uses â€” the caller's hint and the hintless presearch start. This
     // runs whenever the residual-certified recovery is enabled, because the
     // recovery consumes it, and additionally under the deep probe, whose
     // witness needs it. It never changes what the chain above returned.
@@ -773,7 +781,8 @@ where
         && (proj_residual_recovery_enabled_cached() || projection_deep_probe_enabled())
     {
         if let Some(hint) = hint {
-            attempt.prod_best = better_outcome(attempt.prod_best, probe_nearest(surface, point, hint));
+            attempt.prod_best =
+                better_outcome(attempt.prod_best, probe_nearest(surface, point, hint));
             attempt.searches_run += 1;
         }
         // The hintless route's start. `search_nearest_parameter(point, None, _)`
@@ -791,8 +800,7 @@ where
     // search and retain the best iterate, so the Stage B recovery has a
     // candidate. The deep probe needs the identical iterate to classify, so it
     // runs here too whenever either gate is open.
-    if result.is_none()
-        && (proj_seed_recovery_enabled_cached() || projection_deep_probe_enabled())
+    if result.is_none() && (proj_seed_recovery_enabled_cached() || projection_deep_probe_enabled())
     {
         attempt = probe_structural_seeds(surface, point, attempt);
     }
@@ -817,15 +825,15 @@ where
 /// suggests.
 ///
 /// The chain above fails as a *numerical* matter, not a geometric one: it runs
-/// a Newton iteration from a single start — a caller's hint, or the best cell
-/// of a uniform presearch grid — and a single start is not enough on a
+/// a Newton iteration from a single start â€” a caller's hint, or the best cell
+/// of a uniform presearch grid â€” and a single start is not enough on a
 /// piecewise surface whose pieces the grid does not see. `search_parameter_seeds`
 /// supplies one start per knot span, so every polynomial piece gets its own
 /// attempt. Only the initialisation changes; the iteration is the same one.
 ///
 /// This returns a parameter, not a verdict. A returned parameter is still
-/// subject to the caller's incidence check — a nearest point is not an
-/// incidence — so nothing is admitted here that the pipeline would not have
+/// subject to the caller's incidence check â€” a nearest point is not an
+/// incidence â€” so nothing is admitted here that the pipeline would not have
 /// admitted from any other start.
 fn by_structural_seeds<S>(
     surface: &S,
@@ -1003,7 +1011,7 @@ where
 /// **G8.** The failure vector is positionally aligned with `shell.faces`:
 /// `face_failures[i]` explains `shell.faces[i]`, and is `None` exactly when
 /// that face tessellated. It is returned *with* the shell rather than emitted
-/// or logged, so a caller cannot consume the mesh while ignoring the reason —
+/// or logged, so a caller cannot consume the mesh while ignoring the reason â€”
 /// which is what made the previous empty-mesh convention lossy.
 ///
 /// Each face's own identity remains on `CompressedFace::provenance`, so a
@@ -1074,8 +1082,8 @@ pub enum CylinderBandAttempt {
 ///
 /// The same shape as [`CylinderBandAttempt`], and deliberately not the same
 /// type: the unrecovered arm carries [`formal::cone_band::ConicalBandExit`]
-/// unchanged, which names this cell's own obligations — same nappe, apex
-/// exclusion, carrier order — and the recovered arm carries what the *source*
+/// unchanged, which names this cell's own obligations â€” same nappe, apex
+/// exclusion, carrier order â€” and the recovered arm carries what the *source*
 /// declared about outer-bound standing rather than a conformance repair,
 /// because this cell has no repair to report.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1200,9 +1208,9 @@ where
 /// makes the cone route unreachable and the cylinder entry point's output what
 /// it was.
 ///
-/// Only one new closure is needed. The two curve readers are surface-agnostic —
+/// Only one new closure is needed. The two curve readers are surface-agnostic â€”
 /// they classify a `Curve3D` into a [`formal::SourceCurveFamily`] and know
-/// nothing about what the face is trimmed from — so the cone route reads its
+/// nothing about what the face is trimmed from â€” so the cone route reads its
 /// complete source circles through the same two the cylinder route does.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn cshell_tessellation_with_outcomes_and_cone<'a, C, S>(
@@ -1251,8 +1259,8 @@ where
 ///
 /// Only one new closure. The torus route reads its complete source circles
 /// through the same two curve readers the cylinder and cone routes do; what
-/// differs is what the cell then requires of the circle it was handed —
-/// on-torus membership and `Z²` winding, not constant-coordinate or nappe
+/// differs is what the cell then requires of the circle it was handed â€”
+/// on-torus membership and `ZÂ²` winding, not constant-coordinate or nappe
 /// obligations.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn cshell_tessellation_with_outcomes_and_torus<'a, C, S>(
@@ -1293,10 +1301,10 @@ where
 /// [`cshell_tessellation_with_outcomes`], additionally threading the rank-1
 /// cylinder evidence readers (Milestone A / FORMAL-013-015).
 ///
-/// The three cylinder closures are `look`'s composition-layer readers —
+/// The three cylinder closures are `look`'s composition-layer readers â€”
 /// `step::cylinder::identify_source_cylinder`,
 /// `step::lattice::cylinder_curve_schema_of` and
-/// `step::lattice::cylinder_curve_family_of` — reduced to `Option`/tag-only
+/// `step::lattice::cylinder_curve_family_of` â€” reduced to `Option`/tag-only
 /// return types here so this crate does not depend on `look`'s error types.
 /// Kept as a second entry point, rather than changing
 /// [`cshell_tessellation_with_outcomes`]'s signature, so every existing
@@ -1372,7 +1380,7 @@ where
     // replace a face the *legacy path lost*, and nothing else.
     //
     // Every recovery gate below is **default-on with explicit opt-out** since
-    // `WAVE-2C` — see `diagnosis::recovery_route_enabled`. Each route is
+    // `WAVE-2C` â€” see `diagnosis::recovery_route_enabled`. Each route is
     // refinement-only (it is entered only where `failure.is_some()`), so
     // enabling one cannot change a face that already meshed; the worst it can
     // do is decline to recover. `TRUCK_FORMAL_RECOVERY=0` restores the pure
@@ -1394,13 +1402,13 @@ where
     let run_cylinder_slice = cylinder_probe || cylinder_recovery_gate;
     let run_slice = slice_probe || recovery_gate;
     // The rank-1 cylinder *band* route: the two-bound annulus. Same two-tier
-    // pattern again, and it carries no shadow probe of its own — the attempt
+    // pattern again, and it carries no shadow probe of its own â€” the attempt
     // is reported through `MeshedShellOutcome::band_attempts`, which is typed
     // and needs no parsing, rather than through another stderr channel.
     let band_recovery_gate = diagnosis::cylinder_band_recovery_enabled();
     // The rank-2 torus annulus route. Two modes under one gate:
     // `TRUCK_PROBE_TORUS` runs the certification in shadow and records the
-    // typed outcome without replacing the legacy mesh — the observer that
+    // typed outcome without replacing the legacy mesh â€” the observer that
     // reproduces the census. `TRUCK_FORMAL_RECOVERY_TORUS` additionally lets
     // a validated torus annulus mesh replace a face the legacy path lost.
     // Nested under the master gate since `WAVE-2C`: it used to stand outside
@@ -1417,14 +1425,14 @@ where
     // only reason to have opened the gate was to read them. Default-on makes
     // that an unconditional side effect of rendering: 525 lines on
     // `00009190`, on a tool whose stderr an agent is expected to parse. The
-    // recovery is still fully reported — `MeshedShellOutcome`'s typed
+    // recovery is still fully reported â€” `MeshedShellOutcome`'s typed
     // `band_attempts`, `cone_band_attempts` and `torus_band_attempts` carry it
-    // structurally, which is what the census reads — so the log is now opt-in
+    // structurally, which is what the census reads â€” so the log is now opt-in
     // behind its own probe rather than being the only channel.
     let recovery_log = std::env::var_os("TRUCK_PROBE_RECOVERY").is_some();
     // The deck-consistent two-loop join. Unlike the routes above it does not
     // build a mesh of its own: it rebuilds the *same* boundary with the second
-    // loop traversed in the direction that satisfies `Σδ = 0`, and re-runs the
+    // loop traversed in the direction that satisfies `Î£Î´ = 0`, and re-runs the
     // ordinary tessellator on it. So it inherits every check the legacy path
     // makes, and adds no geometry the legacy path would not have accepted.
     let deck_join_gate = diagnosis::deck_join_recovery_enabled();
@@ -1604,7 +1612,7 @@ where
         let schema = schema_of(surface);
         // Step 0: build the rewrite's input seam beside the legacy path and
         // report it. Nothing below reads it, so geometry is unchanged by
-        // construction — the point is to count what the seam carries before
+        // construction â€” the point is to count what the seam carries before
         // the pipeline that depends on it exists.
         if evidence_probe {
             let input = source_face_input_from_compressed(
@@ -1629,26 +1637,40 @@ where
                 &schema,
             );
         }
-        let create_edge = |edge_idx: &CompressedEdgeIndex| match edge_idx.orientation {
-            true => Some(edges.get(edge_idx.index)?.curve.clone()),
-            false => Some(edges.get(edge_idx.index)?.curve.inverse()),
-        };
-        let create_boundary = |wire: &Vec<CompressedEdgeIndex>| {
-            let wire_iter = wire.iter().filter_map(create_edge);
+        let create_boundary = |(bound_index, wire): (usize, &Vec<CompressedEdgeIndex>)| {
+            let bound = BoundId(bound_index);
+            // Each wire item becomes a tagged polyline: the curve exactly as
+            // `create_edge` produced it before, plus the synthetic source
+            // identity `(BoundId(bound_index), use_index, orientation)` that is
+            // the last cheap provenance this seam still has.
+            let wire_iter = wire.iter().enumerate().filter_map(|(use_index, edge_idx)| {
+                let curve = match edge_idx.orientation {
+                    true => edges.get(edge_idx.index)?.curve.clone(),
+                    false => edges.get(edge_idx.index)?.curve.inverse(),
+                };
+                Some(SourcePolyline {
+                    curve,
+                    source: SourceEdgeUse {
+                        bound,
+                        index: use_index,
+                        orientation: edge_idx.orientation,
+                    },
+                })
+            });
             PolyBoundaryPiece::try_new(surface, wire_iter, &sp, tol, &lattice)
         };
         let preboundary: std::result::Result<Vec<_>, _> =
-            boundaries.iter().map(create_boundary).collect();
+            boundaries.iter().enumerate().map(create_boundary).collect();
         // G8: the same computation as before, with the failure kept rather than
         // flattened into an empty mesh.
         //
-        // `surface` is left exactly as the legacy path produced it — `None`
+        // `surface` is left exactly as the legacy path produced it â€” `None`
         // when no boundary could be built, `Some(empty)` when tessellation
-        // itself failed — so the meshed shell is unchanged and this commit adds
+        // itself failed â€” so the meshed shell is unchanged and this commit adds
         // information without moving any face between populations. The reason
         // travels beside it instead of being destroyed.
         // The pieces are retained only for a face that can reach the two-loop
-        // join at all — a periodic chart presenting exactly two bounds — so the
+        // join at all â€” a periodic chart presenting exactly two bounds â€” so the
         // clone is paid on the band population rather than on every face.
         let deck_join_candidate = deck_join_gate
             && (lattice.declared_u_period().is_some() || lattice.declared_v_period().is_some())
@@ -1669,15 +1691,14 @@ where
                     // reached only from the arm where the legacy path produced
                     // no mesh, so it can replace a failure and nothing else.
                     Err(failure) => {
-                        if failure.reason
-                            == TessellationFailureReason::ContradictoryDualParity
+                        if failure.reason == TessellationFailureReason::ContradictoryDualParity
                             && diagnosis::winding_parity_enabled()
                         {
                             parity_retry_boundary = Some(boundary.clone());
                         }
                         // The DIAG-001 record, and with it the loss bucket the
                         // band routes admit on, must keep describing the legacy
-                        // boundary — not a mixture of it and this second
+                        // boundary â€” not a mixture of it and this second
                         // attempt.
                         let _suspension = diagnosis::SinkSuspension::new();
                         let recovered = retained.and_then(|pieces| {
@@ -1778,7 +1799,7 @@ where
             //
             // The hole-free slice is consulted first, so opening the holes gate
             // cannot move a face that the original rank-0 path already
-            // recovered — those recoveries stay bit-identical. The two
+            // recovered â€” those recoveries stay bit-identical. The two
             // populations are disjoint anyway (one slice delegates wherever the
             // other applies), and the ordering makes that independent of the
             // delegation logic rather than reliant on it.
@@ -1851,7 +1872,7 @@ where
         // The rank-1 cylinder slice, on the identical additive discipline as
         // the planar slice above: it only ever runs after the planar block
         // has already had its chance, and it only ever replaces a face the
-        // legacy path *still* has no mesh for — never a face the planar
+        // legacy path *still* has no mesh for â€” never a face the planar
         // rank-0 path just recovered, and never a successful legacy mesh.
         let (polygon, failure) = if !run_cylinder_slice {
             (polygon, failure)
@@ -1905,8 +1926,8 @@ where
         //   any other legacy failure           -> the legacy failure, preserved
         //
         // `failure.is_some()` is the "legacy success" arm: a face that has a
-        // mesh at this point — because the legacy path meshed it, or because a
-        // formal route above already recovered it — is never attempted. The
+        // mesh at this point â€” because the legacy path meshed it, or because a
+        // formal route above already recovered it â€” is never attempted. The
         // bucket, the cylinder certificate and the bound count are the other
         // three conjuncts, each checked explicitly and none of them repaired.
         let (polygon, failure, band_attempt) = match (
@@ -1972,9 +1993,9 @@ where
         // and under the identical gate. It runs only after the cylinder band
         // has had its chance and only on a face that *still* has no mesh, so
         // the two cells cannot both claim one face: `cylinder_of` and `cone_of`
-        // are mutually exclusive on any one surface anyway — a revolved line is
+        // are mutually exclusive on any one surface anyway â€” a revolved line is
         // either parallel to its axis or tilted from it, and each identifier
-        // refuses the other's case by name — but the ordering makes that a
+        // refuses the other's case by name â€” but the ordering makes that a
         // property of the pipeline rather than only of the adapters.
         let (polygon, failure, cone_band_attempt) = match (
             band_recovery_gate,
@@ -2051,7 +2072,7 @@ where
         //       mesh is changed.
         //
         // The torus route runs after the cone route and only on a face that
-        // is a toroidal surface — `torus_of` refuses every non-torus surface
+        // is a toroidal surface â€” `torus_of` refuses every non-torus surface
         // by name, so `cylinder_of`, `cone_of`, and `torus_of` are mutually
         // exclusive on any one surface.
         let (polygon, failure, torus_band_attempt) = if run_torus {
@@ -2141,11 +2162,11 @@ where
         //
         // Run inside the first tessellation instead, this recovers the same
         // 126 faces but **pre-empts the torus annulus route on 8 of them**,
-        // replacing a validated 64-triangle annulus with a 1–2 triangle
+        // replacing a validated 64-triangle annulus with a 1â€“2 triangle
         // remnant. Those 8 are `two_outer_bounds_on_certified_torus_annulus`:
         // the source declares the whole bound twice, every edge is traversed
         // twice, and the winding reading correctly cancels the entire
-        // boundary — the face is not a slit, it is malformed, and the repair
+        // boundary â€” the face is not a slit, it is malformed, and the repair
         // belongs to the route that knows that. Placing the retry after every
         // other route makes "cancels to nothing" a failure this face already
         // recovered from, rather than a mesh that replaces the recovery.
@@ -2182,7 +2203,7 @@ where
                         }
                         (Some(mesh), None)
                     }
-                    // The retry refused in its own right — `NoOddParityRegion`
+                    // The retry refused in its own right â€” `NoOddParityRegion`
                     // for a boundary that cancels completely. The legacy
                     // failure is preserved exactly.
                     Err(_) => (polygon, failure),
@@ -2292,7 +2313,7 @@ where
 ///   into one point vector, after which no arc has endpoints.
 /// - **source vertex identity.** `CompressedEdge::vertices` is read for the
 ///   first time on this path; `create_edge` takes only `.curve`.
-/// - **composed `s_b · s_o`.** `create_edge` applies it as `curve.inverse()`
+/// - **composed `s_b Â· s_o`.** `create_edge` applies it as `curve.inverse()`
 ///   and keeps nothing.
 ///
 /// **Contracts:** retains what `TOP-005` requires; `TOP-001` identity is
@@ -2328,7 +2349,7 @@ fn source_face_input_from_compressed<S, C>(
             // The edge's vertices are stated in the edge's own direction, so
             // the composed sense selects which is the *use's* start. This is
             // the one place the retained orientation is read as a fact rather
-            // than performed as an inversion — and both orders are kept, so a
+            // than performed as an inversion â€” and both orders are kept, so a
             // consumer cannot apply the same fact twice undetected.
             let source_vertices = (
                 SourceVertexKey::ShellVertex(edge.vertices.0),
@@ -2613,7 +2634,7 @@ fn run_slice_for_face<S, C>(
     );
     // The developed-curve track, run only when its probe asks for it. It
     // produces no mesh and nothing below reads it, so it cannot alter a face's
-    // geometry — but it does cost an O(pieces^2) certified pairwise pass, and
+    // geometry â€” but it does cost an O(pieces^2) certified pairwise pass, and
     // that is not worth spending on every planar face of every model by
     // default.
     let developed = std::env::var_os("TRUCK_PROBE_DEVELOPED")
@@ -2799,7 +2820,7 @@ fn cylinder_polygon_from_lifted(
 /// source curve adapters, then FORMAL-007 through FORMAL-012 unchanged.
 ///
 /// Nothing in here reads the legacy result, so a face's formal verdict is
-/// independent of whether the legacy path succeeded on it — the same
+/// independent of whether the legacy path succeeded on it â€” the same
 /// discipline [`run_slice_for_face`] follows for the planar rank-0 route.
 #[allow(clippy::too_many_arguments)]
 fn run_cylinder_slice_for_face<S, C>(
@@ -2819,7 +2840,7 @@ fn run_cylinder_slice_for_face<S, C>(
         // all" from "a `CylindricalSurface` representation that
         // `identify_cylinder` itself refused" (a cone smuggled in by a
         // degenerate transform, a zero radius, an unverified angular
-        // period) — see `look::step::cylinder::CylinderSurfaceAdapterFailure`,
+        // period) â€” see `look::step::cylinder::CylinderSurfaceAdapterFailure`,
         // whose `.tag()` this closure forwards without `truck-meshalgo`
         // depending on that type.
         Err(tag) => {
@@ -2908,9 +2929,9 @@ fn run_cylinder_slice_for_face<S, C>(
     // The single production classification route: derives the witness class
     // and (for an arc) declared sweep from the edge's own source
     // representation, never from a caller assertion. By construction this
-    // agrees with the gate `curve_of` above already applied — both route
+    // agrees with the gate `curve_of` above already applied â€” both route
     // through `cylinder_curve_family_of`/`cylinder_curve_schema_of`'s
-    // identical `decode_transformed_circle` check — so the `Line` fallback
+    // identical `decode_transformed_circle` check â€” so the `Line` fallback
     // below is defensively unreachable, not a silent misclassification: a
     // genuinely wrong family here still fails the witness's own on-cylinder
     // and constant-coordinate checks rather than certifying incorrectly.
@@ -3094,7 +3115,10 @@ fn run_cylinder_band_for_face<S, C>(
     // it is a face this route has no evidence for, and it is left alone rather
     // than attempted and refused.
     if input.bounds.len() != 2 || input.regular_bound_count() != 2 {
-        diagnosis::record_route_ineligible(CylinderBand, RouteIneligible::BoundsNotTwoAuthoritative);
+        diagnosis::record_route_ineligible(
+            CylinderBand,
+            RouteIneligible::BoundsNotTwoAuthoritative,
+        );
         return None;
     }
 
@@ -3154,8 +3178,8 @@ fn run_cylinder_band_for_face<S, C>(
 /// The cone's outward unit normal at a point is perpendicular to the generator
 /// through it and to the parallel through it, which in the certified frame is
 /// the radial direction tilted back by the half-angle: `(axis_component,
-/// radial_component)` proportional to `(-slope · sign(s), 1)`, normalized. It
-/// is derived from the certificate — the apex, the axis and the half-angle —
+/// radial_component)` proportional to `(-slope Â· sign(s), 1)`, normalized. It
+/// is derived from the certificate â€” the apex, the axis and the half-angle â€”
 /// and not averaged from adjacent facets, so a coarse band and a fine one carry
 /// the same normal field.
 ///
@@ -3211,7 +3235,7 @@ fn cone_polygon_from_lifted(
 /// is its verdict.
 ///
 /// This is an adapter and nothing more, and every input it hands over is one
-/// production already produces — the same list [`run_cylinder_band_for_face`]
+/// production already produces â€” the same list [`run_cylinder_band_for_face`]
 /// documents, with `cone_of` in place of `cylinder_of`. The two curve readers
 /// are literally the same closures: they classify a source curve into a
 /// [`formal::SourceCurveFamily`] and know nothing about the ambient surface, so
@@ -3381,7 +3405,7 @@ fn torus_polygon_from_realized(
 ///
 /// `None` is "not eligible, nothing was attempted": no certified torus support.
 /// `Some` means the certification pipeline was actually run and the value is
-/// its verdict — `Ok` for a certified and realized annulus, `Err` for a typed
+/// its verdict â€” `Ok` for a certified and realized annulus, `Err` for a typed
 /// refusal.
 ///
 /// This adapter mirrors [`run_cylinder_band_for_face`] and
@@ -3530,9 +3554,9 @@ where
         }
     };
 
-    // 6. Primitivity: only parallel `(±1, 0)` and meridian `(0, ±1)` windings
-    //    are admitted — the two-complete-circle parallel/meridian annulus
-    //    theorem. Diagonal `(±1, ±1)` and other primitive windings are refused.
+    // 6. Primitivity: only parallel `(Â±1, 0)` and meridian `(0, Â±1)` windings
+    //    are admitted â€” the two-complete-circle parallel/meridian annulus
+    //    theorem. Diagonal `(Â±1, Â±1)` and other primitive windings are refused.
     let family_a = witness_a.family;
     let family_b = witness_b.family;
     if !matches!(family_a, CircleFamily::Parallel | CircleFamily::Meridian)
@@ -3552,14 +3576,14 @@ where
     // 8. Effective orientation sign. The winding from `lift_circle_winding`
     //    includes the `Processor`'s curve orientation (folded into
     //    `sweep_axis`), but the material-authority check must use the sign
-    //    WITHOUT the curve orientation — the curve orientation is a property
+    //    WITHOUT the curve orientation â€” the curve orientation is a property
     //    of the curve's parameterization, not of the loop's traversal in the
     //    face's boundary. The edge use orientation (already folded in
     //    `CompressedEdgeIndex::orientation`) is the correct place for the
     //    traversal direction.
     //
     //    `sign_c` (without curve orientation) = `winding_sign / curve_orientation`
-    //    = `winding_sign * curve_orientation` (since orientation is ±1).
+    //    = `winding_sign * curve_orientation` (since orientation is Â±1).
     let curve_orient_a = if pa.curve_orientation { 1 } else { -1 };
     let curve_orient_b = if pb.curve_orientation { 1 } else { -1 };
     let sign_a = (if family_a == CircleFamily::Parallel {
@@ -3675,7 +3699,7 @@ fn emit_cylinder_probe(
 /// One tab-separated record per multi-bound candidate face, for the
 /// planar-holes funnel.
 ///
-/// A face that delegated — no inner bounds — is not reported: it belongs to the
+/// A face that delegated â€” no inner bounds â€” is not reported: it belongs to the
 /// `SLICE` funnel, and emitting it here would double-count it.
 fn emit_holes_probe(
     source_face_id: Option<u64>,
@@ -3733,8 +3757,8 @@ fn emit_holes_probe(
 ///
 /// `crossings` is the number package 6 turns on. Read over the corpus's lost
 /// planar faces it says whether the legacy tessellator's
-/// `ConstraintInsertionIncomplete` is a real arrangement — boundary curves that
-/// genuinely cross, needing face extraction and parity selection — or an
+/// `ConstraintInsertionIncomplete` is a real arrangement â€” boundary curves that
+/// genuinely cross, needing face extraction and parity selection â€” or an
 /// artefact of approximating those curves by chords before asking. The
 /// polyline the legacy path asks on is a different object from the analytic
 /// curve this track asks on, and only the second answer is about the face.
@@ -3907,8 +3931,25 @@ fn shell_create_polygon<S: PreMeshableSurface>(
 ) -> Face<Point3, PolylineCurve, Option<PolygonMesh>> {
     let preboundary = wires
         .iter()
-        .map(|wire: &Wire<_, _>| {
-            let wire_iter = wire.iter().map(Edge::oriented_curve);
+        .enumerate()
+        .map(|(bound_index, wire): (usize, &Wire<_, _>)| {
+            // The shell path has no `CompressedEdgeIndex`, so the synthetic
+            // identity is minted from the wire's own structure: the bound's
+            // position and each edge use's position, with the orientation the
+            // edge itself carries (`Edge::oriented_curve` has already applied
+            // it to the curve).
+            let bound = BoundId(bound_index);
+            let wire_iter = wire.iter().enumerate().map(|(use_index, edge)| {
+                let curve = edge.oriented_curve();
+                SourcePolyline {
+                    curve,
+                    source: SourceEdgeUse {
+                        bound,
+                        index: use_index,
+                        orientation: edge.orientation(),
+                    },
+                }
+            });
             PolyBoundaryPiece::try_new(surface, wire_iter, &sp, tol, lattice)
         })
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -3997,13 +4038,52 @@ fn reconcile_singular_transition<S: ParametricSurface3D>(
     }
 }
 
+/// One tessellated source edge use, before the wire is flattened.
+///
+/// The wrapper exists so `PolyBoundaryPiece::try_new` can record *which* source
+/// edge use each presented polyline came from. `create_edge` still emits the
+/// clone/inverse of the curve exactly as before â€” the wrapper only adds
+/// identity, it never changes curve geometry or ordering.
+#[derive(Clone, Debug)]
+struct SourcePolyline {
+    curve: PolylineCurve,
+    source: SourceEdgeUse,
+}
+
+/// The source-use provenance of one boundary segment: which source edge uses
+/// contributed the presented segment between two consecutive points.
+///
+/// An empty entry means the segment is synthetic â€” a seam, a closure bridge, a
+/// collapsed-periodic bridge, or a reconstructed dense run â€” and carries no
+/// source edge use. Source segments carry exactly their own [`SourceEdgeUse`].
+/// Nothing in INFRA consumes this beyond recording it; PLANAR-C reads it when a
+/// realized constraint edge's provenance is needed.
+type SegmentSources = Vec<SourceEdgeUse>;
+
+/// The per-segment provenance of a synthetic part: one empty contributor set
+/// per internal segment, because no source edge use describes it.
+///
+/// `point_count` is the part's point count; a part's segments number one fewer.
+fn untagged_sources(point_count: usize) -> Vec<SegmentSources> {
+    vec![Vec::new(); point_count.saturating_sub(1)]
+}
+
 #[derive(Debug, Default, Clone)]
-struct PolyBoundaryPiece(Vec<SurfacePoint>);
+struct PolyBoundaryPiece(Vec<SurfacePoint>, Vec<SegmentSources>);
 
 impl PolyBoundaryPiece {
+    /// A piece whose segments carry no source attribution.
+    ///
+    /// Test construction only: a piece built from synthetic points has no
+    /// source edge uses, so its provenance is empty rather than fabricated.
+    fn untagged(points: Vec<SurfacePoint>) -> Self {
+        let n = points.len();
+        Self(points, vec![Vec::new(); n])
+    }
+
     fn try_new<S: PreMeshableSurface>(
         surface: &S,
-        wire: impl Iterator<Item = PolylineCurve>,
+        wire: impl Iterator<Item = SourcePolyline>,
         sp: impl SP<S>,
         tol: f64,
         lattice: &CertifiedLattice,
@@ -4019,25 +4099,32 @@ impl PolyBoundaryPiece {
         // is. A bound winding twice is either fed two once-winding pieces --
         // assembly -- or one piece that the lift doubles. This separates them.
         let mut piece_lengths: Vec<usize> = Vec::new();
-        let mut bdry3d: Vec<Point3> = wire
-            .inspect(|poly_edge| piece_lengths.push(poly_edge.len()))
-            .flat_map(|poly_edge| {
-                if poly_edge.len() == 2 {
-                    let p0 = poly_edge[0];
-                    let p1 = poly_edge[1];
-                    let mut pts = Vec::new();
-                    const N: usize = 8;
-                    for i in 0..N {
-                        let frac = i as f64 / N as f64;
-                        pts.push(p0 + (p1 - p0) * frac);
-                    }
-                    pts
-                } else {
-                    let n = poly_edge.len().saturating_sub(1);
-                    poly_edge.into_iter().take(n).collect()
+        // The flattened 3D samples, and the source edge use each one came from.
+        // A point inside a straight edge's N=8 expansion belongs to that edge;
+        // a lift-refinement midpoint inherits its parent sample's source; a
+        // degenerate-periodic reconstruction belongs to nothing.
+        let mut bdry3d: Vec<Point3> = Vec::new();
+        let mut source_tags: Vec<Option<SourceEdgeUse>> = Vec::new();
+        for poly_edge in wire {
+            piece_lengths.push(poly_edge.curve.len());
+            let source = poly_edge.source;
+            if poly_edge.curve.len() == 2 {
+                let p0 = poly_edge.curve[0];
+                let p1 = poly_edge.curve[1];
+                let mut pts = Vec::new();
+                const N: usize = 8;
+                for i in 0..N {
+                    let frac = i as f64 / N as f64;
+                    pts.push(p0 + (p1 - p0) * frac);
                 }
-            })
-            .collect();
+                bdry3d.extend(pts);
+                source_tags.extend(std::iter::repeat_n(Some(source), N));
+            } else {
+                let n = poly_edge.curve.len().saturating_sub(1);
+                bdry3d.extend(poly_edge.curve.into_iter().take(n));
+                source_tags.extend(std::iter::repeat_n(Some(source), n));
+            }
+        }
         // A wire that contributed no points cannot bound a face. This
         // constructor is already fallible, so say so rather than closing the
         // boundary by indexing a vector that is empty. Real exports do produce
@@ -4046,6 +4133,7 @@ impl PolyBoundaryPiece {
             return Err(TessellationFailureReason::BoundaryWireEmpty);
         }
         bdry3d.push(bdry3d[0]);
+        source_tags.push(source_tags[0]);
         let lift_probe = std::env::var_os("TRUCK_PROBE_LIFT").is_some();
         // Apex/pole singular-transition recovery. On by default: it is
         // refinement-only (it fires solely where the legacy path would return
@@ -4066,7 +4154,7 @@ impl PolyBoundaryPiece {
         // raw variable: this site and `by_search_nearest_parameter` have to
         // agree, and when they did not, the deep probe filled its thread-local
         // for every failing point and the walk returned before reading any of
-        // it — every witness silently empty.
+        // it â€” every witness silently empty.
         let proj_probe = projection_probe_enabled();
         let mut failed_points = 0usize;
         // PROJ-003 Stage A per-face accumulators: boundary points the residual
@@ -4107,23 +4195,30 @@ impl PolyBoundaryPiece {
         let mut previous: Option<(f64, f64)> = None;
         let mut previous_pt: Option<Point3> = None;
         let mut vec: Vec<SurfacePoint> = Vec::with_capacity(bdry3d.len());
+        // The source use each lifted point belongs to, parallel to `vec`. A
+        // lift-refinement midpoint inherits the parent sample's source; the
+        // degenerate-periodic reconstruction clears every entry. Only the
+        // final segment provenance is derived from this; the tags themselves
+        // are not retained.
+        let mut lifted_tags: Vec<Option<SourceEdgeUse>> = Vec::with_capacity(bdry3d.len());
         // Samples still to lift, most recent last. A step whose periodic
         // representative is ambiguous pushes its own chord midpoint and then
         // revisits itself, so density is spent only where the lift is unsafe
         // rather than across every edge in the model.
         // The flag marks a point this refinement invented rather than one the
-        // edge supplied.
-        let mut pending: Vec<(Point3, bool)> = Vec::new();
-        for point in &bdry3d {
+        // edge supplied; the tag is the point's source use, inherited by any
+        // midpoint it spawns.
+        let mut pending: Vec<(Point3, bool, Option<SourceEdgeUse>)> = Vec::new();
+        for (point, tag) in bdry3d.iter().zip(&source_tags) {
             pending.clear();
-            pending.push((*point, false));
+            pending.push((*point, false, *tag));
             let mut refinements = 0usize;
             // The originating real boundary sample for the current bisection
             // chain. Set when the first real sample is found ambiguous; read at
             // exhaustion to admit a singular half-period transition on the
             // original sample (not the synthetic midpoint that exhausted).
-            let mut origin: Option<(f64, f64, Point3)> = None;
-            while let Some((pt, synthetic)) = pending.pop() {
+            let mut origin: Option<(f64, f64, Point3, Option<SourceEdgeUse>)> = None;
+            while let Some((pt, synthetic, tag)) = pending.pop() {
                 let projected = sp(surface, pt, previous);
                 // A midpoint is only a device for disambiguating the step, and
                 // a chord midpoint of a coarse arc does not lie on the surface,
@@ -4137,8 +4232,8 @@ impl PolyBoundaryPiece {
                         let attempt = last_projection_attempt();
                         // PROJ-003 Stage A: before giving the face up, admit a
                         // residual-certified iterate from a start production
-                        // already used. Runs only here — after the whole legacy
-                        // chain returned `None` — so it is refinement-only.
+                        // already used. Runs only here â€” after the whole legacy
+                        // chain returned `None` â€” so it is refinement-only.
                         if let Some((uv, residual)) =
                             residual_certified_recovery(surface, pt, tol, attempt)
                         {
@@ -4152,7 +4247,9 @@ impl PolyBoundaryPiece {
                             // after Stage A refused the point, so neither a
                             // legacy success nor a Stage-A success can be
                             // altered by it.
-                            residual_certified_seed_recovery(surface, pt, tol, attempt)
+                            residual_certified_seed_recovery(
+                                surface, pt, tol, attempt,
+                            )
                         {
                             recovered_b_points += 1;
                             recovered_b_residual_min = recovered_b_residual_min.min(residual);
@@ -4162,7 +4259,9 @@ impl PolyBoundaryPiece {
                             // PROJ-003 Stage C: domain/contract recovery. Runs
                             // only after the whole legacy chain, Stage A, and
                             // Stage B all refused the point.
-                            residual_certified_domain_recovery(surface, pt, tol, attempt, lattice)
+                            residual_certified_domain_recovery(
+                                    surface, pt, tol, attempt, lattice,
+                                )
                         {
                             recovered_c_points += 1;
                             recovered_c_residual_min = recovered_c_residual_min.min(residual);
@@ -4190,7 +4289,8 @@ impl PolyBoundaryPiece {
                                     let prod = attempt.prod_best;
                                     let seed = attempt.seed_best;
                                     let best = better_outcome(prod, seed);
-                                    let (verdict, route) = classify_projection_point(prod, seed, tol);
+                                    let (verdict, route) =
+                                        classify_projection_point(prod, seed, tol);
                                     if best.ran() {
                                         let ratio = best.residual / tol;
                                         deep_best_ratio = deep_best_ratio.min(ratio);
@@ -4202,20 +4302,11 @@ impl PolyBoundaryPiece {
                                     // domain/contract point, its mechanism class.
                                     let domain_class = match verdict {
                                         diagnosis::PointVerdict::DomainOrContractIssue => {
-                                            let within = |o: &NearestOutcome| {
-                                                o.ran() && o.residual <= tol
-                                            };
-                                            let candidate = if within(&prod) {
-                                                prod
-                                            } else {
-                                                seed
-                                            };
+                                            let within =
+                                                |o: &NearestOutcome| o.ran() && o.residual <= tol;
+                                            let candidate = if within(&prod) { prod } else { seed };
                                             Some(classify_domain_point(
-                                                candidate,
-                                                tol,
-                                                urange,
-                                                vrange,
-                                                lattice,
+                                                candidate, tol, urange, vrange, lattice,
                                             ))
                                         }
                                         _ => None,
@@ -4233,7 +4324,7 @@ impl PolyBoundaryPiece {
                             }
                             continue;
                         } else {
-                            return Err(TessellationFailureReason::BoundaryProjectionFailed)
+                            return Err(TessellationFailureReason::BoundaryProjectionFailed);
                         }
                     }
                 };
@@ -4243,9 +4334,9 @@ impl PolyBoundaryPiece {
                 // lies on the surface, so a boundary belonging to a different
                 // face still yields a plausible parameter, and the uv path
                 // built from it is smooth enough to triangulate into a large
-                // wrong region. Every symptom chased downstream of this — a
+                // wrong region. Every symptom chased downstream of this â€” a
                 // doubled periodic winding, bounds landing in different period
-                // copies, a domain spanning the whole chart — was a reading of
+                // copies, a domain spanning the whole chart â€” was a reading of
                 // that path as though it meant something.
                 //
                 // The contract is that a face's boundary lies on its own
@@ -4308,68 +4399,68 @@ impl PolyBoundaryPiece {
                             f64::abs(now - before) >= AMBIGUOUS_STEP_FRACTION * period
                         })
                     };
-                if ambiguous(u, u0, up) || ambiguous(v, v0, vp) {
-                    // Remember the originating real sample for this bisection
-                    // chain. Only the first real sample is the boundary point;
-                    // every later sample in the chain is a synthetic midpoint.
-                    if !synthetic && origin.is_none() {
-                        origin = Some((u, v, pt));
-                    }
-                    if refinements < MAX_LIFT_REFINEMENTS {
-                        refinements += 1;
-                        pending.push((pt, synthetic));
-                        pending.push((previous_point.midpoint(pt), true));
-                        continue;
-                    }
-                    // G2. Bisection is exhausted and the step is still
-                    // ambiguous, so no evidence distinguishes the two
-                    // candidate period copies. Previously control fell
-                    // through here and the ambiguous value was pushed with
-                    // nothing recording that it was a guess — the face then
-                    // proceeded as though the lift were certified. FS
-                    // Def. 14 requires a continuous lift; an unresolved
-                    // branch is not one.
-                    //
-                    // Singular-transition recovery (TRUCK_LIFT_SINGULAR_RECOVERY,
-                    // default off): exhaustion is the singularity certificate.
-                    // A regular surface -- e.g. a cylinder -- resolves a
-                    // half-period step via bisection (the chord midpoint
-                    // projects to the mid-angle and the step shrinks), so it
-                    // never reaches this branch and is never admitted. Only a
-                    // rank-deficient transition (cone apex, sphere pole) leaves
-                    // the step unshrunk at exhaustion: the chord midpoint is
-                    // off-surface and projects to one of the two branches. At
-                    // the exact half-period tie the two candidate deck copies
-                    // are equidistant and differ by one full period, so the
-                    // nearest-copy representative is a continuous half-period
-                    // step rather than a full-period fold. Admit the ORIGINAL
-                    // real sample (not the synthetic midpoint that exhausted).
-                    let half_period_tie = |now: f64, before: f64, period: Option<f64>| {
-                        period.is_some_and(|period| {
-                            ((f64::abs(now - before) / period) - 0.5).abs()
-                                <= SINGULAR_HALF_PERIOD_TOL
-                        })
-                    };
-                    if lift_singular_recovery {
-                        if let Some((ou, ov, opt_pt)) = origin {
-                            let tie = (!ambiguous(ou, u0, up)
-                                || half_period_tie(ou, u0, up))
-                                && (!ambiguous(ov, v0, vp)
-                                    || half_period_tie(ov, v0, vp));
-                            if tie {
-                                vec.push((Point2::new(ou, ov), opt_pt).into());
-                                previous = Some((ou, ov));
-                                previous_pt = Some(opt_pt);
-                                // Discard remaining synthetic midpoints; the
-                                // walk continues from the admitted sample.
-                                break;
+                    if ambiguous(u, u0, up) || ambiguous(v, v0, vp) {
+                        // Remember the originating real sample for this bisection
+                        // chain. Only the first real sample is the boundary point;
+                        // every later sample in the chain is a synthetic midpoint.
+                        if !synthetic && origin.is_none() {
+                            origin = Some((u, v, pt, tag));
+                        }
+                        if refinements < MAX_LIFT_REFINEMENTS {
+                            refinements += 1;
+                            pending.push((pt, synthetic, tag));
+                            pending.push((previous_point.midpoint(pt), true, tag));
+                            continue;
+                        }
+                        // G2. Bisection is exhausted and the step is still
+                        // ambiguous, so no evidence distinguishes the two
+                        // candidate period copies. Previously control fell
+                        // through here and the ambiguous value was pushed with
+                        // nothing recording that it was a guess â€” the face then
+                        // proceeded as though the lift were certified. FS
+                        // Def. 14 requires a continuous lift; an unresolved
+                        // branch is not one.
+                        //
+                        // Singular-transition recovery (TRUCK_LIFT_SINGULAR_RECOVERY,
+                        // default off): exhaustion is the singularity certificate.
+                        // A regular surface -- e.g. a cylinder -- resolves a
+                        // half-period step via bisection (the chord midpoint
+                        // projects to the mid-angle and the step shrinks), so it
+                        // never reaches this branch and is never admitted. Only a
+                        // rank-deficient transition (cone apex, sphere pole) leaves
+                        // the step unshrunk at exhaustion: the chord midpoint is
+                        // off-surface and projects to one of the two branches. At
+                        // the exact half-period tie the two candidate deck copies
+                        // are equidistant and differ by one full period, so the
+                        // nearest-copy representative is a continuous half-period
+                        // step rather than a full-period fold. Admit the ORIGINAL
+                        // real sample (not the synthetic midpoint that exhausted).
+                        let half_period_tie = |now: f64, before: f64, period: Option<f64>| {
+                            period.is_some_and(|period| {
+                                ((f64::abs(now - before) / period) - 0.5).abs()
+                                    <= SINGULAR_HALF_PERIOD_TOL
+                            })
+                        };
+                        if lift_singular_recovery {
+                            if let Some((ou, ov, opt_pt, origin_tag)) = origin {
+                                let tie = (!ambiguous(ou, u0, up) || half_period_tie(ou, u0, up))
+                                    && (!ambiguous(ov, v0, vp) || half_period_tie(ov, v0, vp));
+                                if tie {
+                                    vec.push((Point2::new(ou, ov), opt_pt).into());
+                                    lifted_tags.push(origin_tag);
+                                    previous = Some((ou, ov));
+                                    previous_pt = Some(opt_pt);
+                                    // Discard remaining synthetic midpoints; the
+                                    // walk continues from the admitted sample.
+                                    break;
+                                }
                             }
                         }
+                        return Err(TessellationFailureReason::AmbiguousLift);
                     }
-                    return Err(TessellationFailureReason::AmbiguousLift);
-                }
                 }
                 vec.push((Point2::new(u, v), pt).into());
+                lifted_tags.push(tag);
                 previous = Some((u, v));
                 previous_pt = Some(pt);
             }
@@ -4377,10 +4468,8 @@ impl PolyBoundaryPiece {
         // PROJ-003 Stage A probe: one record per face with admitted points, so
         // the reconciliation can track each admission through the downstream
         // walk to its terminal outcome. Deliberately separate from the PROJ
-        // record above — a face admitted and then lost later needs both lines.
-        if (recovered_points > 0
-            || recovered_b_points > 0
-            || recovered_c_points > 0)
+        // record above â€” a face admitted and then lost later needs both lines.
+        if (recovered_points > 0 || recovered_b_points > 0 || recovered_c_points > 0)
             && (proj_probe || std::env::var_os("TRUCK_PROBE_PROJ_RECOVERY").is_some())
         {
             let (source_face_id, declared_face_index, _) =
@@ -4444,9 +4533,7 @@ impl PolyBoundaryPiece {
                     seed_cap_hit: deep_seed_cap_hit,
                     seeds_offered: deep_seeds_offered,
                     tolerance: tol,
-                    best_residual: deep_best_ratio
-                        .is_finite()
-                        .then(|| deep_best_ratio * tol),
+                    best_residual: deep_best_ratio.is_finite().then(|| deep_best_ratio * tol),
                     best_residual_over_tol: deep_best_ratio.is_finite().then_some(deep_best_ratio),
                     worst_residual_over_tol: (deep_worst_ratio > 0.0).then_some(deep_worst_ratio),
                     winning_route,
@@ -4500,6 +4587,10 @@ impl PolyBoundaryPiece {
                         dense.push((Point2::new(u, v0), pt).into());
                     }
                     vec = dense;
+                    // The reconstruction's samples are synthesized from the
+                    // surface, not lifted from source trim: no source edge use
+                    // describes them, so every provenance tag is cleared.
+                    lifted_tags = vec![None; vec.len()];
                 }
             } else if let Some(vp) = lattice.declared_v_period() {
                 let p0 = bdry3d[0];
@@ -4513,6 +4604,7 @@ impl PolyBoundaryPiece {
                         dense.push((Point2::new(u0, v), pt).into());
                     }
                     vec = dense;
+                    lifted_tags = vec![None; vec.len()];
                 }
             }
         }
@@ -4545,8 +4637,8 @@ impl PolyBoundaryPiece {
                 period.map_or(0.0, |period| (hi - lo) / period)
             };
             // Span conflates two different defects, so report the pair that
-            // separates them. `k` is the net winding — how many periods the
-            // boundary ends away from where it started — and `V` the total
+            // separates them. `k` is the net winding â€” how many periods the
+            // boundary ends away from where it started â€” and `V` the total
             // variation, how far it travelled altogether. Circling once gives
             // |k| = 1 with V ~ 1. |k| = 1 with V ~ 2 means it went out and came
             // back, a branch chosen wrongly part way. |k| = 2 with V ~ 2 means
@@ -4717,9 +4809,22 @@ impl PolyBoundaryPiece {
             let Point2 { x: u0, y: v0 } = last.uv;
             if surface.uder(u0, v0).so_small() || surface.vder(u0, v0).so_small() {
                 vec.push(vec[0]);
+                lifted_tags.push(lifted_tags[0]);
             }
         }
-        Ok(Self(vec))
+        debug_assert_eq!(
+            vec.len(),
+            lifted_tags.len(),
+            "every lifted boundary point must carry a provenance tag",
+        );
+        // One contributor set per cyclic segment: `sources[k]` names the source
+        // edge uses of `points[k] -> points[k + 1]`. A source sample's tag is
+        // its own use; a synthetic sample contributes nothing.
+        let n = vec.len();
+        let sources: Vec<SegmentSources> = (0..n)
+            .map(|k| lifted_tags[k].iter().copied().collect())
+            .collect();
+        Ok(Self(vec, sources))
     }
 }
 
@@ -4738,7 +4843,7 @@ fn get_mindiff(u: f64, u0: f64, up: f64) -> f64 {
 /// slack allowed for the chord approximation and for imperfect exports, not a
 /// licence to trim a surface with a curve belonging to something else.
 ///
-/// **Off by default, deliberately.** The violation this detects is real —
+/// **Off by default, deliberately.** The violation this detects is real â€”
 /// swept on `00009190`, the rejected points sit at a median of 191x tolerance
 /// and a maximum of 617x, and loosening the factor twentyfold removes only 62
 /// of 315 rejections, so this is a population and not a threshold. But
@@ -4753,7 +4858,7 @@ const COMPATIBILITY_FACTOR: f64 = f64::INFINITY;
 ///
 /// Sweeping the factor is what established that the gate names a real
 /// population rather than a threshold, and a rebuild per sample would have made
-/// that a five-build afternoon. Read once — this sits in the per-boundary-point
+/// that a five-build afternoon. Read once â€” this sits in the per-boundary-point
 /// loop, and an env lookup there would be a measurable cost charged to every
 /// model.
 fn compatibility_factor() -> f64 {
@@ -4772,7 +4877,7 @@ fn compatibility_factor() -> f64 {
 ///
 /// [`get_mindiff`] takes the copy nearest the previous parameter, which is the
 /// right answer only while the true step is under half a period. At exactly
-/// half, the two candidates are equidistant and the tie is broken arbitrarily —
+/// half, the two candidates are equidistant and the tie is broken arbitrarily â€”
 /// measured advancing `-0.5` of a period where the curve went `+0.5`, which
 /// folds a full turn onto itself and makes a period-wrapping boundary look like
 /// a closed loop. The margin below `0.5` keeps numerical noise clear of the tie.
@@ -4800,7 +4905,7 @@ const SINGULAR_HALF_PERIOD_TOL: f64 = 0.02;
 /// How many independent ray directions [`PolyBoundary::include`] may try before
 /// reporting that containment is undecidable at a point.
 ///
-/// Cost is confined to the abort path — `find_map` stops at the first ray that
+/// Cost is confined to the abort path â€” `find_map` stops at the first ray that
 /// decides. Measured on ABC `00009190`: 18% of the aborts left by a single cast
 /// are resolved by alternate directions, and every one of those resolved to
 /// *outside*, changing no output. Whatever still aborts after eight directions
@@ -4858,7 +4963,7 @@ fn periodic_displacement(start: f64, end: f64, period: f64, tolerance: f64) -> O
 ///
 /// **G6, phase 2A.** `PolyBoundary::new` stitches synthesised closure and seam
 /// segments into the *same* point vectors as source-derived trim, after which
-/// nothing distinguishes them — so `insert_to` tagged every segment
+/// nothing distinguishes them â€” so `insert_to` tagged every segment
 /// `PhysicalBoundary`, fabricated geometry included. The fix is not to
 /// reclassify afterwards but to record the origin where the segment is created,
 /// which is the only place it is known.
@@ -4869,7 +4974,7 @@ pub enum SegmentOrigin {
     /// Synthesised to close an open piece against the working extent. No source
     /// entity describes it (`DOM-ARTIFICIAL-CLOSURE-001`).
     SyntheticClosure,
-    /// Synthesised to bridge a collapsed periodic pair — a seam across a
+    /// Synthesised to bridge a collapsed periodic pair â€” a seam across a
     /// degenerate direction rather than a trim boundary.
     Seam,
 }
@@ -4890,14 +4995,19 @@ impl SegmentOrigin {
     }
 }
 
-/// A closed boundary loop in parameter space, carrying each segment's origin.
+/// A closed boundary loop in parameter space, carrying each segment's origin
+/// and source-use provenance.
 ///
-/// `origins[i]` describes the segment from `points[i]` to `points[i + 1]`,
-/// cyclically, so the two vectors have equal length by construction.
+/// `origins[i]` and `source_uses[i]` describe the segment from `points[i]` to
+/// `points[i + 1]`, cyclically, so the three vectors have equal length by
+/// construction. `source_uses[i]` is the contributor set of that segment:
+/// empty for a synthetic seam/closure, the segment's own [`SourceEdgeUse`]
+/// otherwise.
 #[derive(Debug, Default, Clone)]
 struct BoundaryLoop {
     points: Vec<SurfacePoint>,
     origins: Vec<SegmentOrigin>,
+    source_uses: Vec<SegmentSources>,
 }
 
 impl BoundaryLoop {
@@ -4905,10 +5015,16 @@ impl BoundaryLoop {
     /// the first part's start. Every join is a shared endpoint, so no segment
     /// is invented; this is the stitching case, where each run was constructed
     /// to begin where the previous one ended.
-    fn chained(parts: impl IntoIterator<Item = (Vec<SurfacePoint>, SegmentOrigin)>) -> Self {
+    ///
+    /// Each part's `source_uses` runs parallel to its internal segments
+    /// (`source_uses[i]` labels `part[i] -> part[i + 1]`), one entry fewer
+    /// than the part's point count.
+    fn chained(
+        parts: impl IntoIterator<Item = (Vec<SurfacePoint>, Vec<SegmentSources>, SegmentOrigin)>,
+    ) -> Self {
         let mut path = BoundaryPath::default();
-        for (part, origin) in parts {
-            path.append(part, origin, PartJoin::SharedEndpoint);
+        for (part, sources, origin) in parts {
+            path.append(part, sources, origin, PartJoin::SharedEndpoint);
         }
         path.close(PartJoin::SharedEndpoint)
     }
@@ -4919,51 +5035,80 @@ impl BoundaryLoop {
     /// The wrap's own origin is dropped because that segment ceases to exist;
     /// every other segment keeps the label it was created with. This is what
     /// lets a loop be re-joined to something else without its provenance being
-    /// rebuilt from scratch — taking `.points` and relabelling would, for
+    /// rebuilt from scratch â€” taking `.points` and relabelling would, for
     /// instance, silently turn a periodic walk's deck seam back into `Source`.
     fn into_path_cutting_wrap(self) -> BoundaryPath {
         let Self {
             points,
             mut origins,
+            mut source_uses,
         } = self;
         origins.pop();
-        BoundaryPath { points, origins }
+        source_uses.pop();
+        BoundaryPath {
+            points,
+            origins,
+            source_uses,
+        }
     }
 
     /// Checked constructor. The equal-length relation is the type's whole
     /// invariant, so it is enforced rather than documented.
-    fn new(points: Vec<SurfacePoint>, origins: Vec<SegmentOrigin>) -> Self {
+    fn new(
+        points: Vec<SurfacePoint>,
+        origins: Vec<SegmentOrigin>,
+        source_uses: Vec<SegmentSources>,
+    ) -> Self {
         assert_eq!(
             points.len(),
             origins.len(),
             "every boundary segment must carry exactly one origin",
         );
-        Self { points, origins }
+        assert_eq!(
+            points.len(),
+            source_uses.len(),
+            "every boundary segment must carry exactly one provenance entry",
+        );
+        Self {
+            points,
+            origins,
+            source_uses,
+        }
     }
 
     /// A loop whose duplicate endpoint has already been removed, so every
-    /// cyclic segment — including the wrap from the last point back to the
-    /// first — is source-derived.
-    fn euclidean_source_loop(points: Vec<SurfacePoint>) -> Self {
+    /// cyclic segment â€” including the wrap from the last point back to the
+    /// first â€” is source-derived.
+    ///
+    /// `source_uses` is the piece's provenance with the degenerate wrap entry
+    /// dropped: it still has one entry per remaining point.
+    fn euclidean_source_loop(points: Vec<SurfacePoint>, source_uses: Vec<SegmentSources>) -> Self {
         let origins = vec![SegmentOrigin::Source; points.len()];
-        Self::new(points, origins)
+        Self::new(points, origins, source_uses)
     }
 
     /// A lifted walk that closes only *modulo the lattice*: its last point is
-    /// `first + Lδ`, a distinct parameter point, and is retained.
+    /// `first + LÎ´`, a distinct parameter point, and is retained.
     ///
-    /// The wrap segment is therefore **not** another source trim segment — it
+    /// The wrap segment is therefore **not** another source trim segment â€” it
     /// is the deck closure, and labelling it `Source` would feed the material
     /// solve a boundary no source entity describes. Properly this should not be
     /// a geometric segment at all but a deck identification; until the quotient
     /// stage exists to hold that relation, it is marked `Seam`, which keeps the
-    /// current toggling behaviour while naming what it is.
-    fn periodic_source_walk(points: Vec<SurfacePoint>) -> Self {
+    /// current toggling behaviour while naming what it is. Its provenance is
+    /// cleared with the same intent: the closure has no source edge use.
+    fn periodic_source_walk(
+        points: Vec<SurfacePoint>,
+        mut source_uses: Vec<SegmentSources>,
+    ) -> Self {
         let mut origins = vec![SegmentOrigin::Source; points.len()];
         if let Some(wrap) = origins.last_mut() {
             *wrap = SegmentOrigin::Seam;
         }
-        Self::new(points, origins)
+        if let Some(wrap) = source_uses.last_mut() {
+            wrap.clear();
+        }
+        Self::new(points, origins, source_uses)
     }
 }
 
@@ -4972,8 +5117,8 @@ impl BoundaryLoop {
 /// **Stated by the caller, never inferred.** An earlier version decided this by
 /// testing `tail.uv.distance(next[0].uv) < TOLERANCE`, which is wrong twice
 /// over. A UV epsilon cannot distinguish a retained shared endpoint from a deck
-/// identification, a singular attachment, or an unresolved relation — they are
-/// different facts that can present with the same coordinates — and its
+/// identification, a singular attachment, or an unresolved relation â€” they are
+/// different facts that can present with the same coordinates â€” and its
 /// tolerance has no fixed physical meaning across parameterisations. The
 /// stitching site already knows which case it is building; the type now makes
 /// it say so.
@@ -4989,52 +5134,87 @@ enum PartJoin {
 
 /// An *open* chain of boundary segments, before it is closed into a loop.
 ///
-/// `origins[i]` labels the segment `points[i] -> points[i + 1]`, so there is
-/// exactly one fewer origin than point. Keeping the open case in its own type
-/// is what makes the closing segment an explicit decision rather than an
-/// accident of indexing.
+/// `origins[i]` and `source_uses[i]` label the segment `points[i] -> points[i + 1]`,
+/// so there is exactly one fewer origin than point. Keeping the open case in
+/// its own type is what makes the closing segment an explicit decision rather
+/// than an accident of indexing.
 #[derive(Debug, Default, Clone)]
 struct BoundaryPath {
     points: Vec<SurfacePoint>,
     origins: Vec<SegmentOrigin>,
+    source_uses: Vec<SegmentSources>,
 }
 
 impl BoundaryPath {
-    fn start(points: Vec<SurfacePoint>, origin: SegmentOrigin) -> Self {
+    fn start(
+        points: Vec<SurfacePoint>,
+        source_uses: Vec<SegmentSources>,
+        origin: SegmentOrigin,
+    ) -> Self {
         let origins = vec![origin; points.len().saturating_sub(1)];
-        Self { points, origins }
+        Self {
+            points,
+            origins,
+            source_uses,
+        }
     }
 
     /// Append a part, saying explicitly how it meets what is already here.
     ///
     /// A shared endpoint drops the duplicate point and creates no segment. A
     /// bridge keeps **both** endpoints and inserts one labelled segment between
-    /// them — which is the case the previous implementation got wrong: it
+    /// them â€” which is the case the previous implementation got wrong: it
     /// dropped every part's final point unconditionally, so a bridge silently
     /// replaced `a1 -> a2 -> b0` with the shortcut `a1 -> b0`, deleting a real
     /// source segment precisely when the distinction mattered most.
-    fn append(&mut self, mut part: Vec<SurfacePoint>, origin: SegmentOrigin, join: PartJoin) {
+    ///
+    /// `part_sources[i]` labels `part[i] -> part[i + 1]`, one entry fewer than
+    /// the part's point count. On a shared endpoint the part's first entry
+    /// becomes the join segment into the retained head; on a bridge the join is
+    /// synthetic and carries no source.
+    fn append(
+        &mut self,
+        mut part: Vec<SurfacePoint>,
+        part_sources: Vec<SegmentSources>,
+        origin: SegmentOrigin,
+        join: PartJoin,
+    ) {
         if part.is_empty() {
             return;
         }
         if self.points.is_empty() {
-            *self = Self::start(part, origin);
+            *self = Self::start(part, part_sources, origin);
             return;
         }
         match join {
             PartJoin::SharedEndpoint => {
                 part.remove(0);
             }
-            PartJoin::Bridge(bridge) => self.origins.push(bridge),
+            PartJoin::Bridge(bridge) => {
+                self.origins.push(bridge);
+                self.source_uses.push(Vec::new());
+            }
         }
+        // After a shared-endpoint head drop, `part_sources` still names the
+        // part's original segments; its first entry is the join into the
+        // retained head, the rest are the part's own.
+        let (join_source, own_sources): (SegmentSources, &[SegmentSources]) = match join {
+            PartJoin::SharedEndpoint => (
+                part_sources.first().cloned().unwrap_or_default(),
+                &part_sources[1.min(part_sources.len())..],
+            ),
+            PartJoin::Bridge(_) => (Vec::new(), &part_sources[..]),
+        };
         self.origins
             .extend(std::iter::repeat_n(origin, part.len().saturating_sub(1)));
+        self.source_uses.extend(own_sources.iter().cloned());
         if !part.is_empty() {
             // The segment from the current tail into the first retained point
             // of `part` belongs to `part` when they shared an endpoint, and was
             // already labelled as the bridge otherwise.
             if matches!(join, PartJoin::SharedEndpoint) {
                 self.origins.push(origin);
+                self.source_uses.push(join_source);
             }
             self.points.extend(part);
         }
@@ -5052,14 +5232,19 @@ impl BoundaryPath {
         let BoundaryPath {
             mut points,
             origins,
+            source_uses,
         } = other;
         match join {
             PartJoin::SharedEndpoint => {
                 points.remove(0);
             }
-            PartJoin::Bridge(bridge) => self.origins.push(bridge),
+            PartJoin::Bridge(bridge) => {
+                self.origins.push(bridge);
+                self.source_uses.push(Vec::new());
+            }
         }
         self.origins.extend(origins);
+        self.source_uses.extend(source_uses);
         self.points.extend(points);
     }
 
@@ -5068,28 +5253,34 @@ impl BoundaryPath {
     /// Sound on an open path precisely *because* it is open: with `origins[i]`
     /// labelling `points[i] -> points[i + 1]`, reversing both vectors maps
     /// segment `i` to old segment `n - 2 - i`, the same segment travelled
-    /// backwards. The cyclic case is **not** this — reversing a loop's two
+    /// backwards. The cyclic case is **not** this â€” reversing a loop's two
     /// vectors directly is off by one, because the wrap segment does not move
     /// with the rest. Cutting a loop into a path first removes the need to
-    /// reason about where the cut went.
+    /// reason about where the cut went. Provenance reverses with the same
+    /// segment transformation.
     fn reverse(&mut self) {
         self.points.reverse();
         self.origins.reverse();
+        self.source_uses.reverse();
     }
 
     /// Close the path into a cyclic loop, saying what the closing segment is.
     ///
     /// `SharedEndpoint` means the path already returns to its start, so the
     /// duplicate final point is dropped and the existing last segment becomes
-    /// the wrap. `Bridge` keeps every point and adds one labelled wrap segment.
+    /// the wrap. `Bridge` keeps every point and adds one labelled wrap segment,
+    /// whose provenance is empty because neither part supplied it.
     fn close(mut self, join: PartJoin) -> BoundaryLoop {
         match join {
             PartJoin::SharedEndpoint => {
                 self.points.pop();
             }
-            PartJoin::Bridge(bridge) => self.origins.push(bridge),
+            PartJoin::Bridge(bridge) => {
+                self.origins.push(bridge);
+                self.source_uses.push(Vec::new());
+            }
         }
-        BoundaryLoop::new(self.points, self.origins)
+        BoundaryLoop::new(self.points, self.origins, self.source_uses)
     }
 }
 
@@ -5102,7 +5293,32 @@ impl BoundaryLoop {
 #[derive(Debug, Default, Clone)]
 struct PolyBoundary(Vec<BoundaryLoop>);
 
-fn normalize_range(curve: &mut Vec<SurfacePoint>, compidx: usize, (u0, u1): (f64, f64)) {
+/// Normalize an open boundary piece so it starts at the point crossing `u1`
+/// (on axis `compidx`), carrying its per-segment provenance along.
+///
+/// **PLANAR-A invariant.** The rotation reorders segments, so `sources` must
+/// follow its segments or the provenance silently attaches to the wrong
+/// geometry. `sources[k]` labels `points[k] -> points[k + 1]`, one entry fewer
+/// than the point count, so the transformation is derived on the *segments*:
+///
+/// - `i < n - 1`: the crossing is interior. The rotated chain's segments are a
+///   cyclic shift of the open chain's, and every rotated segment starts at the
+///   same point as its original, so `sources.rotate_left(i)` keeps each entry
+///   on the segment it describes.
+/// - `i == n - 1`: the curve's own last point is the crossing. There is no
+///   interior run to rotate; the chain re-introduces the wrap segment back
+///   onto its head (`points[n - 1] -> points[0]`). That segment's provenance
+///   was dropped when the piece was classified open — as an open chain the
+///   wrap did not exist — and it is synthetic, so an explicit empty entry is
+///   inserted rather than shortening the vector. The point count grows by one
+///   (the duplicate terminal) exactly as the geometry always did; the sources
+///   now grow with it.
+fn normalize_range(
+    curve: &mut Vec<SurfacePoint>,
+    sources: &mut Vec<SegmentSources>,
+    compidx: usize,
+    (u0, u1): (f64, f64),
+) {
     let p = curve[0];
     let q = curve[curve.len() - 1];
     let tmp = f64::min(p[compidx], q[compidx]) + TOLERANCE;
@@ -5114,6 +5330,11 @@ fn normalize_range(curve: &mut Vec<SurfacePoint>, compidx: usize, (u0, u1): (f64
     else {
         return;
     };
+    if i == curve.len() - 1 {
+        sources.insert(0, Vec::new());
+    } else {
+        sources.rotate_left(i);
+    }
     let mut curve1 = curve.split_off(i + 1);
     curve1.pop();
     curve1.insert(0, curve[i]);
@@ -5174,9 +5395,9 @@ fn record_piece_deck(
 
 /// Record what the two-closed-loop join did to the deck sum.
 ///
-/// `Σδᵢ = Δ_walk`, and `Δ_walk = 0` for a contractible regular boundary. The
+/// `Î£Î´áµ¢ = Î”_walk`, and `Î”_walk = 0` for a contractible regular boundary. The
 /// branch traverses loop 1 **reversed**, unconditionally, so the sum it
-/// realises is `δ₀ − δ₁`. `forward_would_close` is the discriminator: it is
+/// realises is `Î´â‚€ âˆ’ Î´â‚`. `forward_would_close` is the discriminator: it is
 /// true exactly when the reversal is what broke the equation and traversing
 /// forward would satisfy it, which is the case package 1 is about.
 fn record_two_loop_join(
@@ -5219,7 +5440,7 @@ fn record_two_loop_join(
 }
 
 /// The parameter-space area below which a closed loop is treated as degenerate
-/// — a band's boundary circle, which encloses no area in the chart because it
+/// â€” a band's boundary circle, which encloses no area in the chart because it
 /// *is* a chart-crossing line.
 ///
 /// Named because the two-closed-loop branch and the DIAG-001 record must test
@@ -5241,7 +5462,7 @@ fn signed_area(curve: &[SurfacePoint]) -> f64 {
 /// property of the primitive it was constructed from, not of any face that
 /// references it. `Line::parameter_range` is `[0, 1]` unconditionally and
 /// `RevolutedCurve` inherits it, so a cone built as a revolved line declares
-/// `[0, 1] x [0, 2pi)` — one unit of generatrix starting at the STEP reference
+/// `[0, 1] x [0, 2pi)` â€” one unit of generatrix starting at the STEP reference
 /// radius, chosen by the primitive and unrelated to the face. Stitching an open
 /// boundary piece against the edge of that rectangle fabricates trim geometry
 /// no source entity describes (`DOM-ARTIFICIAL-CLOSURE-001`), and when the
@@ -5249,7 +5470,7 @@ fn signed_area(curve: &[SurfacePoint]) -> f64 {
 /// (`DOM-ZERO-AREA-001`).
 ///
 /// Measured: extending that range by a constant instead recovers 348 NIST faces
-/// and destroys 268 others, in a disjoint set of models — one part in two
+/// and destroys 268 others, in a disjoint set of models â€” one part in two
 /// encodings loses 148 cone faces under whichever window excludes it. Any
 /// fixed-size window trades one population for another, because whether a
 /// face's material interval falls inside is decided by where its exporter put
@@ -5261,7 +5482,7 @@ fn signed_area(curve: &[SurfacePoint]) -> f64 {
 ///
 /// Returns `None` for an axis the bounds do not determine. A degenerate extent
 /// means the material region is not recoverable from the boundary alone, and
-/// the caller must refuse rather than invent one — a collapsed single-vertex
+/// the caller must refuse rather than invent one â€” a collapsed single-vertex
 /// bound is exactly that case, marking a point the domain must reach while
 /// contributing no trim segment (`QUO-005`, `SNG-COLLAPSED-DIRECTION-001`).
 fn working_range(
@@ -5275,7 +5496,7 @@ fn working_range(
             return declared;
         }
         let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
-        pieces.iter().for_each(|PolyBoundaryPiece(vec)| {
+        pieces.iter().for_each(|PolyBoundaryPiece(vec, _)| {
             vec.iter().for_each(|p| {
                 lo = f64::min(lo, p[idx]);
                 hi = f64::max(hi, p[idx]);
@@ -5292,16 +5513,16 @@ fn working_range(
 /// How the two-closed-loop branch traverses the second loop.
 ///
 /// The branch has always reversed loop 1 unconditionally. For a quotient-closed
-/// boundary walk `Σδᵢ = Δ_walk`, with `Δ_walk = 0` for a contractible regular
+/// boundary walk `Î£Î´áµ¢ = Î”_walk`, with `Î”_walk = 0` for a contractible regular
 /// boundary, so the reversal is only correct when the two loops wind the *same*
-/// way. The two boundary circles of a band wind opposite — as they must, for
-/// the face boundary to be coherently oriented — and there the reversal makes
-/// `Σδ = ±2`, which is exactly the crossing the CDT then refuses.
+/// way. The two boundary circles of a band wind opposite â€” as they must, for
+/// the face boundary to be coherently oriented â€” and there the reversal makes
+/// `Î£Î´ = Â±2`, which is exactly the crossing the CDT then refuses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TwoLoopJoinPolicy {
     /// Reverse loop 1 unconditionally.
     Legacy,
-    /// Traverse loop 1 in whichever direction satisfies `Σδ = 0`, and fall back
+    /// Traverse loop 1 in whichever direction satisfies `Î£Î´ = 0`, and fall back
     /// to [`Self::Legacy`] when no direction does or both do. The equation is
     /// decidable, so this guesses nothing: a direction is chosen only when it
     /// is the unique solution.
@@ -5318,9 +5539,9 @@ enum TwoLoopJoinOutcome {
     /// The branch did not run: the face does not present two degenerate closed
     /// loops on a periodic chart.
     NotAttempted,
-    /// `Σδ = 0` already holds for the reversed traversal.
+    /// `Î£Î´ = 0` already holds for the reversed traversal.
     LegacyDeckConsistent,
-    /// `Σδ ≠ 0` reversed, and forward traversal is the unique solution.
+    /// `Î£Î´ â‰  0` reversed, and forward traversal is the unique solution.
     /// `applied` says whether the policy let it be taken.
     ForwardResolves {
         /// Whether the forward traversal was used.
@@ -5365,7 +5586,7 @@ impl PolyBoundary {
         // The lattice displacement of each closed loop, parallel to `closed`.
         // The `BoundaryLoop` the classification produces does not retain it,
         // and the two-closed-loop branch below needs it to say what its join
-        // does to the deck sum — recovering it afterwards from normalised
+        // does to the deck sum â€” recovering it afterwards from normalised
         // points would re-derive an integer the classifier already decided.
         let mut closed_displacements: Vec<[i64; 2]> = Vec::new();
         let u_period = lattice.declared_u_period();
@@ -5374,10 +5595,8 @@ impl PolyBoundary {
         // the displacement written down is the one the pipeline acted on rather
         // than one recovered later from already-normalised points.
         let diag = diagnosis::diag_enabled();
-        pieces
-            .into_iter()
-            .enumerate()
-            .for_each(|(piece_index, PolyBoundaryPiece(mut vec))| {
+        pieces.into_iter().enumerate().for_each(
+            |(piece_index, PolyBoundaryPiece(mut vec, mut sources))| {
                 let p0 = vec[0].uv;
                 let p1 = vec[vec.len() - 1].uv;
 
@@ -5418,6 +5637,11 @@ impl PolyBoundary {
                 match closure {
                     BoundaryClosure::EuclideanClosed => {
                         vec.pop();
+                        // The piece's provenance had one entry per cyclic
+                        // segment including the degenerate wrap back onto the
+                        // duplicate closing point; that entry dies with the
+                        // point it described.
+                        sources.pop();
                         if diag {
                             record_piece_deck(
                                 piece_index,
@@ -5428,7 +5652,7 @@ impl PolyBoundary {
                             );
                         }
                         closed_displacements.push([0, 0]);
-                        closed.push(BoundaryLoop::euclidean_source_loop(vec));
+                        closed.push(BoundaryLoop::euclidean_source_loop(vec, sources));
                     }
                     BoundaryClosure::PeriodicClosed {
                         displacement: [ku, kv],
@@ -5459,16 +5683,23 @@ impl PolyBoundary {
                             );
                         }
                         closed_displacements.push([ku, kv]);
-                        closed.push(BoundaryLoop::periodic_source_walk(vec));
+                        closed.push(BoundaryLoop::periodic_source_walk(vec, sources));
                     }
                     BoundaryClosure::Open => {
                         if diag {
                             record_piece_deck(piece_index, &vec, ObservedClosure::Open, 0, 0);
                         }
-                        open.push(vec)
+                        // The piece's provenance is cyclic (one entry per point,
+                        // the last labelling the wrap back onto the start). As an
+                        // open chain that wrap segment does not exist — it is
+                        // re-created by the closure join — so the chain's
+                        // provenance has one fewer entry.
+                        sources.pop();
+                        open.push((vec, sources))
                     }
                 }
-            });
+            },
+        );
         if closed.len() == 2
             && (lattice.declared_u_period().is_some() || lattice.declared_v_period().is_some())
         {
@@ -5526,8 +5757,8 @@ impl PolyBoundary {
                 // this by parts labels those bridges instead of letting them
                 // inherit `Source`.
                 // Solve the deck equation before choosing a traversal. Reversing
-                // loop 1 realises `δ₀ − δ₁`; traversing it forward realises
-                // `δ₀ + δ₁`. `Δ_walk = 0`, so each direction is admissible
+                // loop 1 realises `Î´â‚€ âˆ’ Î´â‚`; traversing it forward realises
+                // `Î´â‚€ + Î´â‚`. `Î”_walk = 0`, so each direction is admissible
                 // exactly when its sum vanishes, and the direction is *chosen*
                 // only when precisely one does.
                 let reversed_closes = loop0_displacement[0] == loop1_displacement[0]
@@ -5544,8 +5775,8 @@ impl PolyBoundary {
                         join_outcome = TwoLoopJoinOutcome::LegacyDeckConsistent;
                         false
                     }
-                    // Both zero — the loops are Euclidean-closed on a periodic
-                    // chart, so the equation says nothing about direction — or
+                    // Both zero â€” the loops are Euclidean-closed on a periodic
+                    // chart, so the equation says nothing about direction â€” or
                     // neither, which is a boundary the deck model does not
                     // describe. Refuse in both cases and keep the legacy
                     // traversal, so a face can only be recovered on a decided
@@ -5584,13 +5815,16 @@ impl PolyBoundary {
         } else if let Some(pair) = CollapsedPeriodicBoundaryPair::try_classify(
             surface,
             &closed.iter().map(|l| l.points.clone()).collect::<Vec<_>>(),
-            &open,
+            &open.iter().map(|(pts, _)| pts.clone()).collect::<Vec<_>>(),
             range,
             lattice,
         ) {
-            let mut loop0 = closed.remove(0).points;
+            let closed_loop0 = closed.remove(0);
+            let mut loop0 = closed_loop0.points;
+            let mut loop0_sources = closed_loop0.source_uses;
             if loop0.len() > 1 && loop0[0].uv.distance(loop0.last().unwrap().uv) < 1e-3 {
                 loop0.pop();
+                loop0_sources.pop();
             }
             let is_v = lattice.declared_v_period().is_some_and(|p| p > 1e-6);
             let period = if is_v {
@@ -5607,6 +5841,12 @@ impl PolyBoundary {
                 last_p.uv.x = loop0[0].uv.x + period;
             }
             loop0_full.push(last_p);
+            // `loop0_full` runs the base loop then one appended period-wrap
+            // point. Its provenance is the loop's, with the loop's own wrap
+            // entry replaced by the synthetic period-wrap segment.
+            let mut loop0_full_sources = loop0_sources;
+            loop0_full_sources.pop();
+            loop0_full_sources.push(Vec::new());
 
             let loop1_full: Vec<SurfacePoint> = loop0_full
                 .iter()
@@ -5632,29 +5872,31 @@ impl PolyBoundary {
             // Only `loop0_full` carries source evidence, and even it ends with
             // an appended period-wrap point rather than a source sample. The
             // apex branch `loop1_rev` is *evaluated from the surface* at
-            // `pair.apex_u` — synthesised geometry that no source edge
-            // describes — and the two joining runs are seams across the
-            // collapsed direction.
+            // `pair.apex_u` â€” synthesised geometry that no source edge
+            // describes â€” and the two joining runs are seams across the
+            // collapsed direction. None of those three parts carry a source
+            // edge use, so their provenance entries are empty.
+            let (ns_down, ns_rev, ns_up) = (seam_down.len(), loop1_rev.len(), seam_up.len());
             closed.push(BoundaryLoop::chained([
-                (loop0_full, SegmentOrigin::Source),
-                (seam_down, SegmentOrigin::Seam),
-                (loop1_rev, SegmentOrigin::Seam),
-                (seam_up, SegmentOrigin::Seam),
+                (loop0_full, loop0_full_sources, SegmentOrigin::Source),
+                (seam_down, untagged_sources(ns_down), SegmentOrigin::Seam),
+                (loop1_rev, untagged_sources(ns_rev), SegmentOrigin::Seam),
+                (seam_up, untagged_sources(ns_up), SegmentOrigin::Seam),
             ]));
         }
         let (n_closed_in, n_open_in) = (closed.len(), open.len());
         // `connect_edges` used to live here. It dropped each part's last point
-        // unconditionally, which is correct only when parts chain — the
+        // unconditionally, which is correct only when parts chain â€” the
         // assumption `BoundaryPath::append` now makes the caller state, so the
         // helper has no remaining callers.
         match open.len() {
             1 => {
-                let mut curve = open.pop().unwrap();
+                let (mut curve, mut curve_sources) = open.pop().unwrap();
                 let p = curve[0];
                 let q = curve[curve.len() - 1];
                 if let (Some((u0, u1)), Some((v0, v1))) = range {
                     if p.x < q.x - TOLERANCE {
-                        normalize_range(&mut curve, 0, (u0, u1));
+                        normalize_range(&mut curve, &mut curve_sources, 0, (u0, u1));
                         let p = curve[0];
                         let q = curve[curve.len() - 1];
                         let x = (Point2::new(u0, v1), surface.subs(u0, v1)).into();
@@ -5662,14 +5904,15 @@ impl PolyBoundary {
                         let vec0 = polyline_on_surface(surface, q, y, tol);
                         let vec1 = polyline_on_surface(surface, y, x, tol);
                         let vec2 = polyline_on_surface(surface, x, p, tol);
+                        let (n0, n1, n2) = (vec0.len(), vec1.len(), vec2.len());
                         closed.push(BoundaryLoop::chained([
-                            (vec0, SegmentOrigin::SyntheticClosure),
-                            (vec1, SegmentOrigin::SyntheticClosure),
-                            (vec2, SegmentOrigin::SyntheticClosure),
-                            (curve, SegmentOrigin::Source),
+                            (vec0, untagged_sources(n0), SegmentOrigin::SyntheticClosure),
+                            (vec1, untagged_sources(n1), SegmentOrigin::SyntheticClosure),
+                            (vec2, untagged_sources(n2), SegmentOrigin::SyntheticClosure),
+                            (curve, curve_sources, SegmentOrigin::Source),
                         ]));
                     } else if q.x < p.x - TOLERANCE {
-                        normalize_range(&mut curve, 0, (u0, u1));
+                        normalize_range(&mut curve, &mut curve_sources, 0, (u0, u1));
                         let p = curve[0];
                         let q = curve[curve.len() - 1];
                         let x = (Point2::new(u1, v0), surface.subs(u1, v0)).into();
@@ -5677,14 +5920,15 @@ impl PolyBoundary {
                         let vec0 = polyline_on_surface(surface, q, y, tol);
                         let vec1 = polyline_on_surface(surface, y, x, tol);
                         let vec2 = polyline_on_surface(surface, x, p, tol);
+                        let (n0, n1, n2) = (vec0.len(), vec1.len(), vec2.len());
                         closed.push(BoundaryLoop::chained([
-                            (vec0, SegmentOrigin::SyntheticClosure),
-                            (vec1, SegmentOrigin::SyntheticClosure),
-                            (vec2, SegmentOrigin::SyntheticClosure),
-                            (curve, SegmentOrigin::Source),
+                            (vec0, untagged_sources(n0), SegmentOrigin::SyntheticClosure),
+                            (vec1, untagged_sources(n1), SegmentOrigin::SyntheticClosure),
+                            (vec2, untagged_sources(n2), SegmentOrigin::SyntheticClosure),
+                            (curve, curve_sources, SegmentOrigin::Source),
                         ]));
                     } else if p.y < q.y - TOLERANCE {
-                        normalize_range(&mut curve, 1, (v0, v1));
+                        normalize_range(&mut curve, &mut curve_sources, 1, (v0, v1));
                         let p = curve[0];
                         let q = curve[curve.len() - 1];
                         let x = (Point2::new(u0, v0), surface.subs(u0, v0)).into();
@@ -5692,14 +5936,15 @@ impl PolyBoundary {
                         let vec0 = polyline_on_surface(surface, q, y, tol);
                         let vec1 = polyline_on_surface(surface, y, x, tol);
                         let vec2 = polyline_on_surface(surface, x, p, tol);
+                        let (n0, n1, n2) = (vec0.len(), vec1.len(), vec2.len());
                         closed.push(BoundaryLoop::chained([
-                            (vec0, SegmentOrigin::SyntheticClosure),
-                            (vec1, SegmentOrigin::SyntheticClosure),
-                            (vec2, SegmentOrigin::SyntheticClosure),
-                            (curve, SegmentOrigin::Source),
+                            (vec0, untagged_sources(n0), SegmentOrigin::SyntheticClosure),
+                            (vec1, untagged_sources(n1), SegmentOrigin::SyntheticClosure),
+                            (vec2, untagged_sources(n2), SegmentOrigin::SyntheticClosure),
+                            (curve, curve_sources, SegmentOrigin::Source),
                         ]));
                     } else if q.y < p.y - TOLERANCE {
-                        normalize_range(&mut curve, 1, (v0, v1));
+                        normalize_range(&mut curve, &mut curve_sources, 1, (v0, v1));
                         let p = curve[0];
                         let q = curve[curve.len() - 1];
                         let x = (Point2::new(u1, v1), surface.subs(u1, v1)).into();
@@ -5707,41 +5952,43 @@ impl PolyBoundary {
                         let vec0 = polyline_on_surface(surface, q, y, tol);
                         let vec1 = polyline_on_surface(surface, y, x, tol);
                         let vec2 = polyline_on_surface(surface, x, p, tol);
+                        let (n0, n1, n2) = (vec0.len(), vec1.len(), vec2.len());
                         closed.push(BoundaryLoop::chained([
-                            (vec0, SegmentOrigin::SyntheticClosure),
-                            (vec1, SegmentOrigin::SyntheticClosure),
-                            (vec2, SegmentOrigin::SyntheticClosure),
-                            (curve, SegmentOrigin::Source),
+                            (vec0, untagged_sources(n0), SegmentOrigin::SyntheticClosure),
+                            (vec1, untagged_sources(n1), SegmentOrigin::SyntheticClosure),
+                            (vec2, untagged_sources(n2), SegmentOrigin::SyntheticClosure),
+                            (curve, curve_sources, SegmentOrigin::Source),
                         ]));
                     }
                 }
             }
             2 => {
-                let mut curve1 = open.pop().unwrap();
-                let mut curve0 = open.pop().unwrap();
+                let (mut curve1, mut curve1_sources) = open.pop().unwrap();
+                let (mut curve0, mut curve0_sources) = open.pop().unwrap();
                 fn end_pts<T: Copy>(vec: &[T]) -> (T, T) {
                     (vec[0], vec[vec.len() - 1])
                 }
                 let ((p0, p1), (q0, q1)) = (end_pts(&curve0), end_pts(&curve1));
                 if !p0.x.near(&p1.x) && !q0.x.near(&q1.x) {
                     if let (Some(urange), _) = range {
-                        normalize_range(&mut curve0, 0, urange);
-                        normalize_range(&mut curve1, 0, urange);
+                        normalize_range(&mut curve0, &mut curve0_sources, 0, urange);
+                        normalize_range(&mut curve1, &mut curve1_sources, 0, urange);
                     }
                 } else if !p0.y.near(&p1.y) && !q0.y.near(&q1.y) {
                     if let (_, Some(vrange)) = range {
-                        normalize_range(&mut curve0, 1, vrange);
-                        normalize_range(&mut curve1, 1, vrange);
+                        normalize_range(&mut curve0, &mut curve0_sources, 1, vrange);
+                        normalize_range(&mut curve1, &mut curve1_sources, 1, vrange);
                     }
                 }
                 let ((p0, p1), (q0, q1)) = (end_pts(&curve0), end_pts(&curve1));
                 let vec0 = polyline_on_surface(surface, p1, q0, tol);
                 let vec1 = polyline_on_surface(surface, q1, p0, tol);
+                let (n0, n1) = (vec0.len(), vec1.len());
                 closed.push(BoundaryLoop::chained([
-                    (curve0, SegmentOrigin::Source),
-                    (vec0, SegmentOrigin::SyntheticClosure),
-                    (curve1, SegmentOrigin::Source),
-                    (vec1, SegmentOrigin::SyntheticClosure),
+                    (curve0, curve0_sources, SegmentOrigin::Source),
+                    (vec0, untagged_sources(n0), SegmentOrigin::SyntheticClosure),
+                    (curve1, curve1_sources, SegmentOrigin::Source),
+                    (vec1, untagged_sources(n1), SegmentOrigin::SyntheticClosure),
                 ]));
             }
             _ => {}
@@ -5777,11 +6024,12 @@ impl PolyBoundary {
                 let vec1 = polyline_on_surface(surface, p[1], p[2], tol);
                 let vec2 = polyline_on_surface(surface, p[2], p[3], tol);
                 let vec3 = polyline_on_surface(surface, p[3], p[0], tol);
+                let (n0, n1, n2, n3) = (vec0.len(), vec1.len(), vec2.len(), vec3.len());
                 closed.push(BoundaryLoop::chained([
-                    (vec0, SegmentOrigin::SyntheticClosure),
-                    (vec1, SegmentOrigin::SyntheticClosure),
-                    (vec2, SegmentOrigin::SyntheticClosure),
-                    (vec3, SegmentOrigin::SyntheticClosure),
+                    (vec0, untagged_sources(n0), SegmentOrigin::SyntheticClosure),
+                    (vec1, untagged_sources(n1), SegmentOrigin::SyntheticClosure),
+                    (vec2, untagged_sources(n2), SegmentOrigin::SyntheticClosure),
+                    (vec3, untagged_sources(n3), SegmentOrigin::SyntheticClosure),
                 ]));
             }
         }
@@ -5791,23 +6039,23 @@ impl PolyBoundary {
     /// Where `c` lies relative to the domain bounded by `self`.
     ///
     /// **G7a.** Previously this returned a `bool`, and a ray cast that aborted
-    /// was reported as `false` — *outside* — which is an answer the computation
+    /// was reported as `false` â€” *outside* â€” which is an answer the computation
     /// did not have.
     ///
     /// The two failure modes are separated here rather than inferred from each
     /// other. `Boundary` is decided by a direct point-on-segment predicate, so
     /// it is a positive result about `c`. `Inside` and `Outside` come from ray
     /// casting. `Indeterminate` means every tried ray aborted *and* the direct
-    /// predicate did not fire — the location is simply not established, and the
+    /// predicate did not fire â€” the location is simply not established, and the
     /// type says so instead of naming a side.
     ///
     /// An earlier revision claimed the residue after eight rays *was* boundary
     /// membership. That was an inference from a negative result: an aborted
     /// cast in floating point can equally be near-boundary numerical
     /// degeneracy or an unlucky family of seeds, and "no ray decided" licenses
-    /// neither conclusion. Measuring it directly happens to confirm the guess —
+    /// neither conclusion. Measuring it directly happens to confirm the guess â€”
     /// on ABC `00009190`, 117,145 samples test as `Boundary` and **zero** come
-    /// back `Indeterminate`, with triangle and failure counts unchanged — but
+    /// back `Indeterminate`, with triangle and failure counts unchanged â€” but
     /// it is now a positive result that would report `Indeterminate` the moment
     /// that stopped being true, rather than a conclusion drawn from silence.
     fn locate(&self, c: Point2) -> PointLocation {
@@ -5883,6 +6131,11 @@ impl PolyBoundary {
         triangulation: &mut Cdt,
         boundary_map: &mut HashMap<FixedVertexHandle, Point3>,
         roles: &mut ConstraintRoles,
+        // PLANAR-A A6: per-vertex source-use candidates, fed by the piece's
+        // per-segment provenance so `triangulation_into_polymesh_outcome` can
+        // fill `VertexMetadata.source_edge_use` where attribution is
+        // unambiguous.
+        vertex_sources: &mut HashMap<FixedVertexHandle, Vec<SourceEdgeUse>>,
     ) -> std::result::Result<(), TessellationFailureReason> {
         // The first refusal, kept typed. The loop continues after recording it
         // so the probe counters below still see the whole face.
@@ -5913,25 +6166,19 @@ impl PolyBoundary {
         }
         let mut probe_point_fail = 0usize;
         let mut probe_degenerate = 0usize;
-        let mut probe_already_direct = 0usize;
-        let mut probe_refused_with_conflicts = 0usize;
-        let mut probe_refused_without_conflicts = 0usize;
-        let mut probe_conflicting_edges = 0usize;
-        let mut probe_add_returned_false = 0usize;
         // These are post-stitch loop/segment proxies, not source-edge
         // provenance. Keep all direct contributors because duplicates exist.
         let mut installed_origins =
             probe.then(HashMap::<FixedUndirectedEdgeHandle, Vec<(usize, usize)>>::default);
-        let mut first_conflict = None;
         // DIAG-001: diagnostic capture. Gated on TRUCK_FACE_DIAG_JSONL. When
-        // disabled, none of this code has any effect — the edge map is never
+        // disabled, none of this code has any effect â€” the edge map is never
         // populated and the sink is never written. This instrumentation must
         // not alter insertion order or insertion behaviour.
         let diag = diagnosis::diag_enabled();
         let mut diag_edge_map: HashMap<FixedUndirectedEdgeHandle, u64> = HashMap::default();
         // The first three entries of the CDT stage vector. Counted
-        // unconditionally — three `usize` increments on a path that already
-        // does a triangulation query per segment — and emitted only under
+        // unconditionally â€” three `usize` increments on a path that already
+        // does a triangulation query per segment â€” and emitted only under
         // `diag`.
         let mut stage_boundary_vertices = 0usize;
         let mut stage_constraints_presented = 0usize;
@@ -5974,7 +6221,7 @@ impl PolyBoundary {
                     //
                     // This deliberately goes to the overlap witness vector,
                     // which `derive_loss_bucket` does not read, so the derived
-                    // bucket stays `VertexInsertionFailure` — the record is
+                    // bucket stays `VertexInsertionFailure` â€” the record is
                     // diagnostic-only.
                     let origin = piece
                         .origins
@@ -5997,6 +6244,25 @@ impl PolyBoundary {
             // Counted after the all-or-nothing point check above, so this is
             // the number of boundary points that actually became vertices.
             stage_boundary_vertices += len;
+            // PLANAR-A A6: record the source uses incident at each vertex, for
+            // the conservative `VertexMetadata.source_edge_use` attribution.
+            // A point is incident to the segments `i` and `i - 1` (cyclic), so
+            // a junction vertex shared by two edge uses accumulates both and is
+            // left un-attributed downstream.
+            for (point_index, maybe_vertex) in poly2tri.iter().enumerate() {
+                let Some(idx) = maybe_vertex else { continue };
+                let mut point_sources: Vec<SourceEdgeUse> = Vec::new();
+                if let Some(sources) = piece.source_uses.get(point_index) {
+                    point_sources.extend(sources.iter().copied());
+                }
+                if let Some(sources) = piece.source_uses.get((point_index + len - 1) % len) {
+                    point_sources.extend(sources.iter().copied());
+                }
+                vertex_sources
+                    .entry(*idx)
+                    .or_default()
+                    .extend(point_sources);
+            }
             if len < 3 {
                 continue;
             }
@@ -6016,13 +6282,13 @@ impl PolyBoundary {
                 //
                 // A well-formed loop traverses each edge once. If the direct
                 // edge is already a constraint that this face's own role table
-                // claims, the boundary is traversing it a second time — a
+                // claims, the boundary is traversing it a second time â€” a
                 // duplicate or collinear-overlapping segment. ARR-SEAM W3 admits
                 // these as additional traversals (counted, read mod 2 by the
                 // flood) instead of refusing the whole face; see the arm below.
                 //
                 // This arm used to reject the case outright, which also refused
-                // segments that were legitimately already fully represented —
+                // segments that were legitimately already fully represented â€”
                 // 5 faces on `00009190`. Keeping the overlap witness but not the
                 // failure is the separation that makes the census able to name
                 // the population without losing the face.
@@ -6034,6 +6300,14 @@ impl PolyBoundary {
                 // here indistinguishable from a real boundary.
                 let segment_origin = piece.origins.get(i).unwrap_or(SegmentOrigin::Source);
                 let segment_role = segment_origin.role();
+                // PLANAR-A: the source edge uses that contributed this presented
+                // segment, carried from `try_new` through the piece. Empty for
+                // synthetic segments.
+                let segment_sources: Vec<SourceEdgeUse> =
+                    piece.source_uses.get(i).cloned().unwrap_or_default();
+                // PLANAR-B B3: one semantic identity per presented request. All
+                // realized edges of this segment's chain share it.
+                let semantic_id = roles.mint_semantic_constraint_id();
                 let diag_seg_id = if diag {
                     diagnosis::record_segment(segment_origin, Some(piece_index), k as u32)
                 } else {
@@ -6043,7 +6317,7 @@ impl PolyBoundary {
                     .get_edge_from_neighbors(vi, vj)
                     .filter(|e| e.is_constraint_edge())
                     .map(|e| e.as_undirected().fix())
-                    .filter(|handle| roles.role_of(*handle).is_some());
+                    .filter(|handle| ConstraintRoles::role_of(&triangulation, *handle).is_some());
                 if let Some(handle) = overlapping {
                     // ARR-SEAM W3: admit the duplicate traversal instead of
                     // refusing it. The geometry is already present in the CDT
@@ -6081,234 +6355,89 @@ impl PolyBoundary {
                             Some(spade_endpoints(blocking_positions)),
                         );
                     }
-                    *roles.traversals.entry(handle).or_insert(0) += 1;
-                    roles.record(handle, segment_role);
+                    let directed = triangulation.undirected_edge(handle).as_directed().fix();
+                    roles.label_realized_chain(
+                        triangulation,
+                        &[directed],
+                        semantic_id,
+                        segment_role,
+                        &segment_sources,
+                        Some(segment_origin),
+                    );
                     stage_constraints_inserted += 1;
                     // INV-W3-4: the single-role mod-2 simplification holds only
                     // while every multiplicity>1 edge is still material-toggling
                     // in its role. Read with the `Legacy` reading, which reports
                     // the role's raw property independent of multiplicity.
                     debug_assert!(
-                        roles.toggles_material(handle, ParityReading::Legacy) == Some(true),
+                        roles.toggles_material(&triangulation, handle, ParityReading::Legacy)
+                            == Some(true),
                         "a multiplicity>1 edge must still be material-toggling for the \
                          single-role mod-2 simplification to hold",
                     );
                     continue;
                 }
-                // G5a: ask once, and label what was actually realized.
-                //
-                // The previous sequence was `get_edge_from_neighbors` +
-                // `can_add_constraint` + `add_constraint` +
-                // `get_edge_from_neighbors`: three traversals to decide, then a
-                // fourth to rediscover the outcome. That last lookup is where
-                // the role table lost its entries, because Spade may realize
-                // one requested segment as a *chain* when an existing vertex
-                // lies on it — its own documentation says
-                // `exists_constraint(from, to)` is then not true — and the
-                // direct edge `(vi, vj)` simply does not exist to be found.
-                //
-                // `try_add_constraint` returns the realized chain instead, so
-                // every edge of it can be labelled. Its contract is exactly the
-                // one this site needs:
-                //
-                //   - empty      => refused; the segment properly crosses an
-                //                   existing constraint, and the triangulation
-                //                   is left unchanged (it is atomic on
-                //                   conflict, so refusal cannot half-apply);
-                //   - non-empty  => realized, including any edge that was
-                //                   already present.
-                //
-                // "Already fully represented" therefore stops being a separate
-                // case that had to be inferred from a Boolean.
-                let chain = triangulation.try_add_constraint(vi, vj);
-                if !chain.is_empty() {
-                    stage_constraints_inserted += 1;
-                    for directed in &chain {
-                        let handle = triangulation.directed_edge(*directed).as_undirected().fix();
-                        // Audit A1: every segment reaching here comes from a
-                        // `PolyBoundary` piece, so it is treated as physical
-                        // boundary. That is deliberately *not* the whole
-                        // truth — `PolyBoundary::new` also stitches synthetic
-                        // closure segments into these same pieces, and those
-                        // are `UnresolvedSyntheticClosure` in reality (audit
-                        // A6). Distinguishing them needs per-piece
-                        // provenance, which would be a second semantic change
-                        // in the same experiment. Tagged as it behaves today;
-                        // A6 splits the population.
-                        // Count the traversal, not just the claim. `record`
-                        // keeps the first role — which is right — but when a
-                        // *later* segment of this same boundary realizes onto
-                        // an edge an earlier one already claimed, that second
-                        // traversal otherwise leaves no trace, and mod 2 two
-                        // traversals of one edge cancel where one realized edge
-                        // toggles once. That is the parity break: it is exactly
-                        // the faces with a repeated traversal that contradict
-                        // (126 of 126 on `00009190`, against 0 of 23,258 that
-                        // flood cleanly). The `overlapping` test above cannot
-                        // see it, because it inspects only the direct edge
-                        // `(vi, vj)` and not the rest of the chain Spade
-                        // realized.
-                        *roles.traversals.entry(handle).or_insert(0) += 1;
-                        roles.record(handle, segment_role);
-                        *roles.origin_census.entry(segment_origin).or_insert(0) += 1;
-                        if let Some(installed_origins) = installed_origins.as_mut() {
-                            installed_origins
-                                .entry(handle)
-                                .or_default()
-                                .push((piece_index, k));
-                        }
-                        if diag {
-                            diag_edge_map.entry(handle).or_insert(diag_seg_id);
-                            diagnosis::record_realized_edge(segment_role, diag_seg_id);
-                        }
+                // PLANAR-C C2: present the segment with explicit proper-crossing
+                // planarization. `insert_with_split` calls Spade's splitting API
+                // so a segment that properly crosses an existing constraint is
+                // subdivided at the crossing vertex rather than refused: every
+                // realized child carries the incoming claim, and every split
+                // blocker's children inherit the blocker's payload and traversal
+                // count. The returned chain is the authoritative realization and
+                // is labelled here; `A -> B` is not assumed to exist as one edge.
+                let report = match roles.insert_with_split(
+                    triangulation,
+                    vi,
+                    vj,
+                    semantic_id,
+                    segment_role,
+                    &segment_sources,
+                    Some(segment_origin),
+                ) {
+                    Ok(report) => report,
+                    // A crossing network Spade cannot planarize fails closed,
+                    // exactly as the pre-PLANAR-C `try_add_constraint` refusal
+                    // did. The face stays lost with a typed reason; the rest of
+                    // the model is unaffected.
+                    Err(reason) => {
+                        failure.get_or_insert(reason);
+                        continue;
                     }
-                } else {
-                    if probe {
-                        let conflicts: Vec<_> = triangulation
-                            .get_conflicting_edges_between_vertices(vi, vj)
-                            .map(|edge| {
-                                (
-                                    edge.as_undirected().fix(),
-                                    edge.from().position(),
-                                    edge.to().position(),
-                                )
-                            })
-                            .collect();
-                        probe_conflicting_edges += conflicts.len();
-                        if conflicts.is_empty() {
-                            probe_refused_without_conflicts += 1;
-                        } else {
-                            probe_refused_with_conflicts += 1;
-                            if first_conflict.is_none() {
-                                let mapped_conflicts = conflicts
-                                    .iter()
-                                    .filter(|(handle, _, _)| {
-                                        installed_origins
-                                            .as_ref()
-                                            .is_some_and(|origins| origins.contains_key(handle))
-                                    })
-                                    .count();
-                                // Prefer a resolvable direct origin, but make
-                                // the selection bias explicit in the record.
-                                let selected_conflict_index = conflicts
-                                    .iter()
-                                    .position(|(handle, _, _)| {
-                                        installed_origins
-                                            .as_ref()
-                                            .is_some_and(|origins| origins.contains_key(handle))
-                                    })
-                                    .unwrap_or(0);
-                                let selected = &conflicts[selected_conflict_index];
-                                let existing_origins = installed_origins
-                                    .as_ref()
-                                    .and_then(|origins| origins.get(&selected.0))
-                                    .cloned()
-                                    .unwrap_or_default();
-                                first_conflict = Some((
-                                    piece_index,
-                                    k,
-                                    piece.points[i].uv,
-                                    piece.points[j].uv,
-                                    selected_conflict_index,
-                                    conflicts.len(),
-                                    mapped_conflicts,
-                                    existing_origins,
-                                    selected.1,
-                                    selected.2,
-                                ));
-                            }
-                        }
+                };
+                stage_constraints_inserted += 1;
+                if probe && report.blockers_crossed > 0 {
+                    let (source_face_id, declared_face_index, periodic_rank) =
+                        PROBE_FACE_CONTEXT.with(std::cell::Cell::get);
+                    eprintln!(
+                        "SPLIT\tsource_face_id={source_face_id:?}\tdeclared_face_index={declared_face_index}\t\
+                         periodic_rank={periodic_rank}\tpost_stitch_piece={piece_index}\t\
+                         post_stitch_segment={k}\tchain={}\tblockers_crossed={}\t\
+                         blockers_split={}\tblockers_relocated={}\tsplit_vertices={}",
+                        report.chain.len(),
+                        report.blockers_crossed,
+                        report.blockers_split,
+                        report.blockers_relocated,
+                        report.split_vertices,
+                    );
+                }
+                for directed in &report.chain {
+                    let handle = triangulation.directed_edge(*directed).as_undirected().fix();
+                    if let Some(installed_origins) = installed_origins.as_mut() {
+                        installed_origins
+                            .entry(handle)
+                            .or_default()
+                            .push((piece_index, k));
                     }
                     if diag {
-                        let diag_conflicts: Vec<_> = triangulation
-                            .get_conflicting_edges_between_vertices(vi, vj)
-                            .map(|edge| edge.as_undirected().fix())
-                            .collect();
-                        let incoming_a = triangulation.vertex(vi).position();
-                        let incoming_b = triangulation.vertex(vj).position();
-                        for handle in &diag_conflicts {
-                            if let Some(&blocking_id) = diag_edge_map.get(handle) {
-                                let blocking_edge = triangulation.undirected_edge(*handle);
-                                let blocking_positions = blocking_edge.positions();
-                                let blocking_directed = blocking_edge.as_directed();
-                                let blocking_vertices = [
-                                    blocking_directed.from().fix(),
-                                    blocking_directed.to().fix(),
-                                ];
-                                let relation = classify_presented_relation(
-                                    [vi, vj],
-                                    blocking_vertices,
-                                    incoming_a,
-                                    incoming_b,
-                                    blocking_positions[0],
-                                    blocking_positions[1],
-                                );
-                                diagnosis::record_conflict(
-                                    diag_seg_id,
-                                    blocking_id,
-                                    relation,
-                                    Some(spade_endpoints([incoming_a, incoming_b])),
-                                    Some(spade_endpoints(blocking_positions)),
-                                );
-                            }
-                        }
+                        diag_edge_map.entry(handle).or_insert(diag_seg_id);
+                        diagnosis::record_realized_edge(segment_role, diag_seg_id);
                     }
-                    failure.get_or_insert(TessellationFailureReason::ConstraintInsertionIncomplete);
                 }
             }
         }
-        if probe {
-            if let Some((
-                proposed_piece,
-                proposed_segment,
-                proposed_a,
-                proposed_b,
-                selected_conflict_index,
-                selected_refusal_conflicts,
-                mapped_conflicts,
-                existing_origins,
-                existing_a,
-                existing_b,
-            )) = first_conflict
-            {
-                let (source_face_id, declared_face_index, periodic_rank) =
-                    PROBE_FACE_CONTEXT.with(std::cell::Cell::get);
-                let existing_first_origin = existing_origins.first().copied();
-                let selection = if mapped_conflicts == 0 {
-                    "first_reported"
-                } else {
-                    "first_mappable"
-                };
-                let origin_resolution = if existing_first_origin.is_some() {
-                    "direct"
-                } else {
-                    "missing"
-                };
-                eprintln!(
-                    "CW\tsource_face_id={source_face_id:?}\tdeclared_face_index={declared_face_index}\t\
-                     periodic_rank={periodic_rank}\tselection={selection}\t\
-                     selected_conflict_index={selected_conflict_index}\t\
-                     selected_refusal_conflicts={selected_refusal_conflicts}\t\
-                     mapped_conflicts={mapped_conflicts}\t\
-                     proposed_post_stitch_piece={proposed_piece}\t\
-                     proposed_post_stitch_segment={proposed_segment}\t\
-                     existing_origin_resolution={origin_resolution}\t\
-                     existing_direct_contributors={}\t\
-                     existing_first_post_stitch_origin={existing_first_origin:?}\t\
-                     proposed_uv={:.17e},{:.17e};{:.17e},{:.17e}\t\
-                     existing_uv={:.17e},{:.17e};{:.17e},{:.17e}\t\
-                     face_conflicting_edges={probe_conflicting_edges}",
-                    existing_origins.len(), proposed_a.x, proposed_a.y, proposed_b.x,
-                    proposed_b.y, existing_a.x, existing_a.y, existing_b.x, existing_b.y,
-                );
-            }
-        }
-        if probe && (failure.is_some() || probe_degenerate != 0 || probe_add_returned_false != 0) {
+        if probe && (failure.is_some() || probe_degenerate != 0) {
             eprintln!(
-                "PF,{},{probe_point_fail},{probe_degenerate},\
-                 {probe_already_direct},{probe_refused_with_conflicts},\
-                 {probe_refused_without_conflicts},{probe_conflicting_edges},\
-                 {probe_add_returned_false}",
+                "PF,{},{probe_point_fail},{probe_degenerate}",
                 u8::from(failure.is_none()),
             );
         }
@@ -6321,7 +6450,13 @@ impl PolyBoundary {
         }
         match failure {
             Some(reason) => Err(reason),
-            None => Ok(()),
+            None => {
+                // PLANAR-C backstop: a boundary vertex inserted on top of an
+                // earlier constraint edge can have split it into an unclaimed
+                // child; repair those before the flood.
+                roles.repair_unlabeled_constraint_edges(triangulation);
+                Ok(())
+            }
         }
     }
 }
@@ -6336,8 +6471,8 @@ fn spade_round(x: f64) -> f64 {
 /// The geometric relation between a presented segment and the constraint edge
 /// that blocks it, measured on the coordinates Spade actually stores.
 ///
-/// Both segments' endpoints come from the CDT — `triangulation.vertex(..)` and
-/// `triangulation.undirected_edge(..).positions()` — so the two are in the same
+/// Both segments' endpoints come from the CDT â€” `triangulation.vertex(..)` and
+/// `triangulation.undirected_edge(..).positions()` â€” so the two are in the same
 /// coordinate space. Raw lifted UV (`piece.points[i].uv`) and Spade's snapped
 /// positions differ by up to the 1e-6 vertex snap radius, which is exactly the
 /// asymmetry that used to mislabel `no-intersection` witnesses.
@@ -6361,9 +6496,8 @@ fn classify_presented_relation(
     d: SPoint2,
 ) -> diagnosis::PresentedSegmentRelation {
     use diagnosis::PresentedSegmentRelation as R;
-    let same_undirected_pair =
-        (incoming[0] == blocking[0] && incoming[1] == blocking[1])
-            || (incoming[0] == blocking[1] && incoming[1] == blocking[0]);
+    let same_undirected_pair = (incoming[0] == blocking[0] && incoming[1] == blocking[1])
+        || (incoming[0] == blocking[1] && incoming[1] == blocking[0]);
     if same_undirected_pair {
         return R::DuplicateTraversal;
     }
@@ -6399,10 +6533,10 @@ fn classify_presented_relation(
 /// adds constraints across the *interior sampling grid*, wholly inside the
 /// material region, and those toggle parity exactly as a trim segment does.
 ///
-/// FORMAL_SYSTEM.md §IX distinguishes `Physical`, `ArtificialCut`,
+/// FORMAL_SYSTEM.md Â§IX distinguishes `Physical`, `ArtificialCut`,
 /// `NativeBoundary` and `SingularLink`; Definition 20 gives them different
-/// material constraints — a physical half-edge pins `μ_L = 1, μ_R = 0` while an
-/// artificial cut requires `μ_L = μ_R`. This enum is that distinction, carried
+/// material constraints â€” a physical half-edge pins `Î¼_L = 1, Î¼_R = 0` while an
+/// artificial cut requires `Î¼_L = Î¼_R`. This enum is that distinction, carried
 /// far enough to make the A1 experiment causal.
 ///
 /// It is deliberately *not* the general cell-constraint solver. Parity is still
@@ -6427,42 +6561,87 @@ pub enum ConstraintRole {
     UnresolvedSyntheticClosure,
 }
 
+/// The semantic identity of one presented boundary constraint, per face.
+///
+/// Mints from a per-face counter, one identity per presented semantic
+/// constraint request. A request may realize as one CDT edge today, or as N
+/// child edges under PLANAR-C; all those realized edges carry the same
+/// [`SemanticConstraintId`]. It is deliberately **not** a diagnostic sink index,
+/// a Spade edge handle, an array address, or a global counter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SemanticConstraintId(usize);
+
+/// One semantic claim on a realized constraint edge.
+///
+/// [`Self::source_uses`] is the contributor set from PLANAR-A: the source edge
+/// uses whose presented segment this claim realizes. It may be empty for
+/// synthetic (seam/closure) and interior-sampling constraints.
+#[derive(Clone, Debug)]
+pub struct ConstraintClaim {
+    /// Which presented semantic constraint this claim belongs to.
+    pub semantic_id: SemanticConstraintId,
+    /// The material role the segment is entitled to. The **first** claim on an
+    /// edge decides its role; later claims are retained for the census.
+    pub role: ConstraintRole,
+    /// The source edge uses that contributed the presented segment.
+    pub source_uses: Vec<SourceEdgeUse>,
+}
+
+/// The per-edge payload stored in Spade's `UE` slot.
+///
+/// The handle IS the identity: an edge that survives a split carries its claims
+/// for free (`E0` keeps the payload; `E1` is default-constructed and must be
+/// repaired by [`ConstraintRoles::repair_split`]). All realized edges of one
+/// semantic constraint share that constraint's [`SemanticConstraintId`].
+#[derive(Default, Clone, Debug)]
+pub struct ConstraintEdgeData {
+    /// Semantic claims on this edge, in attachment order. `role_of` reads the
+    /// first; the census reads them all.
+    pub claims: Vec<ConstraintClaim>,
+}
+
 /// Roles for the constraint edges of one face's triangulation.
 ///
-/// A side table rather than a Spade edge-data parameter: `add_constraint` does
-/// not hand back the edges it marked, so a role can only be attached by looking
-/// the edge up afterwards. When that lookup fails — Spade may mark a collinear
-/// chain rather than the direct edge — the role is genuinely unresolved, and
-/// [`Self::role_of`] says so rather than guessing.
+/// Since ARR-PLANAR W5 the role/provenance source of truth lives in Spade's
+/// `UE` slot ([`ConstraintEdgeData`]) rather than in this side table: the old
+/// `roles: HashMap<FixedUndirectedEdgeHandle, ConstraintRole>` could not survive
+/// CDT mutation, because splitting re-handles or relocates the blocking edge.
+/// What remains here is exactly what the `UE` slot cannot hold: traversal
+/// multiplicity (a per-handle count, deliberately kept handle-keyed during
+/// INFRA), the census counts, the unresolved-at-flood counter, and the
+/// per-face semantic-id counter.
 #[derive(Debug, Default)]
 struct ConstraintRoles {
-    roles: HashMap<FixedUndirectedEdgeHandle, ConstraintRole>,
     /// Constraint edges the flood met that no `record` call had claimed.
     /// Counted, not assumed: this is the size of the gap between what we asked
     /// Spade to constrain and what we can name (CDT-001, CDT-002).
     unresolved_at_flood: std::cell::Cell<usize>,
-    /// How many edges each role claimed, for the experiment's own report.
+    /// How many semantic claims each role contributed, for the experiment's
+    /// own report. A claim/contributor count: under duplicate traversals (and
+    /// split children in PLANAR-C) an edge can carry several claims.
     recorded: HashMap<ConstraintRole, usize>,
-    /// How many edges each *origin* claimed. Distinct from `recorded`: several
-    /// origins deliberately share one role while the material semantics of
-    /// synthesised geometry stay unchanged, so without this the synthetic
-    /// populations are indistinguishable in the census.
+    /// How many semantic claims each *origin* contributed. Distinct from
+    /// `recorded`: several origins deliberately share one role while the
+    /// material semantics of synthesised geometry stay unchanged, so without
+    /// this the synthetic populations are indistinguishable in the census.
     origin_census: HashMap<SegmentOrigin, usize>,
     /// How many times the face's boundary traversed each constraint edge.
     ///
-    /// [`Self::roles`] is a set and cannot answer this: when two boundary
-    /// segments realize onto one CDT edge, the second `record` is a no-op and
-    /// the second traversal leaves no trace. Material parity is the boundary's
-    /// winding number mod 2, so a twice-traversed edge must contribute
-    /// *nothing* — counting is the only way to know that it should.
+    /// Material parity is the boundary's winding number mod 2, so a
+    /// twice-traversed edge must contribute *nothing* — counting is the only
+    /// way to know that it should. In INFRA this map stays handle-keyed; the
+    /// split contract (B7) propagates counts explicitly when a split happens.
     traversals: HashMap<FixedUndirectedEdgeHandle, usize>,
+    /// The per-face counter minting [`SemanticConstraintId`]s, in presentation
+    /// order. Deterministic because it is a plain local counter.
+    next_semantic_id: usize,
 }
 
 /// Which reading of "this constraint edge separates material" the parity flood
 /// is using.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ParityReading {
-    /// Every edge a boundary segment realized toggles, exactly once — the set
+    /// Every edge a boundary segment realized toggles, exactly once â€” the set
     /// reading, which is what the flood has always used.
     Legacy,
     /// An edge toggles only if the boundary traversed it an *odd* number of
@@ -6473,18 +6652,27 @@ enum ParityReading {
 }
 
 impl ConstraintRoles {
-    fn record(&mut self, edge: FixedUndirectedEdgeHandle, role: ConstraintRole) {
-        // First claim wins. A later, weaker claim must not overwrite a physical
-        // boundary: an interior grid segment that happens to land on an edge a
-        // trim segment already constrained is still a trim segment.
-        if !self.roles.contains_key(&edge) {
-            self.roles.insert(edge, role);
-            *self.recorded.entry(role).or_insert(0) += 1;
-        }
+    /// Mint the next per-face semantic constraint identity, in presentation
+    /// order. Deterministic: a plain local counter.
+    fn mint_semantic_constraint_id(&mut self) -> SemanticConstraintId {
+        let id = SemanticConstraintId(self.next_semantic_id);
+        self.next_semantic_id += 1;
+        id
     }
 
-    fn role_of(&self, edge: FixedUndirectedEdgeHandle) -> Option<ConstraintRole> {
-        self.roles.get(&edge).copied()
+    /// The first semantic claim's role on an edge, read from the CDT's `UE`
+    /// payload.
+    ///
+    /// First claim wins: a later, weaker claim must not overwrite a physical
+    /// boundary — an interior grid segment that happens to land on an edge a
+    /// trim segment already constrained is still a trim segment.
+    fn role_of(cdt: &Cdt, edge: FixedUndirectedEdgeHandle) -> Option<ConstraintRole> {
+        cdt.undirected_edge(edge)
+            .data()
+            .data()
+            .claims
+            .first()
+            .map(|claim| claim.role)
     }
 
     /// Whether a constraint edge is entitled to flip material parity.
@@ -6493,12 +6681,12 @@ impl ConstraintRoles {
     /// material category and must not be answered with one.
     ///
     /// **G5b: fail closed.** This previously returned `true` for an unresolved
-    /// edge — an unjustified material assertion. Answering `false` instead
+    /// edge â€” an unjustified material assertion. Answering `false` instead
     /// would have been the same mistake facing the other way: both invent a
     /// semantics for an edge the code cannot name. Since G5a labels the whole
     /// realized chain, every constraint edge this face requested has a role, and
     /// an unresolved one is an invariant violation rather than a legitimate
-    /// category — so it is reported, not guessed.
+    /// category â€” so it is reported, not guessed.
     ///
     /// Measured after G5a: zero occurrences on ABC `00009190`, so this guard
     /// lands provably non-firing.
@@ -6508,10 +6696,11 @@ impl ConstraintRoles {
     /// see [`Self::traversals`].
     fn toggles_material(
         &self,
+        cdt: &Cdt,
         edge: FixedUndirectedEdgeHandle,
         reading: ParityReading,
     ) -> Option<bool> {
-        let toggles = match self.role_of(edge) {
+        let toggles = match Self::role_of(cdt, edge) {
             Some(ConstraintRole::SurfaceSampling) => Some(false),
             Some(ConstraintRole::ArtificialCut) => Some(false),
             Some(ConstraintRole::PhysicalBoundary) => Some(true),
@@ -6521,7 +6710,7 @@ impl ConstraintRoles {
             // keeps its legacy answer and is decided when G6 first builds it.
             Some(ConstraintRole::NativeBoundary) => Some(true),
             // Definition 20's second bullet says an artificial cut generates
-            // μ_L = μ_R, which would make this `false`. **Measured, and it
+            // Î¼_L = Î¼_R, which would make this `false`. **Measured, and it
             // recovers nothing**: read as non-toggling, all 126 contradicting
             // faces on `00009190` still contradict, and the odd-vertex count
             // rises rather than falls. The synthesised segments sit inside a
@@ -6540,7 +6729,7 @@ impl ConstraintRoles {
             (Some(true), ParityReading::TraversalParity) => {
                 // Absent from `traversals` means the edge was never traversed
                 // by a boundary segment at all, which for a toggling role can
-                // only be a bookkeeping gap — read it as one traversal, so this
+                // only be a bookkeeping gap â€” read it as one traversal, so this
                 // reading is never *weaker* than the legacy one by accident.
                 let crossings = self.traversals.get(&edge).copied().unwrap_or(1);
                 Some(crossings % 2 == 1)
@@ -6548,13 +6737,418 @@ impl ConstraintRoles {
             _ => toggles,
         }
     }
+
+    /// Label a realized constraint chain with one semantic claim, mechanically.
+    ///
+    /// For every undirected edge of `chain` (in Spade's realized order) this
+    /// attaches the given claim to the edge's `UE` payload, increments the
+    /// traversal count exactly as the pre-W5 code did, and updates the role and
+    /// origin censuses. First-role semantics come from `claims.first()`; the
+    /// claim's identity is retained for the census. `origin` is `None` for
+    /// interior-sampling constraints, which have no [`SegmentOrigin`].
+    fn label_realized_chain(
+        &mut self,
+        cdt: &mut Cdt,
+        chain: &[FixedDirectedEdgeHandle],
+        semantic_id: SemanticConstraintId,
+        role: ConstraintRole,
+        source_uses: &[SourceEdgeUse],
+        origin: Option<SegmentOrigin>,
+    ) {
+        for directed in chain {
+            let handle = cdt.directed_edge(*directed).as_undirected().fix();
+            let claim = ConstraintClaim {
+                semantic_id,
+                role,
+                source_uses: source_uses.to_vec(),
+            };
+            cdt.undirected_edge_data_mut(handle)
+                .data_mut()
+                .claims
+                .push(claim);
+            *self.traversals.entry(handle).or_insert(0) += 1;
+            *self.recorded.entry(role).or_insert(0) += 1;
+            if let Some(origin) = origin {
+                *self.origin_census.entry(origin).or_insert(0) += 1;
+            }
+        }
+    }
+
+    /// B7 split-repair primitive: propagate a parent edge's claim data onto its
+    /// two split children.
+    ///
+    /// Spade 2.15.1 splits a blocking constraint `E` into `[E0, E1]` where `E0`
+    /// is the original handle (it keeps the `UE` payload verbatim) and `E1` is
+    /// a fresh default-constructed [`ConstraintEdgeData`]. Spade never clones
+    /// the payload, so the child that kept its handle is already correct and
+    /// only `E1` needs the parent's claims copied.
+    ///
+    /// Traversal rule: if the parent was traversed `t` times, every full-chord
+    /// traversal now crosses both children, so `E0.traversals = t` and
+    /// `E1.traversals = t`. This preserves mod-2 material parity per child.
+    ///
+    /// Not wired into the production path in INFRA; PLANAR-C calls it after each
+    /// split.
+    fn repair_split(
+        &mut self,
+        cdt: &mut Cdt,
+        parent: FixedUndirectedEdgeHandle,
+        child0: FixedUndirectedEdgeHandle,
+        child1: FixedUndirectedEdgeHandle,
+    ) {
+        let parent_claims = cdt.undirected_edge_data_mut(parent).data().claims.clone();
+        let parent_traversals = self.traversals.get(&parent).copied().unwrap_or(0);
+        cdt.undirected_edge_data_mut(child1)
+            .data_mut()
+            .claims
+            .extend(parent_claims);
+        *self.traversals.entry(child0).or_insert(0) = parent_traversals;
+        *self.traversals.entry(child1).or_insert(0) = parent_traversals;
+    }
+
+    /// B8 fallback-relocation repair primitive: move a lost edge's semantic
+    /// claims onto its replacement edges.
+    ///
+    /// Spade's fallback transforms an old constraint `E` into a detour
+    /// `prev + next` by unmaking `E` and making `prev`/`next`. The `UE` payloads
+    /// themselves do not move, so the repair contract is explicit: snapshot the
+    /// lost edge's claims and traversal count before the mutation, then append
+    /// the claims onto each replacement edge (preserving any legitimate
+    /// pre-existing claims there) and combine the traversal counts — each
+    /// replacement edge now represents the same semantic traversals the lost
+    /// edge did, so `replacement.traversals += lost.traversals` when both
+    /// exist. First-role behavior stays deterministic because it is decided by
+    /// claim order within each edge.
+    ///
+    /// Not wired into the production path in INFRA; PLANAR-C calls it from a
+    /// before/after constraint-set snapshot. `lost` is the handle whose edge
+    /// stopped being a constraint; `replacements` are the handles that gained
+    /// the constraint bit in the same face.
+    fn repair_relocation(
+        &mut self,
+        cdt: &mut Cdt,
+        lost: FixedUndirectedEdgeHandle,
+        replacements: &[FixedDirectedEdgeHandle],
+    ) {
+        let lost_claims = cdt.undirected_edge_data_mut(lost).data().claims.clone();
+        let lost_traversals = self.traversals.get(&lost).copied().unwrap_or(0);
+        for directed in replacements {
+            let handle = cdt.directed_edge(*directed).as_undirected().fix();
+            cdt.undirected_edge_data_mut(handle)
+                .data_mut()
+                .claims
+                .extend(lost_claims.clone());
+            *self.traversals.entry(handle).or_insert(0) += lost_traversals;
+        }
+    }
+
+    /// PLANAR-C: present one boundary segment to the CDT with explicit
+    /// proper-crossing planarization.
+    ///
+    /// This is the production replacement for the `try_add_constraint` refusal
+    /// route. Spade's `add_constraint_and_split` subdivides the incoming
+    /// segment at every proper interior crossing and splits the blocker edges
+    /// it crosses, so `A --- B` crossing `C --- D` becomes four atomic
+    /// constrained edges meeting at the new vertex `X`. In one call this:
+    ///
+    /// 1. snapshots the blockers the segment properly crosses;
+    /// 2. calls `add_constraint_and_split` (new crossing vertices are rounded
+    ///    exactly as boundary vertices are, so the vertex snaps like a
+    ///    presented boundary point and gets `surface.subs` 3D positioning);
+    /// 3. labels the authoritative returned chain with the incoming claim,
+    ///    role, source uses, and one traversal per child
+    ///    ([`Self::label_realized_chain`]);
+    /// 4. repairs every split blocker via [`Self::repair_split`] (children
+    ///    inherit the complete parent payload and traversal count) and every
+    ///    fallback relocation via [`Self::repair_relocation`].
+    ///
+    /// The returned [`CrossingSplitReport`] carries the authoritative realized
+    /// chain plus the census counters; the caller must not assume `vi -> vj`
+    /// exists as one edge afterwards.
+    fn insert_with_split(
+        &mut self,
+        cdt: &mut Cdt,
+        vi: FixedVertexHandle,
+        vj: FixedVertexHandle,
+        semantic_id: SemanticConstraintId,
+        role: ConstraintRole,
+        source_uses: &[SourceEdgeUse],
+        origin: Option<SegmentOrigin>,
+    ) -> std::result::Result<CrossingSplitReport, TessellationFailureReason> {
+        // The blockers this segment properly crosses, in Spade's walk order,
+        // with each blocker's original endpoints recorded *before* the split.
+        // Only these edges can be split, so the full constraint-set snapshot
+        // below is skipped in the common no-crossing case.
+        let blockers: Vec<(FixedUndirectedEdgeHandle, [FixedVertexHandle; 2])> = cdt
+            .get_conflicting_edges_between_vertices(vi, vj)
+            .map(|edge| {
+                let handle = edge.as_undirected().fix();
+                (handle, edge_vertices(cdt, handle))
+            })
+            .collect();
+        let before_set = (!blockers.is_empty()).then(|| {
+            let mut set = HashSet::default();
+            for edge in cdt.undirected_edges() {
+                if edge.is_constraint_edge() {
+                    set.insert(edge.fix());
+                }
+            }
+            set
+        });
+        let vertices_before = cdt.num_vertices();
+
+        // Split. The vertex constructor receives Spade's computed intersection
+        // point and rounds it with the same convention as boundary vertices, so
+        // the inserted vertex participates in the CDT on an equal footing.
+        //
+        // Spade's splitting API has two internal assertions that can fire on a
+        // dense crossing network: after inserting a split vertex it re-presents
+        // `from -> final_vertex` and panics if that sub-segment still properly
+        // crosses another constraint, and its split-position location guards
+        // against an infinite loop with a panic. Both are aborts inside the
+        // call, so this is caught here and the face fails closed with the same
+        // refusal the old `try_add_constraint` route produced — a face whose
+        // crossing network Spade cannot planarize is a typed failure, never a
+        // model abort. The per-face `Cdt` is abandoned on the failure path, so
+        // the partially-mutated triangulation is never read.
+        let chain = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cdt.add_constraint_and_split(vi, vj, |pt: spade::Point2<f64>| {
+                SPoint2::new(spade_round(pt.x), spade_round(pt.y))
+            })
+        })) {
+            Ok(chain) => chain,
+            Err(_) => return Err(TessellationFailureReason::ConstraintInsertionIncomplete),
+        };
+        let split_vertices = cdt.num_vertices() - vertices_before;
+
+        // The incoming claim, role, source uses, and traversal land on every
+        // realized child; the returned chain is authoritative.
+        self.label_realized_chain(cdt, &chain, semantic_id, role, source_uses, origin);
+
+        let mut blockers_split = 0usize;
+        let mut blockers_relocated = 0usize;
+        if let Some(before_set) = before_set {
+            let chain_set: HashSet<FixedUndirectedEdgeHandle> = chain
+                .iter()
+                .map(|directed| cdt.directed_edge(*directed).as_undirected().fix())
+                .collect();
+            // Newly created constraint edges: not present before this call and
+            // not part of the incoming chain, so each is either a blocker's
+            // split child or a relocation replacement.
+            let mut new_constraints: Vec<FixedUndirectedEdgeHandle> = Vec::new();
+            for edge in cdt.undirected_edges() {
+                if !edge.is_constraint_edge() {
+                    continue;
+                }
+                let handle = edge.fix();
+                if before_set.contains(&handle) || chain_set.contains(&handle) {
+                    continue;
+                }
+                new_constraints.push(handle);
+            }
+            for &(blocker, blocker_original) in &blockers {
+                if !cdt.is_constraint_edge(blocker) {
+                    // Fallback relocation: Spade un-made the blocker and routed
+                    // the constraint through the two other sides of the face.
+                    // The blocker handle survives (unconstrained) with its
+                    // payload; move that payload onto the detour edges, which
+                    // share exactly one endpoint with it.
+                    let blocker_vertices = edge_vertices(cdt, blocker);
+                    let replacements: Vec<FixedDirectedEdgeHandle> = new_constraints
+                        .iter()
+                        .filter(|handle| {
+                            shares_exactly_one_endpoint(
+                                blocker_vertices,
+                                edge_vertices(cdt, **handle),
+                            )
+                        })
+                        .map(|handle| cdt.undirected_edge(*handle).as_directed().fix())
+                        .collect();
+                    if !replacements.is_empty() {
+                        self.repair_relocation(cdt, blocker, &replacements);
+                        blockers_relocated += 1;
+                    }
+                } else {
+                    // Split: the blocker kept its handle (`E0`) with its payload
+                    // intact; the new child `E1` shares the crossing vertex with
+                    // it, and the child plus the surviving half jointly span the
+                    // blocker's *original* endpoints. This is an exact vertex-
+                    // handle test: float collinearity cannot decide it, because
+                    // the two halves of one straight edge are collinear in real
+                    // arithmetic but differ by rounding in an exact predicate.
+                    let blocker_vertices = edge_vertices(cdt, blocker);
+                    let children: Vec<FixedUndirectedEdgeHandle> = new_constraints
+                        .iter()
+                        .copied()
+                        .filter(|handle| {
+                            let candidate = edge_vertices(cdt, *handle);
+                            shares_exactly_one_endpoint(blocker_vertices, candidate)
+                                && spans_original_endpoints(
+                                    blocker_vertices,
+                                    candidate,
+                                    blocker_original,
+                                )
+                        })
+                        .collect();
+                    for child in children {
+                        self.repair_split(cdt, blocker, blocker, child);
+                        blockers_split += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(CrossingSplitReport {
+            chain,
+            blockers_crossed: blockers.len(),
+            blockers_split,
+            blockers_relocated,
+            split_vertices,
+        })
+    }
+
+    /// Backstop repair: no constraint edge may reach the parity flood without a
+    /// claim, or the face fails closed with `ConstraintRoleMissing`.
+    ///
+    /// [`Self::insert_with_split`] repairs every blocker its own call splits,
+    /// but Spade can create an unclaimed constraint edge in two places that
+    /// call cannot see: when a vertex inserted by [`PolyBoundary::insert_to`]
+    /// or [`insert_surface`] lands exactly on an existing constraint edge, the
+    /// edge is split and the fresh child is `UE::default()`. This sweeps the
+    /// whole CDT and attaches the claim of the labeled edge each unclaimed
+    /// child continues: the surviving half shares the split vertex with it and
+    /// lies on the same line.
+    ///
+    /// The same-line test here is a semantic-matching tolerance, not a
+    /// tessellation tolerance: the two halves of one straight constraint are
+    /// collinear in real arithmetic but differ by rounding in an exact
+    /// predicate, so an exact orientation test cannot recognize them.
+    fn repair_unlabeled_constraint_edges(&mut self, cdt: &mut Cdt) {
+        let unlabeled: Vec<FixedUndirectedEdgeHandle> = cdt
+            .undirected_edges()
+            .filter(|edge| edge.is_constraint_edge())
+            .filter(|edge| edge.data().data().claims.is_empty())
+            .map(|edge| edge.fix())
+            .collect();
+        for handle in unlabeled {
+            let candidate = edge_vertices(cdt, handle);
+            let candidate_positions = cdt.undirected_edge(handle).positions();
+            let mut parents: Vec<FixedUndirectedEdgeHandle> = Vec::new();
+            for edge in cdt.undirected_edges() {
+                if !edge.is_constraint_edge() || edge.fix() == handle {
+                    continue;
+                }
+                if edge.data().data().claims.is_empty() {
+                    continue;
+                }
+                let parent = edge_vertices(cdt, edge.fix());
+                if !shares_exactly_one_endpoint(parent, candidate) {
+                    continue;
+                }
+                if same_line(
+                    candidate_positions,
+                    cdt.undirected_edge(edge.fix()).positions(),
+                ) {
+                    parents.push(edge.fix());
+                }
+            }
+            let Some(&parent) = parents.first() else {
+                continue;
+            };
+            self.repair_split(cdt, parent, parent, handle);
+        }
+    }
+}
+
+/// Whether two segments lie on one supporting line, within the float rounding
+/// of a real collinearity.
+///
+/// This is a matching predicate for split-children repair only; it is not used
+/// for any geometry decision and cannot change the tessellation.
+fn same_line(a: [SPoint2; 2], b: [SPoint2; 2]) -> bool {
+    let cross =
+        |p: SPoint2, q: SPoint2, r: SPoint2| (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+    let len2 = (a[1].x - a[0].x) * (a[1].x - a[0].x) + (a[1].y - a[0].y) * (a[1].y - a[0].y);
+    let slack = 1e-9 * len2.max(1e-12);
+    cross(a[0], a[1], b[0]).abs() <= slack && cross(a[0], a[1], b[1]).abs() <= slack
+}
+
+/// What one [`ConstraintRoles::insert_with_split`] call did to the CDT.
+///
+/// The realized chain is authoritative: the caller must label and iterate the
+/// returned edges, never a presumed single `vi -> vj` edge. The counters feed
+/// the probe census so a run can answer how much of the residual tail is
+/// proper-crossing planarization.
+#[derive(Debug, Default)]
+pub(crate) struct CrossingSplitReport {
+    /// The realized incoming chain, in Spade's order. Always non-empty for a
+    /// distinct `vi != vj`.
+    pub chain: Vec<FixedDirectedEdgeHandle>,
+    /// Constraint edges the segment properly crossed.
+    pub blockers_crossed: usize,
+    /// Crossed blockers repaired through [`ConstraintRoles::repair_split`].
+    pub blockers_split: usize,
+    /// Crossed blockers repaired through [`ConstraintRoles::repair_relocation`].
+    pub blockers_relocated: usize,
+    /// New vertices introduced at crossing points.
+    pub split_vertices: usize,
+}
+
+/// The two fixed vertex handles of an undirected edge, for endpoint matching
+/// after a split without relying on float equality.
+fn edge_vertices(cdt: &Cdt, handle: FixedUndirectedEdgeHandle) -> [FixedVertexHandle; 2] {
+    let directed = cdt.undirected_edge(handle).as_directed();
+    [directed.from().fix(), directed.to().fix()]
+}
+
+/// Whether `candidate` shares exactly one endpoint with `anchor`.
+///
+/// Vertex-handle identity, not coordinate equality: the crossing vertex a split
+/// child shares with its parent is one fixed vertex, so handle comparison is
+/// exact where a float comparison would be fragile.
+fn shares_exactly_one_endpoint(
+    anchor: [FixedVertexHandle; 2],
+    candidate: [FixedVertexHandle; 2],
+) -> bool {
+    let shared = usize::from(anchor[0] == candidate[0] || anchor[0] == candidate[1])
+        + usize::from(anchor[1] == candidate[0] || anchor[1] == candidate[1]);
+    shared == 1
+}
+
+/// Whether a blocker's surviving half plus a candidate child jointly span the
+/// blocker's original endpoints.
+///
+/// After Spade splits a blocker at the crossing vertex `X`, the surviving half
+/// keeps its handle (spans `C-X` or `X-D`) and the new child spans the other
+/// half. Their union is exactly the blocker's three distinct vertices `{C, X,
+/// D}`. This is the exact, float-free test that a candidate is genuinely this
+/// blocker's split child: it is not enough to share the crossing vertex, and
+/// exact collinearity cannot decide it, because the two halves of one straight
+/// edge are collinear in real arithmetic but differ by rounding in an exact
+/// orientation predicate.
+fn spans_original_endpoints(
+    surviving_half: [FixedVertexHandle; 2],
+    candidate: [FixedVertexHandle; 2],
+    original: [FixedVertexHandle; 2],
+) -> bool {
+    let mut covered = surviving_half.to_vec();
+    covered.extend(candidate);
+    for &vertex in &original {
+        if !covered.contains(&vertex) {
+            return false;
+        }
+    }
+    let mut distinct = covered;
+    distinct.sort();
+    distinct.dedup();
+    distinct.len() == 3
 }
 
 /// Why one face could not be tessellated.
 ///
 /// Seven of these variants are declared but never constructed, and are marked
 /// as such below. They are retained rather than deleted because each names a
-/// stage the formal system requires and this implementation does not yet have —
+/// stage the formal system requires and this implementation does not yet have â€”
 /// deleting them would erase the fact that the case is unhandled, which is the
 /// opposite of what a typed outcome is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
@@ -6596,25 +7190,25 @@ pub enum TessellationFailureReason {
     /// At least one boundary segment could not be represented as a constraint.
     ///
     /// Almost always a proper crossing of an earlier segment of this same
-    /// face's boundary — which is what a folded lift produces.
+    /// face's boundary â€” which is what a folded lift produces.
     ConstraintInsertionIncomplete,
     /// A certified intersection was found that the envelope does not admit.
-    /// **Never constructed** — no intersection classification stage exists yet.
+    /// **Never constructed** â€” no intersection classification stage exists yet.
     ConstraintIntersectionUnsupported,
     /// A collinear overlap was found that the envelope does not admit.
-    /// **Never constructed** — no overlap normalization stage exists yet.
+    /// **Never constructed** â€” no overlap normalization stage exists yet.
     ConstraintOverlapUnsupported,
     /// The triangulation could not be built at all. **Never constructed.**
     CdtConstructionFailed,
     /// A vertex evaluated to a non-finite 3D position.
     NonFinitePosition,
-    /// A constraint edge carried no resolvable role. **Never constructed** —
+    /// A constraint edge carried no resolvable role. **Never constructed** â€”
     /// today an unresolved role silently keeps its legacy toggling behaviour.
     ConstraintRoleMissing,
     /// A constraint chain degenerated to a point. **Never constructed.**
     DegenerateConstraintChain,
     /// Parity selected cells but none yielded a finite triangle.
-    /// **Never constructed** — the empty case reports [`Self::NoOddParityRegion`].
+    /// **Never constructed** â€” the empty case reports [`Self::NoOddParityRegion`].
     NoFiniteTrianglesAfterParity,
 }
 
@@ -6746,8 +7340,14 @@ where
 {
     let mut triangulation = Cdt::new();
     let mut boundary_map = HashMap::<FixedVertexHandle, Point3>::default();
+    let mut vertex_sources = HashMap::<FixedVertexHandle, Vec<SourceEdgeUse>>::default();
     let mut roles = ConstraintRoles::default();
-    if let Err(reason) = polyboundary.insert_to(&mut triangulation, &mut boundary_map, &mut roles) {
+    if let Err(reason) = polyboundary.insert_to(
+        &mut triangulation,
+        &mut boundary_map,
+        &mut roles,
+        &mut vertex_sources,
+    ) {
         return TessellationOutcome::Failed(reason.into());
     }
     let (samples_on_boundary, sampling_location_unresolved) =
@@ -6758,6 +7358,7 @@ where
         polyboundary,
         &boundary_map,
         &roles,
+        &vertex_sources,
         lattice,
     );
     if std::env::var_os("TRUCK_PROBE_ROLES").is_some() {
@@ -6805,8 +7406,8 @@ where
 /// Tessellates one surface trimmed by polyline, preserving why it failed.
 ///
 /// **G8.** The mesh-only form below discards a fully-formed
-/// [`TessellationFailure`] — including `ContradictoryDualParity`, which is a
-/// *proved* inconsistency — and returns an empty mesh that the caller cannot
+/// [`TessellationFailure`] â€” including `ContradictoryDualParity`, which is a
+/// *proved* inconsistency â€” and returns an empty mesh that the caller cannot
 /// distinguish from a face that legitimately meshed to nothing. Detection was
 /// never the missing part; the value was constructed and then destroyed one
 /// line later. This form is the same computation with the result kept.
@@ -6866,25 +7467,36 @@ fn insert_surface(
     // Grid samples on a boundary segment, by direct test.
     let mut on_boundary = 0usize;
     // Grid samples no method located. Not "outside", and not known to be on the
-    // boundary either — simply unestablished.
+    // boundary either â€” simply unestablished.
     let mut location_unresolved = 0usize;
     // Audit A1: every constraint added below is an interior sampling edge. It
     // exists to control triangle shape and lies wholly inside the material
-    // region — `polyline.include` gated the insertion of both its endpoints.
+    // region â€” `polyline.include` gated the insertion of both its endpoints.
     // It carries no material meaning and must not toggle parity.
     // G5a, and the more consequential half of it.
     //
     // A trim segment that loses its role is still treated as a trim segment,
     // because the unresolved default toggles. A *sampling grid* segment that
-    // loses its role is treated as a trim segment too — and that is exactly the
+    // loses its role is treated as a trim segment too â€” and that is exactly the
     // defect audit A1 removed, reappearing through the chain-splitting hole
     // rather than through the one-bit test A1 fixed. Labelling the whole
     // realized chain closes it.
     let mut constrain = |triangulation: &mut Cdt, a: FixedVertexHandle, b: FixedVertexHandle| {
-        for directed in triangulation.try_add_constraint(a, b) {
-            let handle = triangulation.directed_edge(directed).as_undirected().fix();
-            roles.record(handle, ConstraintRole::SurfaceSampling);
+        let chain = triangulation.try_add_constraint(a, b);
+        if chain.is_empty() {
+            return;
         }
+        // PLANAR-B B6: interior sampling constraints carry no source uses and
+        // have no SegmentOrigin; each realized chain gets its own semantic id.
+        let id = roles.mint_semantic_constraint_id();
+        roles.label_realized_chain(
+            triangulation,
+            &chain,
+            id,
+            ConstraintRole::SurfaceSampling,
+            &[],
+            None,
+        );
     };
     let bdb: BoundingBox<Point2> = polyline
         .0
@@ -6902,9 +7514,9 @@ fn insert_surface(
                 // vertex here", not "is this point material". Only `Inside`
                 // earns a vertex; the other three decline.
                 //
-                // Declining asserts nothing about material state — that is
+                // Declining asserts nothing about material state â€” that is
                 // decided later by constraint roles and the dual labelling,
-                // never by this predicate — so skipping is the correct
+                // never by this predicate â€” so skipping is the correct
                 // conservative answer to the question actually being asked, and
                 // refusing the whole face over a shape-control sample would
                 // discard geometry for no semantic gain.
@@ -6946,6 +7558,10 @@ fn insert_surface(
             constrain(triangulation, x, y);
         }
     });
+    // PLANAR-C backstop: a grid vertex inserted exactly on a planarized
+    // boundary constraint splits it into an unclaimed child; repair those
+    // before the flood.
+    roles.repair_unlabeled_constraint_edges(triangulation);
     (on_boundary, location_unresolved)
 }
 
@@ -6986,7 +7602,7 @@ fn flood_parity(
                 // The outer face has no adjacent edge, so the CDT holds fewer
                 // than three distinct vertices: there are no inner faces and no
                 // material region to select. This was an `unwrap`, and it
-                // aborts the *whole model* rather than the face — `00005641`
+                // aborts the *whole model* rather than the face â€” `00005641`
                 // panicked here the moment WAVE-4B started returning closed-form
                 // parameters for boundaries that used to fail projection
                 // outright, some of which collapse to a point in the chart.
@@ -6998,14 +7614,14 @@ fn flood_parity(
             },
         };
         for e in edges {
-            // Audit A1. This was `e.is_constraint_edge()` — one bit, so an
+            // Audit A1. This was `e.is_constraint_edge()` â€” one bit, so an
             // interior sampling constraint flipped material parity exactly as a
             // trim segment did. A constraint edge is now only a material
             // transition if its role says so.
             let is_domain_boundary = if e.is_constraint_edge() {
                 // G5b: an edge with no resolvable role stops the face rather
                 // than being assigned a material meaning it does not have.
-                match roles.toggles_material(e.as_undirected().fix(), reading) {
+                match roles.toggles_material(triangulation, e.as_undirected().fix(), reading) {
                     Some(toggles) => toggles,
                     None => return Err(TessellationFailureReason::ConstraintRoleMissing),
                 }
@@ -7044,7 +7660,7 @@ fn flood_parity(
 /// if the walk crosses an even number of toggling edges; a single odd vertex
 /// anywhere makes [`flood_parity`] contradict itself no matter which order it
 /// visits faces in. Zero odd vertices means the toggling subgraph is a cycle
-/// mod 2 — a closed boundary — and the flood cannot fail.
+/// mod 2 â€” a closed boundary â€” and the flood cannot fail.
 ///
 /// So this separates "the material reading of some role is wrong" from "the
 /// constraint set is not a closed boundary at all", which no count of failures
@@ -7060,7 +7676,7 @@ fn odd_toggling_vertices(
         if !e.is_constraint_edge() {
             continue;
         }
-        if roles.toggles_material(e.fix(), reading) != Some(true) {
+        if roles.toggles_material(triangulation, e.fix(), reading) != Some(true) {
             continue;
         }
         for v in e.vertices() {
@@ -7077,6 +7693,7 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
     _polyline: &PolyBoundary,
     boundary_map: &HashMap<FixedVertexHandle, Point3>,
     roles: &ConstraintRoles,
+    vertex_sources: &HashMap<FixedVertexHandle, Vec<SourceEdgeUse>>,
     lattice: &CertifiedLattice,
 ) -> TessellationOutcome {
     use std::collections::HashMap as StdHashMap;
@@ -7088,10 +7705,18 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
     let flooded = flood_parity(triangulation, roles, reading);
     if std::env::var("TRUCK_PROBE_PARITY").is_ok() {
         let repeated = roles.traversals.values().filter(|n| **n > 1).count();
+        let constraint_edges = triangulation
+            .undirected_edges()
+            .filter(|e| e.is_constraint_edge())
+            .count();
+        let semantic_claims = triangulation
+            .undirected_edges()
+            .map(|e| e.data().data().claims.len())
+            .sum::<usize>();
         eprintln!(
-            "PARITY\treading={reading:?}\tconstraint_edges={}\trepeated_traversals={repeated}\t\
+            "PARITY\treading={reading:?}\tconstraint_edges={constraint_edges}\t\
+             semantic_claims={semantic_claims}\trepeated_traversals={repeated}\t\
              odd_legacy={}\todd_winding={}\toutcome={}",
-            roles.roles.len(),
             odd_toggling_vertices(triangulation, roles, ParityReading::Legacy),
             odd_toggling_vertices(triangulation, roles, ParityReading::TraversalParity),
             match &flooded {
@@ -7162,6 +7787,24 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
             };
             normals.push(n_valid);
 
+            // PLANAR-A A6: populate `source_edge_use` only where the vertex has
+            // exactly one distinct contributing source edge use. A junction
+            // vertex shared by two edges, a snapped duplicate, or a synthetic
+            // vertex carries several or no uses and is left `None` rather than
+            // given a fabricated attribution.
+            let source_edge_use = {
+                let mut distinct: Vec<SourceEdgeUse> = Vec::new();
+                for &use_ in vertex_sources.get(&idx).into_iter().flatten() {
+                    if !distinct.contains(&use_) {
+                        distinct.push(use_);
+                    }
+                }
+                match distinct.as_slice() {
+                    [single] => Some(single.index),
+                    _ => None,
+                }
+            };
+
             vertex_metadata.push(VertexMetadata {
                 uv: Point2::new(p.x, p.y),
                 generation: if boundary_map.contains_key(&idx) {
@@ -7170,7 +7813,7 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
                     VertexGeneration::SurfaceEvaluation
                 },
                 roles,
-                source_edge_use: None,
+                source_edge_use,
                 seam_pair: None,
                 singular_group: None,
             });
@@ -7188,7 +7831,7 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
     // Selection and validation are two stages, and they are counted as two.
     // Fused into one chained iterator, as they were, a face where parity chose
     // no region and a face where parity chose a region that validation then
-    // emptied both arrive at `NoOddParityRegion` indistinguishable — and that
+    // emptied both arrive at `NoOddParityRegion` indistinguishable â€” and that
     // reason carries 342 faces. The behaviour is unchanged: same predicates,
     // same order, same result.
     let stage_raw_cdt_triangles = triangulation.inner_faces().count();
@@ -7297,12 +7940,14 @@ fn triangulation_into_polymesh<S: ParametricSurface3D>(
     roles: &ConstraintRoles,
     lattice: &CertifiedLattice,
 ) -> PolygonMesh {
+    let vertex_sources = HashMap::default();
     match triangulation_into_polymesh_outcome(
         triangulation,
         surface,
         polyline,
         boundary_map,
         roles,
+        &vertex_sources,
         lattice,
     ) {
         TessellationOutcome::Mesh(ft) => ft.mesh,
@@ -7358,7 +8003,7 @@ impl CollapsedPeriodicBoundaryPair {
         };
         let loop0 = &closed[0];
 
-        // 2. Regular loop must span the periodic parameter (winding ±1, span ~ period)
+        // 2. Regular loop must span the periodic parameter (winding Â±1, span ~ period)
         let (p_min, p_max) =
             loop0
                 .iter()
@@ -7683,7 +8328,7 @@ mod cone_topology_tests {
             Vector3::unit_z(),
         );
         let circle = |u: f64, sign: f64| -> PolyBoundaryPiece {
-            PolyBoundaryPiece(
+            PolyBoundaryPiece::untagged(
                 (0..=32)
                     .map(|i| {
                         let v = sign * (i as f64 / 32.0) * 2.0 * PI;
@@ -7697,7 +8342,7 @@ mod cone_topology_tests {
     }
 
     /// The deck equation, on the geometry it was written for: reversing loop 1
-    /// gives `Σδ = ±2`, so the legacy join is refused and forward traversal is
+    /// gives `Î£Î´ = Â±2`, so the legacy join is refused and forward traversal is
     /// named as the unique solution.
     #[test]
     fn opposite_winding_band_selects_forward_traversal() {
@@ -7729,20 +8374,18 @@ mod cone_topology_tests {
         );
     }
 
-    /// The corrected join is what makes the band tessellate: the legacy
-    /// traversal's two bridges cross, and the CDT refuses the second one.
+    /// The corrected join makes the band tessellate under the deck-consistent
+    /// policy, and PLANAR-C now recovers the *legacy* traversal the same way:
+    /// its two crossing bridges are proper interior crossings, so
+    /// `add_constraint_and_split` planarizes them instead of refusing, and the
+    /// material region comes out identical to the corrected traversal.
     #[test]
     fn opposite_winding_band_tessellates_only_when_deck_consistent() {
         let (cylinder, pieces) = opposite_winding_band_pieces();
         let lattice = unevidenced_lattice(&cylinder);
         let legacy = PolyBoundary::new(pieces.clone(), &cylinder, 0.01, &lattice);
-        assert_eq!(
-            trimming_tessellation_result(&cylinder, &legacy, 0.01, &lattice)
-                .err()
-                .map(|failure| failure.reason),
-            Some(TessellationFailureReason::ConstraintInsertionIncomplete),
-            "the crossing bridges are the failure this package is about",
-        );
+        let legacy_mesh = trimming_tessellation_result(&cylinder, &legacy, 0.01, &lattice)
+            .expect("PLANAR-C planarizes the crossing bridges instead of refusing");
         let (corrected, _) = PolyBoundary::new_with_join(
             pieces,
             &cylinder,
@@ -7753,6 +8396,11 @@ mod cone_topology_tests {
         let mesh = trimming_tessellation_result(&cylinder, &corrected, 0.01, &lattice)
             .expect("the deck-consistent boundary tessellates");
         assert!(!mesh.tri_faces().is_empty(), "and produces triangles");
+        assert_eq!(
+            legacy_mesh.tri_faces().len(),
+            mesh.tri_faces().len(),
+            "the planarized legacy traversal selects the same band region as the corrected one",
+        );
     }
 
     /// Two loops winding the *same* way need the reversal, and must not be
@@ -7765,7 +8413,7 @@ mod cone_topology_tests {
             Vector3::unit_z(),
         );
         let circle = |u: f64| -> PolyBoundaryPiece {
-            PolyBoundaryPiece(
+            PolyBoundaryPiece::untagged(
                 (0..=32)
                     .map(|i| {
                         let v = (i as f64 / 32.0) * 2.0 * PI;
@@ -7831,7 +8479,7 @@ mod cone_topology_tests {
                 (uv, cone.subs(uv.x, uv.y)).into()
             })
             .collect();
-        let piece = PolyBoundaryPiece(circle_pts);
+        let piece = PolyBoundaryPiece::untagged(circle_pts);
         let boundary = PolyBoundary::new(vec![piece], &cone, tol, &unevidenced_lattice(&cone));
         let mesh = trimming_tessellation(&cone, &boundary, tol, &unevidenced_lattice(&cone));
         assert!(
@@ -7857,7 +8505,7 @@ mod cone_topology_tests {
             (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
         ];
         let boundary = PolyBoundary::new(
-            vec![PolyBoundaryPiece(loop0)],
+            vec![PolyBoundaryPiece::untagged(loop0)],
             &plane,
             tol,
             &unevidenced_lattice(&plane),
@@ -7890,7 +8538,10 @@ mod cone_topology_tests {
             (Point2::new(3.0, 3.0), Point3::new(3.0, 3.0, 0.0)).into(),
         ];
         let boundary = PolyBoundary::new(
-            vec![PolyBoundaryPiece(outer), PolyBoundaryPiece(hole)],
+            vec![
+                PolyBoundaryPiece::untagged(outer),
+                PolyBoundaryPiece::untagged(hole),
+            ],
             &plane,
             tol,
             &unevidenced_lattice(&plane),
@@ -7930,7 +8581,7 @@ mod cone_topology_tests {
             (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
         ];
         let boundary = PolyBoundary::new(
-            vec![PolyBoundaryPiece(loop0)],
+            vec![PolyBoundaryPiece::untagged(loop0)],
             &plane,
             tol,
             &unevidenced_lattice(&plane),
@@ -7959,7 +8610,7 @@ mod cone_topology_tests {
             (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
         ];
         let boundary = PolyBoundary::new(
-            vec![PolyBoundaryPiece(loop0)],
+            vec![PolyBoundaryPiece::untagged(loop0)],
             &plane,
             tol,
             &unevidenced_lattice(&plane),
@@ -7972,7 +8623,7 @@ mod cone_topology_tests {
     }
 
     // -----------------------------------------------------------------------
-    // ARR-SEAM W2 — the widened DeckConsistent two-loop join
+    // ARR-SEAM W2 â€” the widened DeckConsistent two-loop join
     // -----------------------------------------------------------------------
 
     /// Two periodic walks whose loops enclose genuine UV area, unlike the
@@ -7980,9 +8631,9 @@ mod cone_topology_tests {
     /// wind opposite ways, so the deck equation resolves forward.
     ///
     /// The `u` coordinate bulges out and back along the `v` walk, so the lifted
-    /// loop encloses `|signed_area| ≈ 2 · amp · π`, far above the
+    /// loop encloses `|signed_area| â‰ˆ 2 Â· amp Â· Ï€`, far above the
     /// `DEGENERATE_LOOP_AREA` gate, while still closing in 3D at `v = 0` and
-    /// `v = 2π`.
+    /// `v = 2Ï€`.
     fn non_degenerate_band_pieces() -> (RevolutedCurve<Line<Point3>>, Vec<PolyBoundaryPiece>) {
         let cylinder = RevolutedCurve::by_revolution(
             Line(Point3::new(10.0, 0.0, 0.0), Point3::new(10.0, 0.0, 10.0)),
@@ -7990,7 +8641,7 @@ mod cone_topology_tests {
             Vector3::unit_z(),
         );
         let bump_circle = |u0: f64, amp: f64, sign: f64| -> PolyBoundaryPiece {
-            PolyBoundaryPiece(
+            PolyBoundaryPiece::untagged(
                 (0..=32)
                     .map(|i| {
                         let t = i as f64 / 32.0;
@@ -8002,7 +8653,10 @@ mod cone_topology_tests {
                     .collect(),
             )
         };
-        (cylinder, vec![bump_circle(0.2, 0.05, 1.0), bump_circle(0.8, 0.05, -1.0)])
+        (
+            cylinder,
+            vec![bump_circle(0.2, 0.05, 1.0), bump_circle(0.8, 0.05, -1.0)],
+        )
     }
 
     /// A non-degenerate deck pair is joined under `DeckConsistent`.
@@ -8024,7 +8678,7 @@ mod cone_topology_tests {
         );
     }
 
-    /// The same pair is **not** joined under `Legacy` — INV-W2-1, the regression
+    /// The same pair is **not** joined under `Legacy` â€” INV-W2-1, the regression
     /// guard for the widened gate.
     #[test]
     fn non_degenerate_deck_pair_is_not_joined_under_legacy() {
@@ -8056,7 +8710,10 @@ mod cone_topology_tests {
             &lattice,
             TwoLoopJoinPolicy::DeckConsistent,
         );
-        assert_eq!(outcome, TwoLoopJoinOutcome::ForwardResolves { applied: true });
+        assert_eq!(
+            outcome,
+            TwoLoopJoinOutcome::ForwardResolves { applied: true }
+        );
         assert_eq!(boundary.0.len(), 1, "the join yields one closed loop");
         let period = lattice.declared_v_period().unwrap_or(2.0 * PI);
         let loop_ = &boundary.0[0];
@@ -8082,7 +8739,10 @@ mod cone_topology_tests {
             &lattice,
             TwoLoopJoinPolicy::DeckConsistent,
         );
-        assert_eq!(outcome, TwoLoopJoinOutcome::ForwardResolves { applied: true });
+        assert_eq!(
+            outcome,
+            TwoLoopJoinOutcome::ForwardResolves { applied: true }
+        );
         assert_eq!(boundary.0.len(), 1);
         let loop_ = &boundary.0[0];
         let seams = loop_
@@ -8109,7 +8769,7 @@ mod cone_topology_tests {
         // area >> 1e-4. Their displacements are [0, 0], so neither the legacy
         // area gate nor the deck-pair disjunct fires.
         let circle = |u: f64| -> PolyBoundaryPiece {
-            PolyBoundaryPiece(
+            PolyBoundaryPiece::untagged(
                 (0..=32)
                     .map(|i| {
                         let theta = (i as f64 / 32.0) * 2.0 * PI;
@@ -8143,7 +8803,7 @@ mod cone_topology_tests {
             Vector3::unit_z(),
         );
         let winding_circle = |u0: f64, windings: i64| -> PolyBoundaryPiece {
-            PolyBoundaryPiece(
+            PolyBoundaryPiece::untagged(
                 (0..=32)
                     .map(|i| {
                         let t = i as f64 / 32.0;
@@ -8170,7 +8830,7 @@ mod cone_topology_tests {
     }
 
     /// End to end: the joined non-degenerate band tessellates to a non-empty
-    /// mesh. This is the residual risk W2 accepts — the join is unchanged, the
+    /// mesh. This is the residual risk W2 accepts â€” the join is unchanged, the
     /// population is not.
     #[test]
     fn joined_band_tessellates_to_a_nonempty_mesh() {
@@ -8183,7 +8843,10 @@ mod cone_topology_tests {
             &lattice,
             TwoLoopJoinPolicy::DeckConsistent,
         );
-        assert_eq!(outcome, TwoLoopJoinOutcome::ForwardResolves { applied: true });
+        assert_eq!(
+            outcome,
+            TwoLoopJoinOutcome::ForwardResolves { applied: true }
+        );
         let mesh = trimming_tessellation_result(&cylinder, &boundary, 0.01, &lattice)
             .expect("the joined non-degenerate band tessellates");
         assert!(
@@ -8193,7 +8856,7 @@ mod cone_topology_tests {
     }
 
     // -----------------------------------------------------------------------
-    // ARR-SEAM W3 — duplicate traversal, multiplicity mod 2
+    // ARR-SEAM W3 â€” duplicate traversal, multiplicity mod 2
     // -----------------------------------------------------------------------
 
     fn parity_plane() -> truck_geometry::prelude::Plane {
@@ -8206,9 +8869,8 @@ mod cone_topology_tests {
     }
 
     fn square(visits: u32) -> Vec<SurfacePoint> {
-        let corner = |x: f64, y: f64| -> SurfacePoint {
-            (Point2::new(x, y), Point3::new(x, y, 0.0)).into()
-        };
+        let corner =
+            |x: f64, y: f64| -> SurfacePoint { (Point2::new(x, y), Point3::new(x, y, 0.0)).into() };
         (0..visits)
             .flat_map(|_| {
                 [
@@ -8230,7 +8892,7 @@ mod cone_topology_tests {
         let plane = parity_plane();
         let tol = 0.01;
         let boundary = PolyBoundary::new(
-            vec![PolyBoundaryPiece(square(1))],
+            vec![PolyBoundaryPiece::untagged(square(1))],
             &plane,
             tol,
             &unevidenced_lattice(&plane),
@@ -8240,20 +8902,21 @@ mod cone_topology_tests {
     }
 
     /// A boundary declared twice cancels to no material and reports
-    /// `NoOddParityRegion` — never `ConstraintOverlapUnsupported`.
+    /// `NoOddParityRegion` â€” never `ConstraintOverlapUnsupported`.
     #[test]
     fn double_traversal_cancels() {
         let plane = parity_plane();
         let tol = 0.01;
         let boundary = PolyBoundary::new(
-            vec![PolyBoundaryPiece(square(2))],
+            vec![PolyBoundaryPiece::untagged(square(2))],
             &plane,
             tol,
             &unevidenced_lattice(&plane),
         );
-        let reason = trimming_tessellation_result(&plane, &boundary, tol, &unevidenced_lattice(&plane))
-            .err()
-            .map(|failure| failure.reason);
+        let reason =
+            trimming_tessellation_result(&plane, &boundary, tol, &unevidenced_lattice(&plane))
+                .err()
+                .map(|failure| failure.reason);
         assert_eq!(
             reason,
             Some(TessellationFailureReason::NoOddParityRegion),
@@ -8267,13 +8930,13 @@ mod cone_topology_tests {
         let plane = parity_plane();
         let tol = 0.01;
         let single = PolyBoundary::new(
-            vec![PolyBoundaryPiece(square(1))],
+            vec![PolyBoundaryPiece::untagged(square(1))],
             &plane,
             tol,
             &unevidenced_lattice(&plane),
         );
         let triple = PolyBoundary::new(
-            vec![PolyBoundaryPiece(square(3))],
+            vec![PolyBoundaryPiece::untagged(square(3))],
             &plane,
             tol,
             &unevidenced_lattice(&plane),
@@ -8294,9 +8957,8 @@ mod cone_topology_tests {
     fn duplicate_edge_is_not_constraint_overlap_unsupported() {
         let plane = parity_plane();
         let tol = 0.01;
-        let corner = |x: f64, y: f64| -> SurfacePoint {
-            (Point2::new(x, y), Point3::new(x, y, 0.0)).into()
-        };
+        let corner =
+            |x: f64, y: f64| -> SurfacePoint { (Point2::new(x, y), Point3::new(x, y, 0.0)).into() };
         // The edge (0,0)-(10,0) is claimed three times; the loop otherwise
         // bounds the square (0,0)-(10,0)-(10,10)-(0,10).
         let loop0: Vec<SurfacePoint> = vec![
@@ -8309,14 +8971,15 @@ mod cone_topology_tests {
             corner(0.0, 0.0),
         ];
         let boundary = PolyBoundary::new(
-            vec![PolyBoundaryPiece(loop0)],
+            vec![PolyBoundaryPiece::untagged(loop0)],
             &plane,
             tol,
             &unevidenced_lattice(&plane),
         );
-        let reason = trimming_tessellation_result(&plane, &boundary, tol, &unevidenced_lattice(&plane))
-            .err()
-            .map(|failure| failure.reason);
+        let reason =
+            trimming_tessellation_result(&plane, &boundary, tol, &unevidenced_lattice(&plane))
+                .err()
+                .map(|failure| failure.reason);
         assert_ne!(
             reason,
             Some(TessellationFailureReason::ConstraintOverlapUnsupported),
@@ -8330,9 +8993,8 @@ mod cone_topology_tests {
     fn duplicate_edge_creates_no_second_cdt_edge() {
         let plane = parity_plane();
         let tol = 0.01;
-        let corner = |x: f64, y: f64| -> SurfacePoint {
-            (Point2::new(x, y), Point3::new(x, y, 0.0)).into()
-        };
+        let corner =
+            |x: f64, y: f64| -> SurfacePoint { (Point2::new(x, y), Point3::new(x, y, 0.0)).into() };
         let loop0: Vec<SurfacePoint> = vec![
             corner(0.0, 0.0),
             corner(10.0, 0.0),
@@ -8341,16 +9003,22 @@ mod cone_topology_tests {
             corner(5.0, 10.0),
         ];
         let boundary = PolyBoundary::new(
-            vec![PolyBoundaryPiece(loop0)],
+            vec![PolyBoundaryPiece::untagged(loop0)],
             &plane,
             tol,
             &unevidenced_lattice(&plane),
         );
         let mut triangulation = Cdt::new();
         let mut boundary_map = HashMap::<FixedVertexHandle, Point3>::default();
+        let mut vertex_sources = HashMap::<FixedVertexHandle, Vec<SourceEdgeUse>>::default();
         let mut roles = ConstraintRoles::default();
         boundary
-            .insert_to(&mut triangulation, &mut boundary_map, &mut roles)
+            .insert_to(
+                &mut triangulation,
+                &mut boundary_map,
+                &mut roles,
+                &mut vertex_sources,
+            )
             .expect("duplicates are admitted, not rejected");
         assert_eq!(
             triangulation.num_constraints(),
@@ -8390,9 +9058,8 @@ mod cone_topology_tests {
     fn slit_cancels_but_disk_survives() {
         let plane = parity_plane();
         let tol = 0.01;
-        let corner = |x: f64, y: f64| -> SurfacePoint {
-            (Point2::new(x, y), Point3::new(x, y, 0.0)).into()
-        };
+        let corner =
+            |x: f64, y: f64| -> SurfacePoint { (Point2::new(x, y), Point3::new(x, y, 0.0)).into() };
         // A square with an interior spur across it: (0,5)->(10,5)->(0,5).
         let loop0: Vec<SurfacePoint> = vec![
             corner(0.0, 0.0),
@@ -8405,7 +9072,7 @@ mod cone_topology_tests {
             corner(0.0, 0.0),
         ];
         let boundary = PolyBoundary::new(
-            vec![PolyBoundaryPiece(loop0)],
+            vec![PolyBoundaryPiece::untagged(loop0)],
             &plane,
             tol,
             &unevidenced_lattice(&plane),
@@ -8421,9 +9088,8 @@ mod cone_topology_tests {
     /// the multiplicity stays counted.
     #[test]
     fn different_role_duplicate_keeps_first_claim() {
-        let corner = |x: f64, y: f64| -> SurfacePoint {
-            (Point2::new(x, y), Point3::new(x, y, 0.0)).into()
-        };
+        let corner =
+            |x: f64, y: f64| -> SurfacePoint { (Point2::new(x, y), Point3::new(x, y, 0.0)).into() };
         // Edge (0,0)-(10,0) claimed as Source (first), then SyntheticClosure,
         // then Source again.
         let loop_ = BoundaryLoop::new(
@@ -8441,13 +9107,20 @@ mod cone_topology_tests {
                 SegmentOrigin::Source,
                 SegmentOrigin::Source,
             ],
+            vec![Vec::new(); 5],
         );
         let boundary = PolyBoundary(vec![loop_]);
         let mut triangulation = Cdt::new();
         let mut boundary_map = HashMap::<FixedVertexHandle, Point3>::default();
+        let mut vertex_sources = HashMap::<FixedVertexHandle, Vec<SourceEdgeUse>>::default();
         let mut roles = ConstraintRoles::default();
         boundary
-            .insert_to(&mut triangulation, &mut boundary_map, &mut roles)
+            .insert_to(
+                &mut triangulation,
+                &mut boundary_map,
+                &mut roles,
+                &mut vertex_sources,
+            )
             .expect("the duplicate is admitted");
         let v0 = triangulation
             .vertices()
@@ -8465,11 +9138,15 @@ mod cone_topology_tests {
             .as_undirected()
             .fix();
         assert_eq!(
-            roles.role_of(e),
+            ConstraintRoles::role_of(&triangulation, e),
             Some(ConstraintRole::PhysicalBoundary),
             "the first (Source) claim wins",
         );
-        assert_eq!(roles.traversals.get(&e), Some(&3), "multiplicity is counted");
+        assert_eq!(
+            roles.traversals.get(&e),
+            Some(&3),
+            "multiplicity is counted"
+        );
     }
 }
 
@@ -8681,7 +9358,7 @@ mod singular_transition_tests {
         // Close the loop and tessellate.
         points.push(sp(uv(0.0, 1.0)));
         let boundary = PolyBoundary::new(
-            vec![PolyBoundaryPiece(points)],
+            vec![PolyBoundaryPiece::untagged(points)],
             &surface,
             tolerance,
             &unevidenced_lattice(&surface),
@@ -8851,12 +9528,154 @@ mod segment_origin_tests {
         (Point2::new(x, y), Point3::new(x, y, 0.0)).into()
     }
 
+    /// A distinct synthetic source edge use, so a test can assert *which* use
+    /// labels a segment rather than only that a slot exists.
+    fn use_(index: usize) -> SourceEdgeUse {
+        SourceEdgeUse {
+            bound: BoundId(0),
+            index,
+            orientation: true,
+        }
+    }
+
+    /// One tagged provenance slot per segment of an `n`-point open chain.
+    fn tagged_sources(point_count: usize) -> Vec<SegmentSources> {
+        (0..point_count.saturating_sub(1))
+            .map(|k| vec![use_(k)])
+            .collect()
+    }
+
+    /// An interior crossing preserves the point count and rotates the
+    /// provenance so each entry still labels the segment it described.
+    ///
+    /// The chain crosses the working range `u1` at index 3 of five points. The
+    /// rotation starts the chain at the crossing; `sources` follow their
+    /// segments under the start-point rule (`sources[k]` labels
+    /// `points[k] -> points[k + 1]`).
+    #[test]
+    fn normalize_range_rotates_provenance_with_an_interior_crossing() {
+        let mut curve = vec![
+            pt(0.1, 0.0),
+            pt(0.4, 0.0),
+            pt(0.6, 0.0),
+            pt(1.2, 0.0),
+            pt(0.3, 0.0),
+        ];
+        let mut sources = tagged_sources(5);
+        normalize_range(&mut curve, &mut sources, 0, (0.0, 1.0));
+        assert_eq!(
+            curve.len(),
+            5,
+            "an interior crossing preserves the point count"
+        );
+        assert_eq!(
+            sources.len(),
+            curve.len() - 1,
+            "one provenance entry per resulting segment",
+        );
+        assert_eq!(
+            sources,
+            vec![vec![use_(3)], vec![use_(0)], vec![use_(1)], vec![use_(2)]],
+            "the provenance rotates with its segments",
+        );
+    }
+
+    /// A crossing at the chain's own last point re-introduces the wrap segment
+    /// back onto the head. That segment is synthetic — its provenance was
+    /// dropped when the piece was classified open — so the chain gains an
+    /// explicit empty entry rather than short-circuiting the vector.
+    #[test]
+    fn normalize_range_reintroduces_an_empty_wrap_when_the_crossing_is_the_last_point() {
+        let mut curve = vec![
+            pt(0.1, 0.0),
+            pt(0.4, 0.0),
+            pt(0.6, 0.0),
+            pt(0.9, 0.0),
+            pt(1.2, 0.0),
+        ];
+        let mut sources = tagged_sources(5);
+        normalize_range(&mut curve, &mut sources, 0, (0.0, 1.0));
+        assert_eq!(
+            curve.len(),
+            6,
+            "the last-point crossing duplicates the terminal"
+        );
+        assert_eq!(
+            sources.len(),
+            curve.len() - 1,
+            "one provenance entry per resulting segment",
+        );
+        assert_eq!(
+            sources,
+            vec![
+                Vec::new(),
+                vec![use_(0)],
+                vec![use_(1)],
+                vec![use_(2)],
+                vec![use_(3)],
+            ],
+            "the synthetic wrap leads, the original segments follow in order",
+        );
+    }
+
+    /// The whole construction keeps the three vectors equal-length: every
+    /// shared-endpoint join, bridge, and closure adds its provenance slots in
+    /// lockstep with the segments it creates. The bridge is synthetic and
+    /// carries an explicit empty entry; the closing wrap is the last source
+    /// segment, which keeps its contributor.
+    #[test]
+    fn every_constructed_loop_keeps_one_provenance_entry_per_segment() {
+        let mut path = BoundaryPath::start(
+            vec![pt(0.0, 0.0), pt(1.0, 0.0), pt(2.0, 0.0)],
+            vec![vec![use_(0)], vec![use_(1)]],
+            SegmentOrigin::Source,
+        );
+        path.append(
+            vec![pt(2.0, 0.0), pt(3.0, 0.0)],
+            vec![vec![use_(2)]],
+            SegmentOrigin::Source,
+            PartJoin::SharedEndpoint,
+        );
+        path.append(
+            vec![pt(3.0, 1.0), pt(0.0, 0.0)],
+            vec![vec![use_(3)]],
+            SegmentOrigin::SyntheticClosure,
+            PartJoin::Bridge(SegmentOrigin::Seam),
+        );
+        let loop_ = path.close(PartJoin::SharedEndpoint);
+        assert_eq!(
+            loop_.points.len(),
+            loop_.origins.len(),
+            "one origin per segment",
+        );
+        assert_eq!(
+            loop_.points.len(),
+            loop_.source_uses.len(),
+            "one provenance entry per segment",
+        );
+        assert_eq!(
+            loop_.source_uses,
+            vec![
+                vec![use_(0)],
+                vec![use_(1)],
+                vec![use_(2)],
+                Vec::new(),    // the bridge carries no source
+                vec![use_(3)], // the closing wrap is the last source segment
+            ],
+        );
+    }
+
     /// A shared endpoint drops the duplicate and creates no segment.
     #[test]
     fn shared_endpoint_creates_no_segment() {
-        let mut path = BoundaryPath::start(vec![pt(0.0, 0.0), pt(1.0, 0.0)], SegmentOrigin::Source);
+        let mut path = BoundaryPath::start(
+            vec![pt(0.0, 0.0), pt(1.0, 0.0)],
+            untagged_sources(2),
+            SegmentOrigin::Source,
+        );
         path.append(
             vec![pt(1.0, 0.0), pt(1.0, 1.0)],
+            untagged_sources(2),
             SegmentOrigin::SyntheticClosure,
             PartJoin::SharedEndpoint,
         );
@@ -8873,16 +9692,18 @@ mod segment_origin_tests {
     /// This is the case an earlier implementation got wrong: it dropped every
     /// part's last point unconditionally, so `a1 -> a2 -> b0` silently became
     /// the shortcut `a1 -> b0`, deleting a source segment. The point count is
-    /// the assertion that matters — metadata retention must not change the
+    /// the assertion that matters â€” metadata retention must not change the
     /// polygon.
     #[test]
     fn a_bridge_preserves_both_endpoints() {
         let mut path = BoundaryPath::start(
             vec![pt(0.0, 0.0), pt(1.0, 0.0), pt(2.0, 0.0)],
+            untagged_sources(3),
             SegmentOrigin::Source,
         );
         path.append(
             vec![pt(5.0, 5.0), pt(6.0, 5.0), pt(7.0, 5.0)],
+            untagged_sources(3),
             SegmentOrigin::Source,
             PartJoin::Bridge(SegmentOrigin::Seam),
         );
@@ -8913,9 +9734,14 @@ mod segment_origin_tests {
     /// segment becomes the cyclic wrap.
     #[test]
     fn closing_on_a_shared_endpoint_reuses_the_last_segment() {
-        let mut path = BoundaryPath::start(vec![pt(0.0, 0.0), pt(1.0, 0.0)], SegmentOrigin::Source);
+        let mut path = BoundaryPath::start(
+            vec![pt(0.0, 0.0), pt(1.0, 0.0)],
+            untagged_sources(2),
+            SegmentOrigin::Source,
+        );
         path.append(
             vec![pt(1.0, 0.0), pt(0.0, 0.0)],
+            untagged_sources(2),
             SegmentOrigin::SyntheticClosure,
             PartJoin::SharedEndpoint,
         );
@@ -8937,6 +9763,7 @@ mod segment_origin_tests {
     fn closing_across_a_gap_adds_a_labelled_wrap() {
         let path = BoundaryPath::start(
             vec![pt(0.0, 0.0), pt(1.0, 0.0), pt(1.0, 1.0)],
+            untagged_sources(3),
             SegmentOrigin::Source,
         );
         let loop_ = path.close(PartJoin::Bridge(SegmentOrigin::SyntheticClosure));
@@ -8949,12 +9776,14 @@ mod segment_origin_tests {
         );
     }
 
-    /// A periodically closed walk retains its endpoint at `first + L·δ`, so the
+    /// A periodically closed walk retains its endpoint at `first + LÂ·Î´`, so the
     /// cyclic wrap is the deck closure and must not be labelled `Source`.
     #[test]
     fn a_periodic_walk_does_not_call_its_wrap_a_source_segment() {
-        let walk =
-            BoundaryLoop::periodic_source_walk(vec![pt(0.0, 0.0), pt(0.0, 1.0), pt(0.0, 2.0)]);
+        let walk = BoundaryLoop::periodic_source_walk(
+            vec![pt(0.0, 0.0), pt(0.0, 1.0), pt(0.0, 2.0)],
+            vec![Vec::new(); 3],
+        );
         assert_eq!(walk.points.len(), walk.origins.len());
         assert_eq!(
             walk.origins,
@@ -8970,8 +9799,10 @@ mod segment_origin_tests {
     /// every cyclic segment including the wrap is genuine source trim.
     #[test]
     fn a_euclidean_loop_wraps_on_a_source_segment() {
-        let loop_ =
-            BoundaryLoop::euclidean_source_loop(vec![pt(0.0, 0.0), pt(1.0, 0.0), pt(1.0, 1.0)]);
+        let loop_ = BoundaryLoop::euclidean_source_loop(
+            vec![pt(0.0, 0.0), pt(1.0, 0.0), pt(1.0, 1.0)],
+            vec![Vec::new(); 3],
+        );
         assert!(loop_.origins.iter().all(|o| *o == SegmentOrigin::Source));
         assert_eq!(loop_.points.len(), loop_.origins.len());
     }
@@ -8980,12 +9811,21 @@ mod segment_origin_tests {
     #[test]
     fn chained_parts_yield_one_origin_per_segment() {
         let loop_ = BoundaryLoop::chained([
-            (vec![pt(0.0, 0.0), pt(1.0, 0.0)], SegmentOrigin::Source),
+            (
+                vec![pt(0.0, 0.0), pt(1.0, 0.0)],
+                untagged_sources(2),
+                SegmentOrigin::Source,
+            ),
             (
                 vec![pt(1.0, 0.0), pt(1.0, 1.0)],
+                untagged_sources(2),
                 SegmentOrigin::SyntheticClosure,
             ),
-            (vec![pt(1.0, 1.0), pt(0.0, 0.0)], SegmentOrigin::Seam),
+            (
+                vec![pt(1.0, 1.0), pt(0.0, 0.0)],
+                untagged_sources(2),
+                SegmentOrigin::Seam,
+            ),
         ]);
         assert_eq!(loop_.points.len(), loop_.origins.len());
         assert_eq!(loop_.points.len(), 3, "join duplicates are dropped");
@@ -8995,7 +9835,7 @@ mod segment_origin_tests {
 /// Pure tests for [`classify_presented_relation`]: exact predicates only, no
 /// CDT required.
 ///
-/// The handle pairs are fabrications — `from_index` — because the classifier
+/// The handle pairs are fabrications â€” `from_index` â€” because the classifier
 /// reads nothing from the triangulation; the positions drive every predicate.
 #[cfg(test)]
 mod presented_relation_tests {
@@ -9006,7 +9846,10 @@ mod presented_relation_tests {
     }
 
     fn handles(a: usize, b: usize) -> [FixedVertexHandle; 2] {
-        [FixedVertexHandle::from_index(a), FixedVertexHandle::from_index(b)]
+        [
+            FixedVertexHandle::from_index(a),
+            FixedVertexHandle::from_index(b),
+        ]
     }
 
     /// Same undirected vertex pair is a duplicate traversal, in either order.
@@ -9105,7 +9948,7 @@ mod presented_relation_tests {
         );
         // Shift the incident endpoint one ULP below the supporting line: the
         // vertical segment now genuinely straddles the horizontal one, and the
-        // exact predicates see a proper crossing — never an incidence.
+        // exact predicates see a proper crossing â€” never an incidence.
         assert_eq!(
             classify_presented_relation(
                 handles(0, 1),
@@ -9120,8 +9963,9 @@ mod presented_relation_tests {
         );
     }
 
-    /// A known-failing face produces the same terminal reason whether the
-    /// diagnostic classifier runs or not. W1 must move no face.
+    /// A self-crossing bowtie face now renders because PLANAR-C planarizes the
+    /// proper crossing; the diagnostic classifier must not change that outcome.
+    /// W1 must move no face.
     #[test]
     fn classifier_does_not_change_outcome() {
         use truck_geometry::prelude::*;
@@ -9133,8 +9977,9 @@ mod presented_relation_tests {
         let tol = 0.01;
         let lattice = unevidenced_lattice(&plane);
         // Bowtie: the segments `(0,0)->(10,10)` and `(10,0)->(0,10)` cross at
-        // `(5,5)`, so `try_add_constraint` refuses and the face fails with
-        // `ConstraintInsertionIncomplete`.
+        // `(5,5)`. Previously `try_add_constraint` refused the crossing and the
+        // face failed with `ConstraintInsertionIncomplete`; PLANAR-C subdivides
+        // it instead, and the face renders.
         let loop0: Vec<SurfacePoint> = vec![
             (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
             (Point2::new(10.0, 10.0), Point3::new(10.0, 10.0, 0.0)).into(),
@@ -9143,31 +9988,1255 @@ mod presented_relation_tests {
             (Point2::new(0.0, 0.0), Point3::new(0.0, 0.0, 0.0)).into(),
         ];
         let boundary = PolyBoundary::new(
-            vec![PolyBoundaryPiece(loop0)],
+            vec![PolyBoundaryPiece::untagged(loop0)],
             &plane,
             tol,
             &lattice,
         );
-        let terminal = |diag: bool| {
+        let triangles = |diag: bool| {
             if diag {
                 std::env::set_var("TRUCK_FACE_DIAG_JSONL", "presented_relation.jsonl");
             } else {
                 std::env::remove_var("TRUCK_FACE_DIAG_JSONL");
             }
-            let reason = trimming_tessellation_result(&plane, &boundary, tol, &lattice)
-                .err()
-                .map(|failure| failure.reason);
+            let count = trimming_tessellation_result(&plane, &boundary, tol, &lattice)
+                .map(|mesh| mesh.tri_faces().len())
+                .unwrap_or(0);
             std::env::remove_var("TRUCK_FACE_DIAG_JSONL");
-            reason
+            count
         };
-        let without = terminal(false);
-        let with = terminal(true);
-        assert!(without.is_some(), "the bowtie loop must fail");
+        let without = triangles(false);
+        let with = triangles(true);
+        assert!(without > 0, "the bowtie crossing is planarized and renders");
         assert_eq!(
-            without,
-            with,
-            "diagnostics must not change the terminal failure reason",
+            without, with,
+            "diagnostics must not change the tessellation outcome",
         );
+    }
+}
+
+/// PLANAR-A provenance tests: the source `(bound, edge-use)` identity survives
+/// the legacy boundary path without being fabricated for synthetic geometry.
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+    use truck_geometry::prelude::*;
+
+    fn pt(x: f64, y: f64) -> SurfacePoint {
+        (Point2::new(x, y), Point3::new(x, y, 0.0)).into()
+    }
+
+    fn use_(bound: usize, index: usize, orientation: bool) -> SourceEdgeUse {
+        SourceEdgeUse {
+            bound: BoundId(bound),
+            index,
+            orientation,
+        }
+    }
+
+    /// A-test 1: the same geometric curve used twice as distinct source edge
+    /// uses stays two distinct identities through flattening.
+    #[test]
+    fn distinct_edge_uses_survive_flattening() {
+        let plane = Plane::new(
+            Point3::origin(),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        );
+        let tol = 0.01;
+        let lattice = unevidenced_lattice(&plane);
+        let curve = PolylineCurve(vec![Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)]);
+        let use0 = use_(0, 0, true);
+        let use1 = use_(0, 1, false);
+        let wire = [
+            SourcePolyline {
+                curve: curve.clone(),
+                source: use0,
+            },
+            SourcePolyline {
+                curve: curve.clone(),
+                source: use1,
+            },
+        ];
+        let piece = PolyBoundaryPiece::try_new(
+            &plane,
+            wire.into_iter(),
+            by_search_parameter,
+            tol,
+            &lattice,
+        )
+        .expect("the wire flattens");
+        let mut seen: Vec<SourceEdgeUse> = Vec::new();
+        for sources in &piece.1 {
+            for &u in sources {
+                if !seen.contains(&u) {
+                    seen.push(u);
+                }
+            }
+        }
+        assert!(
+            seen.contains(&use0),
+            "the first use survives with its identity",
+        );
+        assert!(
+            seen.contains(&use1),
+            "the second use survives with its identity",
+        );
+        assert_eq!(
+            seen.len(),
+            2,
+            "identical geometry does not collapse distinct source uses",
+        );
+        assert_ne!(use0, use1, "the identities differ by index and orientation");
+    }
+
+    /// A-test 2: reversal keeps each provenance entry with the reversed segment
+    /// it belongs to.
+    #[test]
+    fn reversal_preserves_provenance() {
+        let mut path = BoundaryPath::start(
+            vec![pt(0.0, 0.0), pt(1.0, 0.0), pt(1.0, 1.0), pt(0.0, 1.0)],
+            vec![
+                vec![use_(0, 0, true)],
+                vec![use_(0, 1, false)],
+                Vec::new(), // a synthetic segment in the middle
+            ],
+            SegmentOrigin::Source,
+        );
+        path.reverse();
+        // Segment `i` becomes old segment `n - 2 - i`, so the provenance must
+        // reverse with the segments, not with the points.
+        assert_eq!(
+            path.source_uses,
+            vec![Vec::new(), vec![use_(0, 1, false)], vec![use_(0, 0, true)],],
+            "provenance reverses with the segments",
+        );
+        assert_eq!(path.source_uses.len(), path.origins.len());
+    }
+
+    /// A-test 3: synthetic segments never receive an invented source identity.
+    #[test]
+    fn synthetic_segments_carry_no_invented_source() {
+        // A periodic walk: two source segments, then the deck-closure wrap.
+        let walk = BoundaryLoop::periodic_source_walk(
+            vec![pt(0.0, 0.0), pt(0.0, 1.0), pt(0.0, 2.0)],
+            vec![
+                vec![use_(0, 0, true)],
+                vec![use_(0, 1, true)],
+                vec![use_(0, 2, true)],
+            ],
+        );
+        assert_eq!(walk.origins[2], SegmentOrigin::Seam);
+        assert_eq!(
+            walk.source_uses[2],
+            Vec::<SourceEdgeUse>::new(),
+            "the deck wrap invents no source use",
+        );
+        assert_eq!(walk.source_uses[0], vec![use_(0, 0, true)]);
+
+        // A bridge close adds a synthetic wrap with no source either.
+        let path = BoundaryPath::start(
+            vec![pt(0.0, 0.0), pt(1.0, 0.0), pt(1.0, 1.0)],
+            vec![vec![use_(0, 0, true)], vec![use_(0, 1, true)]],
+            SegmentOrigin::Source,
+        );
+        let loop_ = path.close(PartJoin::Bridge(SegmentOrigin::SyntheticClosure));
+        assert_eq!(
+            *loop_.source_uses.last().unwrap(),
+            Vec::<SourceEdgeUse>::new(),
+            "the closure wrap invents no source use",
+        );
+        assert_eq!(loop_.source_uses.len(), loop_.origins.len());
+    }
+}
+
+/// The first tests in the repo that exercise Spade's *splitting* constraint API
+/// (`add_constraint_and_split`) with semantic `UE` data. Production code still
+/// does not call the splitting API; these prove the PLANAR-B repair primitives
+/// against the verified Spade split contract (parent handle keeps its `UE`,
+/// new child is `UE::default()`, constraint edges are never flipped).
+#[cfg(test)]
+mod planar_b_split_repair_tests {
+    use super::*;
+
+    fn point(x: f64, y: f64) -> SPoint2 {
+        SPoint2::new(x, y)
+    }
+
+    fn insert_vertex(cdt: &mut Cdt, p: SPoint2) -> FixedVertexHandle {
+        cdt.insert(p).expect("vertex insertion succeeds")
+    }
+
+    fn find_vertex(cdt: &Cdt, p: SPoint2) -> FixedVertexHandle {
+        cdt.vertices()
+            .find(|v| v.as_ref() == &p)
+            .expect("vertex exists")
+            .fix()
+    }
+
+    fn find_edge(cdt: &Cdt, a: SPoint2, b: SPoint2) -> FixedUndirectedEdgeHandle {
+        let va = find_vertex(cdt, a);
+        let vb = find_vertex(cdt, b);
+        cdt.get_edge_from_neighbors(va, vb)
+            .expect("edge exists")
+            .as_undirected()
+            .fix()
+    }
+
+    fn directed_of(cdt: &Cdt, e: FixedUndirectedEdgeHandle) -> FixedDirectedEdgeHandle {
+        cdt.undirected_edge(e).as_directed().fix()
+    }
+
+    fn source_use(index: usize) -> SourceEdgeUse {
+        SourceEdgeUse {
+            bound: BoundId(0),
+            index,
+            orientation: true,
+        }
+    }
+
+    /// The minimal crossing scenario: blocking constraint `(0,0)-(10,0)` on the
+    /// x-axis, incoming chord `(2,-5)-(2,5)` crossing it at `(2,0)`. Returns the
+    /// CDT, the blocking parent handle, and the realized incoming chain.
+    fn crossing_scenario() -> (Cdt, FixedUndirectedEdgeHandle, Vec<FixedDirectedEdgeHandle>) {
+        let mut cdt = Cdt::new();
+        let a = insert_vertex(&mut cdt, point(2.0, -5.0));
+        let b = insert_vertex(&mut cdt, point(2.0, 5.0));
+        let p = insert_vertex(&mut cdt, point(0.0, 0.0));
+        let q = insert_vertex(&mut cdt, point(10.0, 0.0));
+        let blocking_chain = cdt.try_add_constraint(p, q);
+        assert!(
+            !blocking_chain.is_empty(),
+            "the blocking constraint is added"
+        );
+        let parent = cdt
+            .get_edge_from_neighbors(p, q)
+            .expect("blocking edge exists")
+            .as_undirected()
+            .fix();
+        let chain = cdt.add_constraint_and_split(a, b, |pt: spade::Point2<f64>| pt);
+        assert!(
+            chain.len() >= 2,
+            "the incoming chord is split by the blocking edge"
+        );
+        (cdt, parent, chain)
+    }
+
+    /// B-test 1: the returned incoming chain is contiguous and receives exactly
+    /// one semantic identity on every returned piece.
+    #[test]
+    fn incoming_chain_receives_one_semantic_identity() {
+        let (mut cdt, _parent, chain) = crossing_scenario();
+        let mut roles = ConstraintRoles::default();
+        let id = roles.mint_semantic_constraint_id();
+        let sources = vec![source_use(0)];
+        roles.label_realized_chain(
+            &mut cdt,
+            &chain,
+            id,
+            ConstraintRole::PhysicalBoundary,
+            &sources,
+            Some(SegmentOrigin::Source),
+        );
+
+        // Chain ordering is contiguous: first.from == requested A, last.to == B,
+        // piece[i].to == piece[i+1].from.
+        let a = find_vertex(&cdt, point(2.0, -5.0));
+        let b = find_vertex(&cdt, point(2.0, 5.0));
+        let directed: Vec<_> = chain.iter().map(|h| cdt.directed_edge(*h)).collect();
+        assert_eq!(
+            directed[0].from().fix(),
+            a,
+            "the chain starts at the request"
+        );
+        assert_eq!(
+            directed.last().unwrap().to().fix(),
+            b,
+            "the chain ends at the request"
+        );
+        for window in directed.windows(2) {
+            assert_eq!(
+                window[0].to().fix(),
+                window[1].from().fix(),
+                "the realized pieces chain head-to-tail",
+            );
+        }
+
+        // Every returned piece carries the one semantic claim C, with the
+        // PLANAR-A contributor attached.
+        for h in &chain {
+            let e = cdt.undirected_edge(cdt.directed_edge(*h).as_undirected().fix());
+            let claims = e.data().data().claims.as_slice();
+            assert_eq!(claims.len(), 1, "exactly the incoming claim");
+            assert_eq!(claims[0].semantic_id, id, "one semantic identity");
+            assert_eq!(claims[0].source_uses, sources, "the contributor is carried");
+        }
+    }
+
+    /// B-test 2: after the split, the original blocking handle keeps the claim
+    /// and the new child inherits it via `repair_split`.
+    #[test]
+    fn blocking_child_inherits_claim() {
+        let (mut cdt, parent, _chain) = crossing_scenario();
+        let mut roles = ConstraintRoles::default();
+        let parent_id = roles.mint_semantic_constraint_id();
+        let sources = vec![source_use(0)];
+        let parent_directed = directed_of(&cdt, parent);
+        roles.label_realized_chain(
+            &mut cdt,
+            &[parent_directed],
+            parent_id,
+            ConstraintRole::PhysicalBoundary,
+            &sources,
+            Some(SegmentOrigin::Source),
+        );
+        *roles.traversals.entry(parent).or_insert(0) = 1;
+
+        // The split vertex and the child toward `q`.
+        let split_v = find_vertex(&cdt, point(2.0, 0.0));
+        let q = find_vertex(&cdt, point(10.0, 0.0));
+        let child1 = cdt
+            .get_edge_from_neighbors(split_v, q)
+            .filter(|e| e.is_constraint_edge())
+            .expect("child edge exists")
+            .as_undirected()
+            .fix();
+        let child0 = parent;
+
+        roles.repair_split(&mut cdt, parent, child0, child1);
+
+        let claims0 = cdt.undirected_edge_data_mut(child0).data().claims.clone();
+        let claims1 = cdt.undirected_edge_data_mut(child1).data().claims.clone();
+        assert_eq!(claims0.len(), 1, "E0 keeps the parent payload");
+        assert_eq!(claims0[0].semantic_id, parent_id);
+        assert_eq!(claims1.len(), 1, "E1 inherits via repair");
+        assert_eq!(claims1[0].semantic_id, parent_id);
+        assert_eq!(claims1[0].source_uses, sources);
+        assert_eq!(
+            ConstraintRoles::role_of(&cdt, child0),
+            Some(ConstraintRole::PhysicalBoundary),
+            "role_of on E0",
+        );
+        assert_eq!(
+            ConstraintRoles::role_of(&cdt, child1),
+            Some(ConstraintRole::PhysicalBoundary),
+            "role_of on E1 after repair",
+        );
+        assert_eq!(roles.traversals.get(&child0), Some(&1));
+        assert_eq!(roles.traversals.get(&child1), Some(&1));
+    }
+
+    /// B-test 3: traversal multiplicity survives the split exactly, for several
+    /// multiplicities — future material parity reads it mod 2.
+    #[test]
+    fn traversal_multiplicity_survives_split() {
+        for t in [1usize, 2, 3] {
+            let (mut cdt, parent, _chain) = crossing_scenario();
+            let mut roles = ConstraintRoles::default();
+            let id = roles.mint_semantic_constraint_id();
+            let parent_directed = directed_of(&cdt, parent);
+            roles.label_realized_chain(
+                &mut cdt,
+                &[parent_directed],
+                id,
+                ConstraintRole::PhysicalBoundary,
+                &[],
+                Some(SegmentOrigin::Source),
+            );
+            *roles.traversals.entry(parent).or_insert(0) = t;
+
+            let split_v = find_vertex(&cdt, point(2.0, 0.0));
+            let q = find_vertex(&cdt, point(10.0, 0.0));
+            let child1 = cdt
+                .get_edge_from_neighbors(split_v, q)
+                .filter(|e| e.is_constraint_edge())
+                .expect("child edge exists")
+                .as_undirected()
+                .fix();
+            roles.repair_split(&mut cdt, parent, parent, child1);
+
+            assert_eq!(
+                roles.traversals.get(&parent),
+                Some(&t),
+                "E0 inherits the parent's {t} traversals",
+            );
+            assert_eq!(
+                roles.traversals.get(&child1),
+                Some(&t),
+                "E1 inherits the parent's {t} traversals",
+            );
+        }
+    }
+
+    /// B-test 4: repair appends inherited claims rather than replacing a child's
+    /// existing payload; first-role semantics stay deterministic.
+    #[test]
+    fn existing_claims_are_not_destroyed_by_repair() {
+        let (mut cdt, parent, _chain) = crossing_scenario();
+        let mut roles = ConstraintRoles::default();
+        let parent_id = roles.mint_semantic_constraint_id();
+        let parent_directed = directed_of(&cdt, parent);
+        roles.label_realized_chain(
+            &mut cdt,
+            &[parent_directed],
+            parent_id,
+            ConstraintRole::PhysicalBoundary,
+            &[],
+            Some(SegmentOrigin::Source),
+        );
+
+        let split_v = find_vertex(&cdt, point(2.0, 0.0));
+        let q = find_vertex(&cdt, point(10.0, 0.0));
+        let child1 = cdt
+            .get_edge_from_neighbors(split_v, q)
+            .filter(|e| e.is_constraint_edge())
+            .expect("child edge exists")
+            .as_undirected()
+            .fix();
+        let child0 = parent;
+
+        // A later, different semantic claim lands on child1 before repair.
+        let later_id = roles.mint_semantic_constraint_id();
+        cdt.undirected_edge_data_mut(child1)
+            .data_mut()
+            .claims
+            .push(ConstraintClaim {
+                semantic_id: later_id,
+                role: ConstraintRole::UnresolvedSyntheticClosure,
+                source_uses: Vec::new(),
+            });
+
+        roles.repair_split(&mut cdt, parent, child0, child1);
+
+        let claims1 = cdt.undirected_edge_data_mut(child1).data().claims.clone();
+        assert_eq!(
+            claims1.len(),
+            2,
+            "existing claim preserved, inherited appended"
+        );
+        assert_eq!(
+            claims1[0].semantic_id, later_id,
+            "the existing claim stays first"
+        );
+        assert_eq!(
+            claims1[1].semantic_id, parent_id,
+            "the inherited claim is appended"
+        );
+        assert_eq!(
+            ConstraintRoles::role_of(&cdt, child1),
+            Some(ConstraintRole::UnresolvedSyntheticClosure),
+            "first-role semantics remain deterministic",
+        );
+    }
+
+    /// B-test 5: the fallback-relocation repair primitive moves a lost edge's
+    /// claims and combines traversal counts onto replacement edges, preserving
+    /// the replacements' own claims first.
+    #[test]
+    fn relocation_repair_moves_claims_and_traversals() {
+        let mut cdt = Cdt::new();
+        let v00 = insert_vertex(&mut cdt, point(0.0, 0.0));
+        let v10 = insert_vertex(&mut cdt, point(10.0, 0.0));
+        let v11 = insert_vertex(&mut cdt, point(10.0, 10.0));
+        let v01 = insert_vertex(&mut cdt, point(0.0, 10.0));
+        // E: bottom, P: left, N: right — three non-crossing constraints.
+        assert!(!cdt.try_add_constraint(v00, v10).is_empty(), "E added");
+        assert!(!cdt.try_add_constraint(v00, v01).is_empty(), "P added");
+        assert!(!cdt.try_add_constraint(v10, v11).is_empty(), "N added");
+        let e = find_edge(&cdt, point(0.0, 0.0), point(10.0, 0.0));
+        let p = find_edge(&cdt, point(0.0, 0.0), point(0.0, 10.0));
+        let n = find_edge(&cdt, point(10.0, 0.0), point(10.0, 10.0));
+
+        let mut roles = ConstraintRoles::default();
+        // E carries its own claim and two traversals.
+        let e_id = roles.mint_semantic_constraint_id();
+        let e_directed = directed_of(&cdt, e);
+        roles.label_realized_chain(
+            &mut cdt,
+            &[e_directed],
+            e_id,
+            ConstraintRole::PhysicalBoundary,
+            &[],
+            Some(SegmentOrigin::Source),
+        );
+        *roles.traversals.entry(e).or_insert(0) = 2;
+        // P carries a pre-existing claim and one traversal.
+        let p_id = roles.mint_semantic_constraint_id();
+        let p_directed = directed_of(&cdt, p);
+        roles.label_realized_chain(
+            &mut cdt,
+            &[p_directed],
+            p_id,
+            ConstraintRole::SurfaceSampling,
+            &[],
+            None,
+        );
+        *roles.traversals.entry(p).or_insert(0) = 1;
+
+        // The fallback state transition: E loses its constraint, P and N gain
+        // it. The primitive moves the data; the constraint-bit bookkeeping is
+        // PLANAR-C's call from a before/after snapshot.
+        let replacements = [directed_of(&cdt, p), directed_of(&cdt, n)];
+        roles.repair_relocation(&mut cdt, e, &replacements);
+
+        let p_claims = cdt.undirected_edge_data_mut(p).data().claims.clone();
+        assert_eq!(p_claims.len(), 2, "P keeps its own claim and receives E's");
+        assert_eq!(p_claims[0].semantic_id, p_id, "P's own claim stays first");
+        assert_eq!(p_claims[1].semantic_id, e_id, "E's claim is appended");
+        let n_claims = cdt.undirected_edge_data_mut(n).data().claims.clone();
+        assert_eq!(n_claims.len(), 1, "N receives E's claim");
+        assert_eq!(n_claims[0].semantic_id, e_id);
+        // Traversal counts combine rather than overwrite.
+        assert_eq!(roles.traversals.get(&p), Some(&3), "P combines 1 + 2");
+        assert_eq!(roles.traversals.get(&n), Some(&2), "N inherits E's 2");
+        assert_eq!(
+            ConstraintRoles::role_of(&cdt, p),
+            Some(ConstraintRole::SurfaceSampling),
+            "P's first role is its own",
+        );
+    }
+}
+
+/// PLANAR-C: the production crossing-splitting route.
+///
+/// These exercise [`ConstraintRoles::insert_with_split`] directly — the
+/// semantic helper `insert_to` now uses for every non-duplicate boundary
+/// segment — and assert the PLANAR-C invariants end to end: incoming claims
+/// reach every realized child, blocker claims survive subdivision, traversal
+/// multiplicity is preserved rather than divided, crossing vertices are not
+/// forged source identities, and material parity is unchanged by subdivision.
+#[cfg(test)]
+mod planar_c_crossing_tests {
+    use super::*;
+
+    fn point(x: f64, y: f64) -> SPoint2 {
+        SPoint2::new(x, y)
+    }
+
+    fn insert_vertex(cdt: &mut Cdt, p: SPoint2) -> FixedVertexHandle {
+        cdt.insert(p).expect("vertex insertion succeeds")
+    }
+
+    fn find_vertex(cdt: &Cdt, p: SPoint2) -> FixedVertexHandle {
+        cdt.vertices()
+            .find(|v| v.as_ref() == &p)
+            .expect("vertex exists")
+            .fix()
+    }
+
+    fn find_edge(cdt: &Cdt, a: SPoint2, b: SPoint2) -> FixedUndirectedEdgeHandle {
+        let va = find_vertex(cdt, a);
+        let vb = find_vertex(cdt, b);
+        cdt.get_edge_from_neighbors(va, vb)
+            .expect("edge exists")
+            .as_undirected()
+            .fix()
+    }
+
+    fn directed_of(cdt: &Cdt, e: FixedUndirectedEdgeHandle) -> FixedDirectedEdgeHandle {
+        cdt.undirected_edge(e).as_directed().fix()
+    }
+
+    fn source_use(index: usize) -> SourceEdgeUse {
+        SourceEdgeUse {
+            bound: BoundId(0),
+            index,
+            orientation: true,
+        }
+    }
+
+    fn claims_of(cdt: &Cdt, e: FixedUndirectedEdgeHandle) -> Vec<ConstraintClaim> {
+        cdt.undirected_edge(e).data().data().claims.clone()
+    }
+
+    fn label_blocker(
+        cdt: &mut Cdt,
+        roles: &mut ConstraintRoles,
+        a: FixedVertexHandle,
+        b: FixedVertexHandle,
+    ) -> (FixedUndirectedEdgeHandle, SemanticConstraintId) {
+        let id = roles.mint_semantic_constraint_id();
+        let chain = cdt.try_add_constraint(a, b);
+        assert!(!chain.is_empty(), "the blocking constraint is added");
+        roles.label_realized_chain(
+            cdt,
+            &chain,
+            id,
+            ConstraintRole::PhysicalBoundary,
+            &[source_use(7)],
+            Some(SegmentOrigin::Source),
+        );
+        let handle = cdt
+            .get_edge_from_neighbors(a, b)
+            .unwrap()
+            .as_undirected()
+            .fix();
+        *roles.traversals.entry(handle).or_insert(0) = 1;
+        (handle, id)
+    }
+
+    /// The minimal crossing scenario, through the PLANAR-C helper: blocking
+    /// constraint `(0,0)-(10,0)` on the x-axis, incoming chord `(2,-5)-(2,5)`
+    /// crossing it at `(2,0)`.
+    fn crossing_via_helper() -> (
+        Cdt,
+        ConstraintRoles,
+        FixedUndirectedEdgeHandle,
+        CrossingSplitReport,
+        SemanticConstraintId,
+    ) {
+        let mut cdt = Cdt::new();
+        let a = insert_vertex(&mut cdt, point(2.0, -5.0));
+        let b = insert_vertex(&mut cdt, point(2.0, 5.0));
+        let p = insert_vertex(&mut cdt, point(0.0, 0.0));
+        let q = insert_vertex(&mut cdt, point(10.0, 0.0));
+        let mut roles = ConstraintRoles::default();
+        let (blocker, _blocker_id) = label_blocker(&mut cdt, &mut roles, p, q);
+        let incoming_id = roles.mint_semantic_constraint_id();
+        let report = roles
+            .insert_with_split(
+                &mut cdt,
+                a,
+                b,
+                incoming_id,
+                ConstraintRole::PhysicalBoundary,
+                &[source_use(0)],
+                Some(SegmentOrigin::Source),
+            )
+            .expect("planar split succeeds");
+        (cdt, roles, blocker, report, incoming_id)
+    }
+
+    /// C-test 1: one proper crossing subdivides both the incoming segment and
+    /// the blocker into two atomic constrained edges sharing the crossing
+    /// vertex, and the report accounts for it.
+    #[test]
+    fn proper_crossing_splits_blocker_and_incoming() {
+        let (cdt, _roles, blocker, report, _id) = crossing_via_helper();
+        assert_eq!(report.blockers_crossed, 1);
+        assert_eq!(report.blockers_split, 1);
+        assert_eq!(report.blockers_relocated, 0);
+        assert_eq!(report.split_vertices, 1);
+        assert_eq!(report.chain.len(), 2, "the incoming chord is split in two");
+
+        let a = find_vertex(&cdt, point(2.0, -5.0));
+        let b = find_vertex(&cdt, point(2.0, 5.0));
+        let x = find_vertex(&cdt, point(2.0, 0.0));
+        let p = find_vertex(&cdt, point(0.0, 0.0));
+        let q = find_vertex(&cdt, point(10.0, 0.0));
+        let directed: Vec<_> = report.chain.iter().map(|h| cdt.directed_edge(*h)).collect();
+        assert_eq!(
+            directed[0].from().fix(),
+            a,
+            "the chain starts at the request"
+        );
+        assert_eq!(directed[0].to().fix(), x, "the chain passes through X");
+        assert_eq!(directed[1].from().fix(), x);
+        assert_eq!(directed[1].to().fix(), b, "the chain ends at the request");
+
+        // The blocker is now two constraint edges through X.
+        let child0 = find_edge(&cdt, point(0.0, 0.0), point(2.0, 0.0));
+        let child1 = find_edge(&cdt, point(2.0, 0.0), point(10.0, 0.0));
+        assert!(cdt.is_constraint_edge(child0));
+        assert!(cdt.is_constraint_edge(child1));
+        assert_eq!(child0, blocker, "E0 keeps the blocker handle");
+        assert_ne!(child1, blocker, "E1 is a new child");
+        // The crossing vertex is shared by four constraint edges.
+        let mut incident = 0usize;
+        for e in cdt.undirected_edges() {
+            if !e.is_constraint_edge() {
+                continue;
+            }
+            let d = e.as_directed();
+            if d.from().fix() == x || d.to().fix() == x {
+                incident += 1;
+            }
+        }
+        assert_eq!(incident, 4, "four atomic constraint edges meet at X");
+        let _ = (p, q);
+    }
+
+    /// C-test 2: every realized child of the incoming segment carries the one
+    /// incoming semantic claim, role, and source uses.
+    #[test]
+    fn incoming_claim_reaches_every_child() {
+        let (cdt, _roles, _blocker, report, incoming_id) = crossing_via_helper();
+        for h in &report.chain {
+            let handle = cdt.directed_edge(*h).as_undirected().fix();
+            let claims = claims_of(&cdt, handle);
+            assert_eq!(claims.len(), 1, "exactly the incoming claim");
+            assert_eq!(claims[0].semantic_id, incoming_id);
+            assert_eq!(claims[0].role, ConstraintRole::PhysicalBoundary);
+            assert_eq!(claims[0].source_uses, vec![source_use(0)]);
+            assert_eq!(
+                ConstraintRoles::role_of(&cdt, handle),
+                Some(ConstraintRole::PhysicalBoundary),
+                "the role is readable on every child",
+            );
+        }
+    }
+
+    /// C-test 3: the blocker's claim survives the split on both children.
+    #[test]
+    fn blocker_claim_reaches_both_children() {
+        let (cdt, _roles, blocker, _report, _incoming_id) = crossing_via_helper();
+        let child0 = find_edge(&cdt, point(0.0, 0.0), point(2.0, 0.0));
+        let child1 = find_edge(&cdt, point(2.0, 0.0), point(10.0, 0.0));
+        assert_eq!(child0, blocker);
+        for child in [child0, child1] {
+            let claims = claims_of(&cdt, child);
+            assert_eq!(claims.len(), 1, "one blocker claim on the child");
+            assert_eq!(claims[0].role, ConstraintRole::PhysicalBoundary);
+            assert_eq!(claims[0].source_uses, vec![source_use(7)]);
+        }
+        assert_eq!(
+            ConstraintRoles::role_of(&cdt, child1),
+            Some(ConstraintRole::PhysicalBoundary),
+            "E1's inherited role is readable after repair",
+        );
+    }
+
+    /// C-test 4: traversal multiplicity survives the crossing split exactly —
+    /// both children inherit `t`, never `t / 2`.
+    #[test]
+    fn traversal_multiplicity_survives_crossing_split() {
+        for t in [1usize, 2, 3] {
+            let mut cdt = Cdt::new();
+            let a = insert_vertex(&mut cdt, point(2.0, -5.0));
+            let b = insert_vertex(&mut cdt, point(2.0, 5.0));
+            let p = insert_vertex(&mut cdt, point(0.0, 0.0));
+            let q = insert_vertex(&mut cdt, point(10.0, 0.0));
+            let mut roles = ConstraintRoles::default();
+            let (blocker, _id) = label_blocker(&mut cdt, &mut roles, p, q);
+            *roles.traversals.entry(blocker).or_insert(0) = t;
+
+            let incoming_id = roles.mint_semantic_constraint_id();
+            roles
+                .insert_with_split(
+                    &mut cdt,
+                    a,
+                    b,
+                    incoming_id,
+                    ConstraintRole::PhysicalBoundary,
+                    &[],
+                    Some(SegmentOrigin::Source),
+                )
+                .expect("planar split succeeds");
+
+            let child0 = find_edge(&cdt, point(0.0, 0.0), point(2.0, 0.0));
+            let child1 = find_edge(&cdt, point(2.0, 0.0), point(10.0, 0.0));
+            assert_eq!(
+                roles.traversals.get(&child0),
+                Some(&t),
+                "E0 inherits the parent's {t} traversals",
+            );
+            assert_eq!(
+                roles.traversals.get(&child1),
+                Some(&t),
+                "E1 inherits the parent's {t} traversals",
+            );
+        }
+    }
+
+    /// C-test 5: a blocker carrying several claims passes every one of them to
+    /// its split child; first-role semantics stay deterministic.
+    #[test]
+    fn blocker_with_multiple_claims_copies_to_child() {
+        let mut cdt = Cdt::new();
+        let a = insert_vertex(&mut cdt, point(2.0, -5.0));
+        let b = insert_vertex(&mut cdt, point(2.0, 5.0));
+        let p = insert_vertex(&mut cdt, point(0.0, 0.0));
+        let q = insert_vertex(&mut cdt, point(10.0, 0.0));
+        let mut roles = ConstraintRoles::default();
+        let chain = cdt.try_add_constraint(p, q);
+        let first = roles.mint_semantic_constraint_id();
+        roles.label_realized_chain(
+            &mut cdt,
+            &chain,
+            first,
+            ConstraintRole::PhysicalBoundary,
+            &[],
+            Some(SegmentOrigin::Source),
+        );
+        let blocker = cdt
+            .get_edge_from_neighbors(p, q)
+            .unwrap()
+            .as_undirected()
+            .fix();
+        let second = roles.mint_semantic_constraint_id();
+        let directed = directed_of(&cdt, blocker);
+        roles.label_realized_chain(
+            &mut cdt,
+            &[directed],
+            second,
+            ConstraintRole::UnresolvedSyntheticClosure,
+            &[],
+            Some(SegmentOrigin::SyntheticClosure),
+        );
+        assert_eq!(
+            claims_of(&cdt, blocker).len(),
+            2,
+            "two claims before the split"
+        );
+
+        let incoming_id = roles.mint_semantic_constraint_id();
+        roles
+            .insert_with_split(
+                &mut cdt,
+                a,
+                b,
+                incoming_id,
+                ConstraintRole::PhysicalBoundary,
+                &[],
+                Some(SegmentOrigin::Source),
+            )
+            .expect("planar split succeeds");
+
+        let child0 = find_edge(&cdt, point(0.0, 0.0), point(2.0, 0.0));
+        let child1 = find_edge(&cdt, point(2.0, 0.0), point(10.0, 0.0));
+        for child in [child0, child1] {
+            let claims = claims_of(&cdt, child);
+            assert_eq!(claims.len(), 2, "every blocker claim survives the split");
+            assert_eq!(claims[0].semantic_id, first, "first-role stays first");
+            assert_eq!(claims[1].semantic_id, second, "later claim is preserved");
+        }
+    }
+
+    /// C-test 6: one incoming segment crossing several blockers splits each of
+    /// them, and the realized chain covers the whole request.
+    #[test]
+    fn incoming_crossing_multiple_blockers() {
+        let mut cdt = Cdt::new();
+        let a = insert_vertex(&mut cdt, point(5.0, -5.0));
+        let b = insert_vertex(&mut cdt, point(5.0, 15.0));
+        let p0 = insert_vertex(&mut cdt, point(0.0, 0.0));
+        let q0 = insert_vertex(&mut cdt, point(10.0, 0.0));
+        let p1 = insert_vertex(&mut cdt, point(0.0, 10.0));
+        let q1 = insert_vertex(&mut cdt, point(10.0, 10.0));
+        let mut roles = ConstraintRoles::default();
+        let (blocker0, _) = label_blocker(&mut cdt, &mut roles, p0, q0);
+        let (blocker1, _) = label_blocker(&mut cdt, &mut roles, p1, q1);
+
+        let incoming_id = roles.mint_semantic_constraint_id();
+        let report = roles
+            .insert_with_split(
+                &mut cdt,
+                a,
+                b,
+                incoming_id,
+                ConstraintRole::PhysicalBoundary,
+                &[source_use(3)],
+                Some(SegmentOrigin::Source),
+            )
+            .expect("planar split succeeds");
+
+        assert_eq!(report.blockers_crossed, 2);
+        assert_eq!(report.blockers_split, 2);
+        assert_eq!(report.split_vertices, 2);
+        assert_eq!(
+            report.chain.len(),
+            3,
+            "two splits divide the chord into three"
+        );
+        assert_eq!(
+            roles.traversals.get(&blocker0),
+            Some(&1),
+            "blocker0 survives with its traversal",
+        );
+        assert_eq!(
+            roles.traversals.get(&blocker1),
+            Some(&1),
+            "blocker1 survives with its traversal",
+        );
+        for split in [point(5.0, 0.0), point(5.0, 10.0)] {
+            let x = find_vertex(&cdt, split);
+            let mut incident = 0usize;
+            for e in cdt.undirected_edges() {
+                if !e.is_constraint_edge() {
+                    continue;
+                }
+                let d = e.as_directed();
+                if d.from().fix() == x || d.to().fix() == x {
+                    incident += 1;
+                }
+            }
+            assert_eq!(incident, 4, "each crossing vertex is a 4-way junction");
+        }
+        // Every realized child of the incoming request carries the incoming use.
+        for h in &report.chain {
+            let handle = cdt.directed_edge(*h).as_undirected().fix();
+            let claims = claims_of(&cdt, handle);
+            assert!(claims.iter().any(|c| c.semantic_id == incoming_id));
+            assert!(claims.iter().any(|c| c.source_uses == vec![source_use(3)]));
+        }
+    }
+
+    /// C-test 7: material meaning is attached to atomic constrained edges and
+    /// is unchanged by crossing subdivision. A self-crossing "bow-tie" loop
+    /// whose two diagonals cross at `(5,5)` — the H2 signature, a single bound
+    /// folding over itself — selects both lobes as material: the crossing
+    /// vertex is a 4-way junction of toggling edges, so the flood is consistent
+    /// and the subdivided arrangement selects exactly the same region a proper
+    /// planarization of the loop must.
+    #[test]
+    fn material_region_unchanged_by_crossing_subdivision() {
+        let mut cdt = Cdt::new();
+        let a = insert_vertex(&mut cdt, point(0.0, 0.0));
+        let b = insert_vertex(&mut cdt, point(10.0, 0.0));
+        let c = insert_vertex(&mut cdt, point(0.0, 10.0));
+        let d = insert_vertex(&mut cdt, point(10.0, 10.0));
+        let mut roles = ConstraintRoles::default();
+        // The two non-crossing edges first, then the diagonals, so the second
+        // diagonal properly crosses the first one.
+        for (p, q) in [(a, b), (c, d)] {
+            let id = roles.mint_semantic_constraint_id();
+            let chain = cdt.try_add_constraint(p, q);
+            roles.label_realized_chain(
+                &mut cdt,
+                &chain,
+                id,
+                ConstraintRole::PhysicalBoundary,
+                &[],
+                Some(SegmentOrigin::Source),
+            );
+        }
+        let diag1_id = roles.mint_semantic_constraint_id();
+        let chain = cdt.try_add_constraint(b, c);
+        roles.label_realized_chain(
+            &mut cdt,
+            &chain,
+            diag1_id,
+            ConstraintRole::PhysicalBoundary,
+            &[],
+            Some(SegmentOrigin::Source),
+        );
+        let diag2_id = roles.mint_semantic_constraint_id();
+        let report = roles
+            .insert_with_split(
+                &mut cdt,
+                d,
+                a,
+                diag2_id,
+                ConstraintRole::PhysicalBoundary,
+                &[],
+                Some(SegmentOrigin::Source),
+            )
+            .expect("planar split succeeds");
+        assert_eq!(report.blockers_crossed, 1);
+        assert_eq!(report.blockers_split, 1);
+        assert_eq!(report.chain.len(), 2, "the second diagonal is subdivided");
+
+        // The crossing vertex is a 4-way junction of toggling constraint edges,
+        // so the dual flood cannot contradict itself there.
+        let x = find_vertex(&cdt, point(5.0, 5.0));
+        let mut incident = 0usize;
+        for e in cdt.undirected_edges() {
+            if !e.is_constraint_edge() {
+                continue;
+            }
+            let d = e.as_directed();
+            if d.from().fix() == x || d.to().fix() == x {
+                incident += 1;
+            }
+        }
+        assert_eq!(
+            incident, 4,
+            "the crossing is a subdivision, not a parity event"
+        );
+
+        // Every constraint edge carries a role, so the flood never trips
+        // `ConstraintRoleMissing`.
+        for e in cdt.undirected_edges() {
+            if !e.is_constraint_edge() {
+                continue;
+            }
+            assert!(
+                ConstraintRoles::role_of(&cdt, e.fix()).is_some(),
+                "every constraint edge carries a role",
+            );
+        }
+
+        let parity = flood_parity(&cdt, &roles, ParityReading::TraversalParity)
+            .expect("the subdivided arrangement floods consistently");
+        let mut material_area = 0.0f64;
+        for face in cdt.inner_faces() {
+            if parity.get(&face.index()) != Some(&1) {
+                continue;
+            }
+            let verts = face.vertices();
+            let [a, b, c] = verts.map(|v| *v.as_ref());
+            material_area += 0.5 * ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)).abs();
+        }
+        assert!(
+            (material_area - 50.0).abs() < 1e-9,
+            "both lobes of the bow-tie are material, got area {material_area}",
+        );
+    }
+
+    /// C-test 8: a segment with no crossing realizes as one labeled edge and
+    /// touches nothing else.
+    #[test]
+    fn non_crossing_segment_unchanged() {
+        let mut cdt = Cdt::new();
+        let a = insert_vertex(&mut cdt, point(2.0, -5.0));
+        let b = insert_vertex(&mut cdt, point(2.0, 5.0));
+        let mut roles = ConstraintRoles::default();
+        let id = roles.mint_semantic_constraint_id();
+        let report = roles
+            .insert_with_split(
+                &mut cdt,
+                a,
+                b,
+                id,
+                ConstraintRole::PhysicalBoundary,
+                &[source_use(1)],
+                Some(SegmentOrigin::Source),
+            )
+            .expect("planar split succeeds");
+        assert_eq!(report.blockers_crossed, 0);
+        assert_eq!(report.blockers_split, 0);
+        assert_eq!(report.blockers_relocated, 0);
+        assert_eq!(report.split_vertices, 0);
+        assert_eq!(report.chain.len(), 1, "no subdivision for a clear segment");
+        assert_eq!(cdt.num_constraints(), 1, "exactly one new constraint edge");
+        let handle = cdt.directed_edge(report.chain[0]).as_undirected().fix();
+        let claims = claims_of(&cdt, handle);
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].semantic_id, id);
+        assert_eq!(claims[0].source_uses, vec![source_use(1)]);
+        assert_eq!(roles.traversals.get(&handle), Some(&1));
+    }
+
+    /// C-test 9: a full duplicate/retrace creates no second CDT edge — the
+    /// ARR-SEAM admission is preserved through the splitting helper.
+    #[test]
+    fn duplicate_retrace_creates_no_second_edge() {
+        let mut cdt = Cdt::new();
+        let a = insert_vertex(&mut cdt, point(0.0, 0.0));
+        let b = insert_vertex(&mut cdt, point(10.0, 0.0));
+        let mut roles = ConstraintRoles::default();
+        let first = roles.mint_semantic_constraint_id();
+        let chain = cdt.try_add_constraint(a, b);
+        roles.label_realized_chain(
+            &mut cdt,
+            &chain,
+            first,
+            ConstraintRole::PhysicalBoundary,
+            &[],
+            Some(SegmentOrigin::Source),
+        );
+        let before = cdt.num_constraints();
+        let handle = cdt
+            .get_edge_from_neighbors(a, b)
+            .unwrap()
+            .as_undirected()
+            .fix();
+        assert_eq!(roles.traversals.get(&handle), Some(&1));
+
+        let second = roles.mint_semantic_constraint_id();
+        let report = roles
+            .insert_with_split(
+                &mut cdt,
+                a,
+                b,
+                second,
+                ConstraintRole::PhysicalBoundary,
+                &[source_use(9)],
+                Some(SegmentOrigin::Source),
+            )
+            .expect("planar split succeeds");
+        assert_eq!(
+            cdt.num_constraints(),
+            before,
+            "a retrace makes no second CDT edge"
+        );
+        assert_eq!(
+            report.chain.len(),
+            1,
+            "the retrace realizes as the existing edge"
+        );
+        assert_eq!(
+            roles.traversals.get(&handle),
+            Some(&2),
+            "the retrace is a second traversal, not a new edge",
+        );
+        let claims = claims_of(&cdt, handle);
+        assert_eq!(claims.len(), 2, "both claims are retained on the one edge");
+        assert_eq!(claims[0].semantic_id, first);
+        assert_eq!(claims[1].semantic_id, second);
+        assert_eq!(
+            ConstraintRoles::role_of(&cdt, handle),
+            Some(ConstraintRole::PhysicalBoundary),
+            "first-role semantics are unchanged by the retrace",
+        );
+    }
+
+    /// C-test 10: the PLANAR-A source uses propagate exactly onto every
+    /// realized incoming child.
+    #[test]
+    fn source_uses_propagate_to_incoming_children() {
+        let (cdt, _roles, _blocker, report, _incoming_id) = crossing_via_helper();
+        assert_eq!(report.chain.len(), 2);
+        for h in &report.chain {
+            let handle = cdt.directed_edge(*h).as_undirected().fix();
+            let claims = claims_of(&cdt, handle);
+            assert_eq!(
+                claims[0].source_uses,
+                vec![source_use(0)],
+                "the exact contributor reaches every child",
+            );
+        }
+    }
+
+    /// C-test 11: after any number of crossings there are no anonymous
+    /// constrained edges — every one carries a resolvable role, so the parity
+    /// flood never trips `ConstraintRoleMissing`.
+    #[test]
+    fn no_anonymous_constraint_edges() {
+        let mut cdt = Cdt::new();
+        let a = insert_vertex(&mut cdt, point(5.0, -5.0));
+        let b = insert_vertex(&mut cdt, point(5.0, 25.0));
+        let p0 = insert_vertex(&mut cdt, point(0.0, 0.0));
+        let q0 = insert_vertex(&mut cdt, point(10.0, 0.0));
+        let p1 = insert_vertex(&mut cdt, point(0.0, 10.0));
+        let q1 = insert_vertex(&mut cdt, point(10.0, 10.0));
+        let p2 = insert_vertex(&mut cdt, point(0.0, 20.0));
+        let q2 = insert_vertex(&mut cdt, point(10.0, 20.0));
+        let mut roles = ConstraintRoles::default();
+        for (p, q) in [(p0, q0), (p1, q1), (p2, q2)] {
+            let id = roles.mint_semantic_constraint_id();
+            let chain = cdt.try_add_constraint(p, q);
+            roles.label_realized_chain(
+                &mut cdt,
+                &chain,
+                id,
+                ConstraintRole::PhysicalBoundary,
+                &[],
+                Some(SegmentOrigin::Source),
+            );
+        }
+        let incoming_id = roles.mint_semantic_constraint_id();
+        let report = roles
+            .insert_with_split(
+                &mut cdt,
+                a,
+                b,
+                incoming_id,
+                ConstraintRole::PhysicalBoundary,
+                &[],
+                Some(SegmentOrigin::Source),
+            )
+            .expect("planar split succeeds");
+        assert_eq!(report.blockers_split, 3);
+
+        for e in cdt.undirected_edges() {
+            if !e.is_constraint_edge() {
+                continue;
+            }
+            assert!(
+                ConstraintRoles::role_of(&cdt, e.fix()).is_some(),
+                "every realized constraint edge carries a role",
+            );
+        }
+        // And the flood can walk the whole arrangement without a missing role.
+        assert_eq!(roles.unresolved_at_flood.get(), 0);
+    }
+
+    /// C-test 12: an endpoint lying on an existing blocker's interior is
+    /// accepted naturally — the blocker was realized as a chain through that
+    /// vertex, and a segment departing from it adds no spurious split.
+    #[test]
+    fn endpoint_on_interior_vertex_is_accepted() {
+        let mut cdt = Cdt::new();
+        let a = insert_vertex(&mut cdt, point(0.0, 0.0));
+        let b = insert_vertex(&mut cdt, point(10.0, 0.0));
+        let x = insert_vertex(&mut cdt, point(5.0, 0.0));
+        let p = insert_vertex(&mut cdt, point(5.0, 5.0));
+        let q = insert_vertex(&mut cdt, point(5.0, -5.0));
+        let mut roles = ConstraintRoles::default();
+        // The blocker (0,0)-(10,0) is realized as a chain through the existing
+        // interior vertex x.
+        let blocker_id = roles.mint_semantic_constraint_id();
+        let chain = cdt.try_add_constraint(a, b);
+        assert_eq!(chain.len(), 2, "the blocker realizes as a chain through x");
+        roles.label_realized_chain(
+            &mut cdt,
+            &chain,
+            blocker_id,
+            ConstraintRole::PhysicalBoundary,
+            &[],
+            Some(SegmentOrigin::Source),
+        );
+
+        // A segment from x (on the blocker's interior) out to p is accepted.
+        let incoming_id = roles.mint_semantic_constraint_id();
+        let report = roles
+            .insert_with_split(
+                &mut cdt,
+                x,
+                p,
+                incoming_id,
+                ConstraintRole::PhysicalBoundary,
+                &[source_use(2)],
+                Some(SegmentOrigin::Source),
+            )
+            .expect("planar split succeeds");
+        assert_eq!(report.blockers_crossed, 0, "no blocker is crossed");
+        assert_eq!(report.blockers_split, 0);
+        assert_eq!(report.chain.len(), 1);
+        // The blocker's own two children keep their claims.
+        let child0 = find_edge(&cdt, point(0.0, 0.0), point(5.0, 0.0));
+        let child1 = find_edge(&cdt, point(5.0, 0.0), point(10.0, 0.0));
+        for child in [child0, child1] {
+            let claims = claims_of(&cdt, child);
+            assert_eq!(claims.len(), 1);
+            assert_eq!(claims[0].semantic_id, blocker_id);
+        }
+        let _ = q;
+    }
+
+    /// C-test 13: a vertex inserted exactly on an existing constraint edge
+    /// splits it, and Spade's fresh child arrives without a claim. The backstop
+    /// repair attaches the surviving half's claim to it, so the flood never
+    /// trips `ConstraintRoleMissing` for a split the insertion API performed
+    /// outside `insert_with_split`.
+    #[test]
+    fn vertex_insertion_split_child_is_repaired() {
+        let mut cdt = Cdt::new();
+        let a = insert_vertex(&mut cdt, point(0.0, 0.0));
+        let b = insert_vertex(&mut cdt, point(10.0, 0.0));
+        let mut roles = ConstraintRoles::default();
+        let id = roles.mint_semantic_constraint_id();
+        let chain = cdt.try_add_constraint(a, b);
+        roles.label_realized_chain(
+            &mut cdt,
+            &chain,
+            id,
+            ConstraintRole::PhysicalBoundary,
+            &[],
+            Some(SegmentOrigin::Source),
+        );
+
+        // Inserting a vertex on the constraint's interior splits it. Whether
+        // Spade accepts the exact-on-edge point or lands one ULP beside it, the
+        // survivor keeps the claim and any fresh child must be repaired.
+        let _ = cdt.insert(point(5.0, 0.0));
+        roles.repair_unlabeled_constraint_edges(&mut cdt);
+
+        let mut constraint_count = 0usize;
+        let mut unlabeled = 0usize;
+        for e in cdt.undirected_edges() {
+            if !e.is_constraint_edge() {
+                continue;
+            }
+            constraint_count += 1;
+            if e.data().data().claims.is_empty() {
+                unlabeled += 1;
+            }
+        }
+        assert_eq!(constraint_count, 2, "the split yields two constraint edges");
+        assert_eq!(unlabeled, 0, "the backstop repaired the split child");
+        assert_eq!(roles.unresolved_at_flood.get(), 0);
     }
 }
 
@@ -9218,8 +11287,15 @@ mod proj003_stage_a_tests {
         let attempt = attempt_with(outcome((0.5, 0.5), 0.0, true, false));
         let admitted = residual_certified_admission(&surface, point, 1.0e-3, attempt)
             .expect("a finite, in-domain, within-tol iterate must be admitted");
-        assert_eq!(admitted.0, (0.5, 0.5), "the certified candidate's UV is kept");
-        assert!(admitted.1 <= 1.0e-3, "the re-evaluated residual is certified");
+        assert_eq!(
+            admitted.0,
+            (0.5, 0.5),
+            "the certified candidate's UV is kept"
+        );
+        assert!(
+            admitted.1 <= 1.0e-3,
+            "the re-evaluated residual is certified"
+        );
     }
 
     /// Genuine miss: the best iterate is finite and in-domain, but its world
@@ -9256,7 +11332,10 @@ mod proj003_stage_a_tests {
         let surface = bilinear_patch();
         let point = Point3::new(0.5, 0.5, 0.0);
         let attempt = attempt_with(outcome((f64::NAN, 0.5), 0.0, true, false));
-        assert_eq!(residual_certified_admission(&surface, point, 1.0e-3, attempt), None);
+        assert_eq!(
+            residual_certified_admission(&surface, point, 1.0e-3, attempt),
+            None
+        );
     }
 
     /// A probe that never ran (no finite residual) admits nothing.
@@ -9264,7 +11343,12 @@ mod proj003_stage_a_tests {
     fn no_ran_probe_stays_rejected() {
         let surface = bilinear_patch();
         assert_eq!(
-            residual_certified_admission(&surface, Point3::origin(), 1.0e-3, ProjectionAttempt::default()),
+            residual_certified_admission(
+                &surface,
+                Point3::origin(),
+                1.0e-3,
+                ProjectionAttempt::default()
+            ),
             None,
             "with prod_best = NONE there is no candidate to certify"
         );
@@ -9273,14 +11357,14 @@ mod proj003_stage_a_tests {
     /// Legacy invariance of the shared solver: `search_nearest_parameter_outcome`
     /// must report exactly the converged answer the legacy
     /// `search_nearest_parameter` (and a direct `newton::solve`) do, for every
-    /// input in the battery — converged, non-converged, and degenerate. The
+    /// input in the battery â€” converged, non-converged, and degenerate. The
     /// production chain sees the identical result it always did.
     #[test]
     fn shared_outcome_matches_legacy_newton() {
         use truck_base::newton;
         let surface = bilinear_patch();
         let cases = [
-            ((0.3, 0.7, 0.05), (0.2, 0.6)), // on/near the patch, converges
+            ((0.3, 0.7, 0.05), (0.2, 0.6)),  // on/near the patch, converges
             ((0.9, 0.1, 0.0), (0.5, 0.5)),   // on the patch
             ((5.0, 5.0, 5.0), (0.4, 0.4)),   // far away, may not converge
             ((-3.0, 2.0, 1.0), (0.8, 0.2)),  // far corner, may not converge
@@ -9289,7 +11373,8 @@ mod proj003_stage_a_tests {
         ];
         for (p, hint) in cases {
             let point = Point3::new(p.0, p.1, p.2);
-            let outcome = algo::surface::search_nearest_parameter_outcome(&surface, point, hint, 100);
+            let outcome =
+                algo::surface::search_nearest_parameter_outcome(&surface, point, hint, 100);
             let legacy = surface.search_nearest_parameter(point, hint, 100);
             assert_eq!(
                 outcome.converged, legacy,
@@ -9308,7 +11393,9 @@ mod proj003_stage_a_tests {
                 let min_res = [0.0f64, 0.25, 0.5, 0.75, 1.0]
                     .into_iter()
                     .flat_map(|a| {
-                        [0.0f64, 0.25, 0.5, 0.75, 1.0].into_iter().map(move |b| nearest((a, b)))
+                        [0.0f64, 0.25, 0.5, 0.75, 1.0]
+                            .into_iter()
+                            .map(move |b| nearest((a, b)))
                     })
                     .fold(f64::INFINITY, f64::min);
                 assert!(
@@ -9321,7 +11408,7 @@ mod proj003_stage_a_tests {
 
     /// A unit cylinder around the z axis: `subs(u, v)` applies
     /// `rotation_matrix(v)`, so the `v` axis is genuinely periodic with period
-    /// `2π` and its declared range is `[0, 2π)`.
+    /// `2Ï€` and its declared range is `[0, 2Ï€)`.
     fn unit_cylinder() -> RevolutedCurve<Line<Point3>> {
         RevolutedCurve::by_revolution(
             Line::from_origin_direction(Point3::new(1.0, 0.0, 0.0), Vector3::unit_z()),
@@ -9348,8 +11435,15 @@ mod proj003_stage_a_tests {
         let attempt = attempt_with_seed(outcome((0.5, 0.5), 0.0, true, false));
         let admitted = residual_certified_seed_admission(&surface, point, 1.0e-3, attempt)
             .expect("a finite, in-domain, within-tol seed iterate must be admitted");
-        assert_eq!(admitted.0, (0.5, 0.5), "the certified candidate's UV is kept");
-        assert!(admitted.1 <= 1.0e-3, "the re-evaluated residual is certified");
+        assert_eq!(
+            admitted.0,
+            (0.5, 0.5),
+            "the certified candidate's UV is kept"
+        );
+        assert!(
+            admitted.1 <= 1.0e-3,
+            "the re-evaluated residual is certified"
+        );
     }
 
     /// A structural-seed candidate beyond the caller tolerance stays rejected.
@@ -9422,15 +11516,26 @@ mod proj003_stage_a_tests {
 
     /// A candidate on a genuinely periodic axis that differs from an in-range
     /// representative by one certified period is normalized and admitted. The
-    /// point `(-1, 0, 0.5)` lies on the cylinder at `v = π`; the candidate at
-    /// `v = 3π` is deck-equivalent to it.
+    /// point `(-1, 0, 0.5)` lies on the cylinder at `v = Ï€`; the candidate at
+    /// `v = 3Ï€` is deck-equivalent to it.
     #[test]
     fn periodic_equivalent_candidate_is_normalized_and_admitted() {
         let surface = unit_cylinder();
         let point = Point3::new(-1.0, 0.0, 0.5);
-        let attempt = attempt_with_seed(outcome((0.5, 3.0 * std::f64::consts::PI), 0.0, false, false));
-        let admitted = residual_certified_domain_recovery(&surface, point, 1.0e-3, attempt, &cylinder_lattice())
-            .expect("a certified-periodic out-of-range candidate must be recoverable");
+        let attempt = attempt_with_seed(outcome(
+            (0.5, 3.0 * std::f64::consts::PI),
+            0.0,
+            false,
+            false,
+        ));
+        let admitted = residual_certified_domain_recovery(
+            &surface,
+            point,
+            1.0e-3,
+            attempt,
+            &cylinder_lattice(),
+        )
+        .expect("a certified-periodic out-of-range candidate must be recoverable");
         assert_eq!(
             admitted.0,
             (0.5, std::f64::consts::PI),
@@ -9451,7 +11556,12 @@ mod proj003_stage_a_tests {
     fn uncertified_period_is_never_normalized() {
         let surface = unit_cylinder();
         let point = Point3::new(-1.0, 0.0, 0.5);
-        let attempt = attempt_with_seed(outcome((0.5, 5.0 * std::f64::consts::PI), 0.0, false, false));
+        let attempt = attempt_with_seed(outcome(
+            (0.5, 5.0 * std::f64::consts::PI),
+            0.0,
+            false,
+            false,
+        ));
         let non_periodic = CertifiedLattice::NON_PERIODIC;
         assert_eq!(
             residual_certified_domain_recovery(&surface, point, 1.0e-3, attempt, &non_periodic),
@@ -9491,9 +11601,19 @@ mod proj003_stage_a_tests {
             &CertifiedLattice::NON_PERIODIC,
         );
         assert_eq!(class, diagnosis::DomainRecoveryClass::BoundaryEpsilon);
-        let admitted = residual_certified_domain_recovery(&surface, point, 1.0e-3, attempt, &CertifiedLattice::NON_PERIODIC)
-            .expect("a microscopically-outside candidate clamps and re-certifies");
-        assert_eq!(admitted.0, (1.0, 0.5), "the coordinate is clamped to the boundary");
+        let admitted = residual_certified_domain_recovery(
+            &surface,
+            point,
+            1.0e-3,
+            attempt,
+            &CertifiedLattice::NON_PERIODIC,
+        )
+        .expect("a microscopically-outside candidate clamps and re-certifies");
+        assert_eq!(
+            admitted.0,
+            (1.0, 0.5),
+            "the coordinate is clamped to the boundary"
+        );
         assert_eq!(admitted.2, diagnosis::DomainRecoveryClass::BoundaryEpsilon);
     }
 
@@ -9505,7 +11625,13 @@ mod proj003_stage_a_tests {
         let point = Point3::new(0.0, 0.0, 0.0);
         let attempt = attempt_with_seed(outcome((5.0, 0.5), 0.0, false, false));
         assert_eq!(
-            residual_certified_domain_recovery(&surface, point, 1.0e-3, attempt, &CertifiedLattice::NON_PERIODIC),
+            residual_certified_domain_recovery(
+                &surface,
+                point,
+                1.0e-3,
+                attempt,
+                &CertifiedLattice::NON_PERIODIC
+            ),
             None,
             "a far-outside nonperiodic candidate is diagnostic-only"
         );
@@ -9517,9 +11643,20 @@ mod proj003_stage_a_tests {
     fn domain_recovery_respects_tolerance() {
         let surface = unit_cylinder();
         let point = Point3::new(-1.0, 0.0, 0.5);
-        let attempt = attempt_with_seed(outcome((0.5, 3.0 * std::f64::consts::PI), 5.0, false, false));
+        let attempt = attempt_with_seed(outcome(
+            (0.5, 3.0 * std::f64::consts::PI),
+            5.0,
+            false,
+            false,
+        ));
         assert_eq!(
-            residual_certified_domain_recovery(&surface, point, 1.0e-3, attempt, &cylinder_lattice()),
+            residual_certified_domain_recovery(
+                &surface,
+                point,
+                1.0e-3,
+                attempt,
+                &cylinder_lattice()
+            ),
             None,
             "Stage C never widens the caller tolerance"
         );
