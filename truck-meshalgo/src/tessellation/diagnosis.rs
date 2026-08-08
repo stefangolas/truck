@@ -44,6 +44,8 @@ pub enum OriginClass {
     SyntheticClosure,
     /// A seam or periodization bridge across a degenerate direction.
     SeamOrPeriodization,
+    /// A chart-closure run of a periodic cap: meridian seam or pole line.
+    ChartClosure,
     /// Reconstructed or derived geometry not directly from source trim.
     ReconstructedOrDerived,
     /// The origin is not established.
@@ -56,6 +58,7 @@ impl From<SegmentOrigin> for OriginClass {
             SegmentOrigin::Source => Self::AuthoritativeSourceTrim,
             SegmentOrigin::SyntheticClosure => Self::SyntheticClosure,
             SegmentOrigin::Seam => Self::SeamOrPeriodization,
+            SegmentOrigin::ChartClosure => Self::ChartClosure,
         }
     }
 }

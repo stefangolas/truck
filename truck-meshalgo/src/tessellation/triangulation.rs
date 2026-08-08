@@ -5300,6 +5300,17 @@ pub enum SegmentOrigin {
     /// Synthesised to bridge a collapsed periodic pair â€” a seam across a
     /// degenerate direction rather than a trim boundary.
     Seam,
+    /// **P3b.** Synthesised to close the planar chart of a periodic spherical
+    /// cap: the meridian runs and the pole line that turn a |k|=1 latitude
+    /// walk (whose UV image is a 1D line) into a contractible planar cell.
+    ///
+    /// Explicitly artificial: it carries no source edge use, and it is counted
+    /// separately from `Seam`/`SyntheticClosure` so the census can say how much
+    /// of the boundary is invented chart topology. It completes the *single*
+    /// material boundary of the cap (the source latitude loop plus this
+    /// closure form one closed toggling loop); it never creates a second,
+    /// independent toggling region. `DOM-CHART-CLOSURE-001`.
+    ChartClosure,
 }
 
 impl SegmentOrigin {
@@ -5310,10 +5321,19 @@ impl SegmentOrigin {
     /// `PhysicalBoundary`. This makes the populations nameable and countable;
     /// deciding what a synthesised segment *should* do to material state is a
     /// separate change that must be measured on its own.
+    ///
+    /// A P3b chart closure toggles as well: the cap's source latitude walk is
+    /// an *open* path in the chart (its periodic wrap is where the meridian
+    /// seam replaces the deck), so a non-toggling closure would leave the
+    /// toggling subgraph with two odd-degree endpoints and the parity flood
+    /// would contradict itself. The closure completes the single boundary; it
+    /// is artificial (no source identity) and never a separate parity region.
     fn role(self) -> ConstraintRole {
         match self {
             Self::Source => ConstraintRole::PhysicalBoundary,
-            Self::SyntheticClosure | Self::Seam => ConstraintRole::UnresolvedSyntheticClosure,
+            Self::SyntheticClosure | Self::Seam | Self::ChartClosure => {
+                ConstraintRole::UnresolvedSyntheticClosure
+            }
         }
     }
 }
@@ -5878,6 +5898,305 @@ enum TwoLoopJoinOutcome {
     Unresolved,
 }
 
+/// P3b: periodic spherical-cap chart closure.
+///
+/// A closed latitude-parallel boundary (|k| = 1 around the periodic axis) whose
+/// UV image is a 1D line encloses a positive-area spherical region but cannot
+/// itself bound a planar material cell. The chart closure builds the
+/// contractible cell instead:
+///
+/// ```text
+///      D --(pole line)--> C            r = r_pole  (the collapsed pole)
+///      |                  |
+///      seam-left          seam-right
+///      |                  |
+///      A --(source)--> ... --> B       r = r0      (the real latitude walk)
+/// ```
+///
+/// `A -> B` is the source walk (real trim, carries STEP provenance, toggles
+/// material parity). `B -> C`, `C -> D` and `D -> A` are synthesised chart
+/// closure (origin [`SegmentOrigin::ChartClosure`], no source identity). The
+/// source walk is an *open* path in the chart (its periodic wrap is replaced by
+/// the meridian seam), so the closure must complete the single toggling
+/// boundary: the whole rectangle toggles as one closed loop, and the parity
+/// flood selects the interior (the cap). The closure is never a separate
+/// material region. The pole is selected on the material side derived from the
+/// source-loop orientation times the effective surface normal, so north/south
+/// and small/large cap are decisions, never constants.
+struct PeriodicCapClosure;
+
+/// Which parameter axis carries the period of a periodic-cap boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PeriodicAxis {
+    U,
+    V,
+}
+
+impl PeriodicCapClosure {
+    /// Classify `loop_` as a periodic cap and build its contractible cell, or
+    /// return `None` if the loop is not the signature (single 1D |k|=1 periodic
+    /// loop on a surface with a certified pole on the material side).
+    fn try_build<S: PreMeshableSurface>(
+        surface: &S,
+        loop_: &BoundaryLoop,
+        displacement: [i64; 2],
+        tol: f64,
+        lattice: &CertifiedLattice,
+    ) -> Option<BoundaryLoop> {
+        // 1. Exactly one periodic axis, winding exactly once.
+        let (p_axis, k) = match displacement {
+            [ku, 0] if ku.abs() == 1 => (PeriodicAxis::U, ku),
+            [0, kv] if kv.abs() == 1 => (PeriodicAxis::V, kv),
+            _ => return None,
+        };
+        let period = match p_axis {
+            PeriodicAxis::U => lattice.declared_u_period()?,
+            PeriodicAxis::V => lattice.declared_v_period()?,
+        };
+        // 2. The chart image must be a 1D line: zero signed area, and the
+        //    non-periodic coordinate essentially constant across the loop.
+        if signed_area(&loop_.points).abs() >= DEGENERATE_LOOP_AREA {
+            return None;
+        }
+        let (n_min, n_max) = match p_axis {
+            PeriodicAxis::U => loop_
+                .points
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
+                    (lo.min(p.uv.y), hi.max(p.uv.y))
+                }),
+            PeriodicAxis::V => loop_
+                .points
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
+                    (lo.min(p.uv.x), hi.max(p.uv.x))
+                }),
+        };
+        if n_max - n_min > 0.1 * period {
+            return None;
+        }
+        let r0 = 0.5 * (n_min + n_max);
+        // 3. The pole on the material side; `None` when the material side has
+        //    no orbit collapse, which is not a cap.
+        let pole = find_cap_pole(surface, loop_, p_axis, r0, period)?;
+        // 4. Build the contractible planar cell.
+        Some(build_cap_cell(surface, loop_, p_axis, k, r0, pole, tol))
+    }
+}
+
+/// The non-periodic coordinate of a point, on the axis that is *not* periodic.
+fn non_periodic_comp(p: &SurfacePoint, p_axis: PeriodicAxis) -> f64 {
+    match p_axis {
+        PeriodicAxis::U => p.uv.y,
+        PeriodicAxis::V => p.uv.x,
+    }
+}
+
+/// The periodic coordinate of a point, on the periodic axis.
+fn periodic_comp(p: &SurfacePoint, p_axis: PeriodicAxis) -> f64 {
+    match p_axis {
+        PeriodicAxis::U => p.uv.x,
+        PeriodicAxis::V => p.uv.y,
+    }
+}
+
+/// Twice the diameter of the angular orbit at non-periodic coordinate `r`:
+/// the distance between two surface points half a period apart. This vanishes
+/// exactly at a pole, where the periodic orbit collapses.
+fn orbit_diameter<S: PreMeshableSurface>(
+    surface: &S,
+    p_axis: PeriodicAxis,
+    r: f64,
+    period: f64,
+) -> f64 {
+    let (pa, pb) = match p_axis {
+        PeriodicAxis::U => {
+            let v = r;
+            (surface.subs(0.0, v), surface.subs(0.5 * period, v))
+        }
+        PeriodicAxis::V => {
+            let u = r;
+            (surface.subs(u, 0.0), surface.subs(u, 0.5 * period))
+        }
+    };
+    pa.distance(pb)
+}
+
+/// Locate the pole on the material side of the latitude walk.
+///
+/// The material side is decided by the STEP face orientation convention: the
+/// material lies on the left of the directed boundary as seen from the side the
+/// effective surface normal points toward, i.e. `n x t` points into the
+/// material. `n` is the surface normal (which already carries
+/// `FACE_SURFACE.same_sense` via `surface.invert()`); `t` is the walk tangent
+/// (which already carries `FACE_BOUND x ORIENTED_EDGE x EDGE_CURVE`). The
+/// normal's component along the non-periodic axis selects which pole bounds the
+/// cap, so north/south and small/large are derived, never hard-coded.
+fn find_cap_pole<S: PreMeshableSurface>(
+    surface: &S,
+    loop_: &BoundaryLoop,
+    p_axis: PeriodicAxis,
+    r0: f64,
+    period: f64,
+) -> Option<f64> {
+    let n = loop_.points.len();
+    if n < 3 {
+        return None;
+    }
+    let mid = n / 2;
+    let (pa, pb, pc) = (
+        loop_.points[(mid + n - 1) % n],
+        loop_.points[mid],
+        loop_.points[(mid + 1) % n],
+    );
+    let t = (pb.point - pa.point) + (pc.point - pb.point);
+    if t.magnitude2() <= f64::EPSILON {
+        return None;
+    }
+    let t = t.normalize();
+    let nrm = surface.normal(pb.uv.x, pb.uv.y);
+    if nrm.magnitude2() <= f64::EPSILON {
+        return None;
+    }
+    let nrm = nrm.normalize();
+    let into_material = nrm.cross(t);
+    let ndir = match p_axis {
+        PeriodicAxis::U => surface.vder(pb.uv.x, pb.uv.y),
+        PeriodicAxis::V => surface.uder(pb.uv.x, pb.uv.y),
+    };
+    let n_range = match p_axis {
+        PeriodicAxis::U => surface.try_range_tuple().1,
+        PeriodicAxis::V => surface.try_range_tuple().0,
+    };
+    let dir = if into_material.dot(ndir) >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+    let (n_lo, n_hi) = n_range?;
+    let boundary = if dir > 0.0 { n_hi } else { n_lo };
+    let span = (boundary - r0) * dir;
+    if span <= 1e-9 {
+        return None;
+    }
+    // Confirm the orbit genuinely collapses somewhere on this side, then refine
+    // to the collapse point. The threshold is relative to the loop's own orbit
+    // diameter, so it scales with the surface rather than being a fixed length.
+    let r_loop = orbit_diameter(surface, p_axis, r0, period);
+    if r_loop <= 1e-12 {
+        return None;
+    }
+    let threshold = 1e-4 * r_loop;
+    let scan = |steps: usize| -> Option<f64> {
+        let mut best_r = r0;
+        let mut best_rr = r_loop;
+        for i in 1..=steps {
+            let frac = i as f64 / steps as f64;
+            let r = r0 + dir * span * frac;
+            let rr = orbit_diameter(surface, p_axis, r, period);
+            if rr < best_rr {
+                best_rr = rr;
+                best_r = r;
+            }
+        }
+        (best_rr < threshold).then_some(best_r)
+    };
+    let coarse = scan(64)?;
+    // Golden-section minimise the orbit diameter over the coarse confidence
+    // window around the collapse, then certify the result.
+    let (a, b) = (coarse - dir * span / 64.0, coarse + dir * span / 64.0);
+    let mut lo = a.min(b);
+    let mut hi = a.max(b);
+    lo = lo.clamp(r0.min(boundary), r0.max(boundary));
+    hi = hi.clamp(r0.min(boundary), r0.max(boundary));
+    let mut refine = |f: &dyn Fn(f64) -> f64| -> f64 {
+        const PHI: f64 = 1.618033988749895;
+        let mut c = hi - (hi - lo) / PHI;
+        let mut d = lo + (hi - lo) / PHI;
+        let mut fc = f(c);
+        let mut fd = f(d);
+        while (hi - lo).abs() > 1e-9 {
+            if fc < fd {
+                hi = d;
+                d = c;
+                fd = fc;
+                c = hi - (hi - lo) / PHI;
+                fc = f(c);
+            } else {
+                lo = c;
+                c = d;
+                fc = fd;
+                d = lo + (hi - lo) / PHI;
+                fd = f(d);
+            }
+        }
+        0.5 * (lo + hi)
+    };
+    let f = |r: f64| orbit_diameter(surface, p_axis, r, period);
+    let refined = refine(&f);
+    let rr = orbit_diameter(surface, p_axis, refined, period);
+    (rr < threshold).then_some(refined)
+}
+
+/// Build the contractible planar cell for a periodic cap.
+///
+/// The source latitude walk is kept verbatim (every real segment retains its
+/// provenance); the meridian runs and the pole line are synthetic
+/// ([`SegmentOrigin::ChartClosure`], empty contributor sets).
+fn build_cap_cell<S: PreMeshableSurface>(
+    surface: &S,
+    loop_: &BoundaryLoop,
+    p_axis: PeriodicAxis,
+    _k: i64,
+    _r0: f64,
+    r_pole: f64,
+    tol: f64,
+) -> BoundaryLoop {
+    // The source walk without its periodic wrap, as an open path A -> B.
+    let mut path = loop_.clone().into_path_cutting_wrap();
+    let a_uv = path.points.first().map(|p| p.uv).unwrap();
+    let b_uv = path.points.last().map(|p| p.uv).unwrap();
+    let p0 = periodic_comp(&loop_.points[0], p_axis);
+    let p1 = periodic_comp(loop_.points.last().unwrap(), p_axis);
+    // Corner points of the cell, evaluated from the surface.
+    let corner = |n: f64, p: f64| -> SurfacePoint {
+        let uv = match p_axis {
+            PeriodicAxis::U => Point2::new(p, n),
+            PeriodicAxis::V => Point2::new(n, p),
+        };
+        (uv, surface.subs(uv.x, uv.y)).into()
+    };
+    let c = corner(r_pole, p1);
+    let d = corner(r_pole, p0);
+    // The meridian runs and the degenerate pole line. Only the two pole-line
+    // endpoints are kept: every additional point on it would be another vertex
+    // at the collapsed pole and another degenerate triangle to filter.
+    let seam_down = polyline_on_surface(surface, *path.points.last().unwrap(), c, tol);
+    let seam_up = polyline_on_surface(surface, d, *path.points.first().unwrap(), tol);
+    let pole_line = vec![c, d];
+    let (n_down, n_pole, n_up) = (seam_down.len(), pole_line.len(), seam_up.len());
+    path.append(
+        seam_down,
+        untagged_sources(n_down),
+        SegmentOrigin::ChartClosure,
+        PartJoin::SharedEndpoint,
+    );
+    path.append(
+        pole_line,
+        untagged_sources(n_pole),
+        SegmentOrigin::ChartClosure,
+        PartJoin::SharedEndpoint,
+    );
+    path.append(
+        seam_up,
+        untagged_sources(n_up),
+        SegmentOrigin::ChartClosure,
+        PartJoin::SharedEndpoint,
+    );
+    let _ = (a_uv, b_uv);
+    path.close(PartJoin::SharedEndpoint)
+}
+
 impl PolyBoundary {
     fn new(
         pieces: Vec<PolyBoundaryPiece>,
@@ -6023,7 +6342,19 @@ impl PolyBoundary {
                 }
             },
         );
-        if closed.len() == 2
+        if let Some(cap) = match closed.as_slice() {
+            // P3b: a single 1D periodic walk that winds once around the
+            // periodic axis is a spherical-cap boundary, not a degenerate
+            // band. Build the contractible cell before any two-loop / apex
+            // join has a chance to misread it. Any non-cap single loop falls
+            // through unchanged.
+            [loop_] if open.is_empty() => {
+                PeriodicCapClosure::try_build(surface, loop_, closed_displacements[0], tol, lattice)
+            }
+            _ => None,
+        } {
+            closed = vec![cap];
+        } else if closed.len() == 2
             && (lattice.declared_u_period().is_some() || lattice.declared_v_period().is_some())
         {
             let area0 = signed_area(&closed[0].points);
@@ -12327,5 +12658,319 @@ mod sphere_pole_recovery_tests {
             matches!(outcome, SingularTransitionOutcome::CertifiedAmbiguous),
             "an underdetermined pole continuation must carry the certificate",
         );
+    }
+
+    #[test]
+    #[ignore]
+    fn probe_equator_walk_current_behavior() {
+        // Diagnostic (P3b): confirm the periodic-cap mechanism builds a
+        // contractible cell for a single periodic latitude walk and that it
+        // tessellates. Kept ignored; the graduating tests live in
+        // `periodic_cap_closure_tests`.
+        let s = sphere();
+        let lattice = unevidenced_lattice(&s);
+        let pts: Vec<SurfacePoint> = (0..=32)
+            .map(|i| {
+                let v = (i as f64 / 32.0) * 2.0 * std::f64::consts::PI;
+                let uv = Point2::new(std::f64::consts::FRAC_PI_2, v);
+                (uv, s.subs(uv.x, uv.y)).into()
+            })
+            .collect();
+        let piece = PolyBoundaryPiece::untagged(pts);
+        let tol = 0.05;
+        let boundary = PolyBoundary::new(vec![piece], &s, tol, &lattice);
+        assert!(boundary.0.len() >= 1);
+        let mesh = trimming_tessellation_result(&s, &boundary, tol, &lattice)
+            .expect("the cap cell tessellates");
+        assert!(!mesh.tri_faces().is_empty());
+    }
+}
+
+/// P3b graduation: generic periodic spherical-cap chart closure.
+///
+/// A closed latitude-parallel loop with |k|=1 whose UV image is a 1D line must
+/// become a contractible planar cell whose interior is the intended spherical
+/// cap. The material side is derived from the source-loop orientation times the
+/// effective surface normal; north/south and small/large are decisions, never
+/// constants.
+mod periodic_cap_closure_tests {
+    use super::*;
+    use std::f64::consts::{FRAC_PI_3, FRAC_PI_4, FRAC_PI_6, PI, TAU};
+
+    const R: f64 = 10.0;
+
+    fn sphere() -> truck_geometry::prelude::Sphere {
+        truck_geometry::prelude::Sphere::new(Point3::origin(), R)
+    }
+
+    fn use_(bound: usize, index: usize, orientation: bool) -> SourceEdgeUse {
+        SourceEdgeUse {
+            bound: BoundId(bound),
+            index,
+            orientation,
+        }
+    }
+
+    /// A latitude-parallel boundary piece: constant colatitude `u0`, one full
+    /// turn of longitude `v`, traversed in the given direction (`+1` =
+    /// increasing longitude, `-1` = decreasing). Optional source tagging.
+    fn latitude_piece<S: PreMeshableSurface>(
+        surface: &S,
+        u0: f64,
+        dir: f64,
+        tagged: bool,
+    ) -> PolyBoundaryPiece {
+        let n = 32;
+        let pts: Vec<SurfacePoint> = (0..=n)
+            .map(|i| {
+                let v = (i as f64 / n as f64) * TAU;
+                let v = if dir > 0.0 { v } else { TAU - v };
+                let uv = Point2::new(u0, v);
+                (uv, surface.subs(uv.x, uv.y)).into()
+            })
+            .collect();
+        let sources = if tagged {
+            (0..=n).map(|i| vec![use_(0, i, true)]).collect()
+        } else {
+            vec![Vec::new(); n + 1]
+        };
+        PolyBoundaryPiece(pts, sources)
+    }
+
+    fn cap_z_extent(mesh: &PolygonMesh) -> (f64, f64) {
+        use truck_geometry::prelude::*;
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for p in mesh.positions() {
+            lo = lo.min(p.z);
+            hi = hi.max(p.z);
+        }
+        (lo, hi)
+    }
+
+    fn assert_cap_mesh(
+        surface: &impl PreMeshableSurface,
+        piece: PolyBoundaryPiece,
+        tol: f64,
+        expect_floor: f64,
+        expect_reach: f64,
+    ) {
+        let lattice = unevidenced_lattice(surface);
+        let boundary = PolyBoundary::new(vec![piece], surface, tol, &lattice);
+        assert_eq!(
+            boundary.0.len(),
+            1,
+            "a periodic cap must close into exactly one contractible cell",
+        );
+        let mesh = trimming_tessellation_result(surface, &boundary, tol, &lattice)
+            .expect("the cap cell must tessellate");
+        assert!(
+            !mesh.tri_faces().is_empty(),
+            "the cap must produce triangles"
+        );
+        let (z_lo, z_hi) = cap_z_extent(&mesh);
+        assert!(
+            z_lo > expect_floor,
+            "material must not extend below z={expect_floor}, got z_lo={z_lo}",
+        );
+        assert!(
+            z_hi > expect_reach,
+            "material must reach above z={expect_reach}, got z_hi={z_hi}",
+        );
+    }
+
+    /// North spherical cap: a latitude walk at colatitude 60 deg traversed
+    /// counterclockwise (increasing longitude). The material (left of travel
+    /// viewed from the outward normal) is the north cap, z in [5, 10].
+    #[test]
+    fn north_spherical_cap_renders() {
+        let s = sphere();
+        let piece = latitude_piece(&s, FRAC_PI_3, 1.0, false);
+        assert_cap_mesh(&s, piece, 0.05, 4.0, 9.0);
+    }
+
+    /// South spherical cap: the same latitude circle traversed clockwise. The
+    /// material is the region toward the south pole, z in [-10, -5].
+    #[test]
+    fn south_spherical_cap_renders() {
+        let s = sphere();
+        let piece = latitude_piece(&s, 2.0 * FRAC_PI_3, -1.0, false);
+        assert_cap_mesh(&s, piece, 0.05, -10.5, -6.0);
+    }
+
+    /// Hemisphere / equator boundary: the equator is a limiting cap whose
+    /// material is a full hemisphere (radius 10, so the pole reaches z ~ 10).
+    #[test]
+    fn hemisphere_equator_boundary_renders() {
+        let s = sphere();
+        let piece = latitude_piece(&s, PI / 2.0, 1.0, false);
+        assert_cap_mesh(&s, piece, 0.05, -0.5, 9.0);
+    }
+
+    /// Reversed traversal: the north cap walked clockwise selects the opposite
+    /// pole, so the mechanism must not be bound to any fixed side. A clockwise
+    /// walk at colatitude 30 deg has material z in [-10, 8.66].
+    #[test]
+    fn reversed_traversal_selects_opposite_side() {
+        let s = sphere();
+        let piece = latitude_piece(&s, FRAC_PI_6, -1.0, false);
+        assert_cap_mesh(&s, piece, 0.05, -10.5, 8.0);
+    }
+
+    /// Reversed face/surface orientation: the same counterclockwise walk on a
+    /// surface whose normal is inverted (a `Processor` with swapped axes and
+    /// flipped normal, as `FACE_SURFACE.same_sense = .F.` produces) must select
+    /// the opposite cap. This is the stepio `Surface::invert()` convention.
+    #[test]
+    fn inverted_surface_orientation_selects_opposite_side() {
+        use truck_geometry::prelude::Processor;
+        let mut processed = Processor::<truck_geometry::prelude::Sphere, Matrix4>::new(sphere());
+        processed.invert();
+        // Caller axes after inversion: caller u = longitude (periodic), caller
+        // v = colatitude. A counterclockwise latitude walk at colatitude 60 deg
+        // on the inverted surface has material toward the south pole, z in
+        // [-10, 5].
+        let n = 32;
+        let pts: Vec<SurfacePoint> = (0..=n)
+            .map(|i| {
+                let u = (i as f64 / n as f64) * TAU;
+                let uv = Point2::new(u, FRAC_PI_3);
+                (uv, processed.subs(uv.x, uv.y)).into()
+            })
+            .collect();
+        let piece = PolyBoundaryPiece::untagged(pts);
+        assert_cap_mesh(&processed, piece, 0.05, -10.5, 4.0);
+    }
+
+    /// |k|=0 ordinary spherical loop is untouched: a small non-degenerate
+    /// spherical triangle still tessellates through the normal arrangement, and
+    /// the cap mechanism does not fire on it.
+    #[test]
+    fn ordinary_spherical_loop_is_unaffected() {
+        let s = sphere();
+        let lattice = unevidenced_lattice(&s);
+        // Three vertices spanning a genuine 2D chart region (varying both
+        // colatitude and longitude), closed back on the start.
+        let a = s.subs(FRAC_PI_3, 0.0);
+        let b = s.subs(FRAC_PI_3, 1.0);
+        let c = s.subs(FRAC_PI_4, 1.5);
+        let pts = vec![
+            (Point2::new(FRAC_PI_3, 0.0), a).into(),
+            (Point2::new(FRAC_PI_3, 1.0), b).into(),
+            (Point2::new(FRAC_PI_4, 1.5), c).into(),
+            (Point2::new(FRAC_PI_3, 0.0), a).into(),
+        ];
+        let piece = PolyBoundaryPiece::untagged(pts);
+        let boundary = PolyBoundary::new(vec![piece], &s, 0.05, &lattice);
+        assert_eq!(boundary.0.len(), 1);
+        assert!(
+            boundary.0[0]
+                .origins
+                .iter()
+                .all(|o| *o == SegmentOrigin::Source),
+            "an ordinary closed loop must keep every segment as Source",
+        );
+        let mesh = trimming_tessellation_result(&s, &boundary, 0.05, &lattice)
+            .expect("the ordinary triangle tessellates");
+        assert!(!mesh.tri_faces().is_empty());
+    }
+
+    /// A single latitude loop on a cylinder has no pole: the material side has
+    /// no orbit collapse, so the mechanism declines and the face keeps whatever
+    /// the legacy path produced (no cap is invented).
+    #[test]
+    fn non_collapsing_cylinder_loop_is_not_a_cap() {
+        use truck_modeling::{Line, RevolutedCurve, Vector3};
+        let cylinder = RevolutedCurve::by_revolution(
+            Line(Point3::new(10.0, 0.0, 0.0), Point3::new(10.0, 0.0, 10.0)),
+            Point3::origin(),
+            Vector3::unit_z(),
+        );
+        let n = 32;
+        let pts: Vec<SurfacePoint> = (0..=n)
+            .map(|i| {
+                let v = (i as f64 / n as f64) * TAU;
+                let uv = Point2::new(0.5, v);
+                (uv, cylinder.subs(uv.x, uv.y)).into()
+            })
+            .collect();
+        let piece = PolyBoundaryPiece::untagged(pts);
+        let lattice = unevidenced_lattice(&cylinder);
+        let boundary = PolyBoundary::new(vec![piece], &cylinder, 0.05, &lattice);
+        // The cell, if built, would be a cap; a cylinder must decline. The
+        // legacy path yields a degenerate loop that either stays a loop or is
+        // closed by the existing machinery -- in no case a ChartClosure cell.
+        assert!(
+            !boundary
+                .0
+                .iter()
+                .flat_map(|l| l.origins.iter())
+                .any(|o| *o == SegmentOrigin::ChartClosure),
+            "a cylinder latitude loop must not be turned into a cap",
+        );
+    }
+
+    /// The chart closure carries no source identity and no physical parity
+    /// role: every synthetic segment is labelled `ChartClosure` with an empty
+    /// contributor set, and every real segment keeps exactly its source use.
+    #[test]
+    fn chart_closure_carries_no_source_identity_or_physical_role() {
+        let s = sphere();
+        let lattice = unevidenced_lattice(&s);
+        let piece = latitude_piece(&s, FRAC_PI_3, 1.0, true);
+        let boundary = PolyBoundary::new(vec![piece], &s, 0.05, &lattice);
+        let cell = &boundary.0[0];
+        assert!(!cell.origins.is_empty());
+        // Real source segments keep their provenance and physical role.
+        let source_count = cell
+            .origins
+            .iter()
+            .filter(|o| **o == SegmentOrigin::Source)
+            .count();
+        assert!(
+            source_count > 0,
+            "the source latitude walk must be retained"
+        );
+        // Synthetic closure segments are artificial and carry no source.
+        let closure_count = cell
+            .origins
+            .iter()
+            .filter(|o| **o == SegmentOrigin::ChartClosure)
+            .count();
+        assert!(closure_count > 0, "the chart closure must be present");
+        for (i, origin) in cell.origins.iter().enumerate() {
+            let sources = &cell.source_uses[i];
+            match origin {
+                SegmentOrigin::Source => {
+                    assert_eq!(sources.len(), 1, "a source segment keeps its use");
+                    assert!(
+                        sources[0] == use_(0, i, true),
+                        "the retained use is the segment's own"
+                    );
+                }
+                SegmentOrigin::ChartClosure => {
+                    assert!(
+                        sources.is_empty(),
+                        "a chart closure must never forge a source identity",
+                    );
+                }
+                SegmentOrigin::Seam | SegmentOrigin::SyntheticClosure => {}
+            }
+        }
+        // Every synthetic closure segment maps to a synthetic (non-physical)
+        // constraint role; none is a physical trim.
+        for origin in &cell.origins {
+            match origin {
+                SegmentOrigin::ChartClosure => assert_ne!(
+                    origin.role(),
+                    ConstraintRole::PhysicalBoundary,
+                    "chart closure must not be a physical boundary",
+                ),
+                _ => {}
+            }
+        }
+        let mesh = trimming_tessellation_result(&s, &boundary, 0.05, &lattice)
+            .expect("the tagged cap cell tessellates");
+        assert!(!mesh.tri_faces().is_empty());
     }
 }
