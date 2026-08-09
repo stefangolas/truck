@@ -622,6 +622,67 @@ pub struct TwoLoopJoinRecord {
     pub bridge1: [(f64, f64); 2],
 }
 
+/// How strong the evidence for one P3b cap-theorem hypothesis is.
+///
+/// The cap theorem (see `PeriodicCapClosure` in `triangulation.rs`) discharges
+/// H1–H5; each hypothesis is admitted only on evidence of the strength this
+/// enum states. A `Candidate` may *nominate* the cap route; it may not silently
+/// become a certified source fact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+pub enum CapHypothesisEvidence {
+    /// Established from the representation (a period or pole witness read from
+    /// the primitive's own parameterisation).
+    Certified,
+    /// Established by a bounded constructive numerical step (e.g. integer
+    /// winding from a certified period plus a residual bound).
+    Constructive,
+    /// Recognized by a heuristic/numerical recognizer; may nominate the route
+    /// but does not establish the source-level fact.
+    Candidate,
+    /// Not established at all; the hypothesis failed.
+    NotEstablished,
+}
+
+/// Why the periodic-cap route was activated or declined for one loop.
+///
+/// Recorded when `PeriodicCapClosure::try_build` runs its gate, so a census can
+/// answer, per face: why was cap recovery considered, what evidence existed for
+/// each hypothesis, and which gate declined it. This is the minimum epistemic
+/// contract: the theorem's H1–H5 are reported with their evidence strength, not
+/// folded into a single `Some/None`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CapActivationRecord {
+    /// Which parameter axis carried the period the gate keyed on.
+    pub periodic_axis: PeriodicAxis,
+    /// H1: a genuine period. `None` when no certified generator existed.
+    pub period: Option<CapHypothesisEvidence>,
+    /// H2: winding `|k| = 1`. `Some` only after a certified period and a
+    /// bounded residual made the integer constructive.
+    pub winding: Option<CapHypothesisEvidence>,
+    /// H3: the loop is the single 1D latitude-walk signature (tiny signed area,
+    /// non-periodic span small). Recognizer-level unless proven otherwise.
+    pub cap_signature: CapHypothesisEvidence,
+    /// H4: the orbit genuinely collapses on the material side. Certified only
+    /// for a representation-derived pole (sphere); otherwise candidate.
+    pub collapse: CapHypothesisEvidence,
+    /// H5: the selected pole lies on the source-derived material side.
+    /// `None` when the gate declined before material-side selection.
+    pub material_side: Option<CapHypothesisEvidence>,
+    /// Whether the gate ultimately built the cap cell.
+    pub activated: bool,
+    /// Why the gate declined, when it did not activate.
+    pub declined_reason: Option<&'static str>,
+}
+
+/// Which parameter axis carried a periodic-cap boundary's period.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+pub enum PeriodicAxis {
+    /// The `u` axis.
+    U,
+    /// The `v` axis.
+    V,
+}
+
 /// The mechanism-level subtype of a seam-involved insertion failure.
 ///
 /// `SyntheticSyntheticCrossing` names *which segments* collided; it says
@@ -905,6 +966,8 @@ pub struct FailedFaceDiagnosis {
     pub validity_certificate: Option<crate::tessellation::validity::FaceValidityCertificate>,
     /// What each formal recovery route decided about this face.
     pub route_decisions: Vec<RouteDecisionRecord>,
+    /// P3b: the periodic-cap route's activation evidence for this face.
+    pub cap_activation: Option<CapActivationRecord>,
     /// The deterministic loss bucket.
     pub derived_bucket: LossBucket,
     /// The mechanistic ARR-TAIL signature, always present for a failed face.
@@ -1235,6 +1298,8 @@ struct DiagnosisSink {
     seam_segment_count: usize,
     boundary_pieces: Vec<BoundaryPieceDeck>,
     two_loop_join: Option<TwoLoopJoinRecord>,
+    /// P3b: the periodic-cap route's activation evidence for this face.
+    cap_activation: Option<CapActivationRecord>,
 }
 
 impl DiagnosisSink {
@@ -1253,6 +1318,7 @@ impl DiagnosisSink {
         self.seam_segment_count = 0;
         self.boundary_pieces.clear();
         self.two_loop_join = None;
+        self.cap_activation = None;
     }
 }
 
@@ -1558,6 +1624,16 @@ pub(crate) fn record_two_loop_join(record: TwoLoopJoinRecord) {
     FACE_DIAGNOSIS_SINK.with(|sink| sink.borrow_mut().two_loop_join = Some(record));
 }
 
+/// Record the periodic-cap route's activation evidence.
+///
+/// Suspension does not apply: the cap is part of the legacy boundary's own
+/// classification (`PolyBoundary::new_with_join`), so its evidence belongs to
+/// the same record the face's legacy verdict is built from, and silencing it
+/// while a second attempt runs would lose the only statement about the first.
+pub(crate) fn record_cap_activation(record: CapActivationRecord) {
+    FACE_DIAGNOSIS_SINK.with(|sink| sink.borrow_mut().cap_activation = Some(record));
+}
+
 /// Record the FACE-VALIDITY certificate backing a hard degenerate rejection.
 ///
 /// The certificate is the evidence that no positive-area trim region exists at
@@ -1740,6 +1816,7 @@ pub(crate) fn build_face_diagnosis(
         let seam_segment_count = sink.seam_segment_count;
         let boundary_pieces = std::mem::take(&mut sink.boundary_pieces);
         let two_loop_join = sink.two_loop_join;
+        let cap_activation = sink.cap_activation.take();
         let seam_mechanism = derive_seam_mechanism(two_loop_join.as_ref(), seam_segment_count);
         sink.clear();
         let derived_bucket =
@@ -1779,6 +1856,7 @@ pub(crate) fn build_face_diagnosis(
             projection_witness,
             validity_certificate,
             route_decisions,
+            cap_activation,
             derived_bucket,
             arr,
         }
@@ -1963,6 +2041,7 @@ mod tests {
             projection_witness: None,
             validity_certificate: None,
             route_decisions: Vec::new(),
+            cap_activation: None,
             derived_bucket: LossBucket::SourceSourceSameBoundCrossing,
             arr: ArrSignature::default(),
         };

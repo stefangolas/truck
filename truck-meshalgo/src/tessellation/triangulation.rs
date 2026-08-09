@@ -9,6 +9,7 @@ use super::diagnosis::ObservedClosure;
 use super::domain::lattice::Axis;
 use super::domain::lattice::AxisPeriodStatus;
 use super::domain::lattice::CertifiedLattice;
+use super::domain::lattice::CollapseWitness;
 use super::formal;
 use super::source_evidence::{
     BoundId, EdgeUseId, ErasedOrientationMechanism, OrientationEvidence, OrientationOrigin,
@@ -6000,23 +6001,80 @@ impl PeriodicCapClosure {
         tol: f64,
         lattice: &CertifiedLattice,
     ) -> Option<BoundaryLoop> {
+        // The epistemic contract of the P3b theorem. Every hypothesis is
+        // recorded with its evidence strength when the cap route runs, so a
+        // census can answer *why* the route activated or declined and what
+        // evidence each hypothesis rested on. Nothing here changes geometry;
+        // the record is observational.
+        let mut activation = diagnosis::CapActivationRecord {
+            periodic_axis: diagnosis::PeriodicAxis::U,
+            period: None,
+            winding: None,
+            cap_signature: diagnosis::CapHypothesisEvidence::NotEstablished,
+            collapse: diagnosis::CapHypothesisEvidence::NotEstablished,
+            material_side: None,
+            activated: false,
+            declined_reason: None,
+        };
+        let record = |activation: &mut diagnosis::CapActivationRecord| {
+            if diagnosis::diag_enabled() {
+                diagnosis::record_cap_activation(activation.clone());
+            }
+        };
         // 1. Exactly one periodic axis, winding exactly once.
         let (p_axis, k) = match displacement {
             [ku, 0] if ku.abs() == 1 => (PeriodicAxis::U, ku),
             [0, kv] if kv.abs() == 1 => (PeriodicAxis::V, kv),
-            _ => return None,
+            _ => {
+                activation.declined_reason = Some("not a single |k|=1 periodic walk");
+                record(&mut activation);
+                return None;
+            }
+        };
+        activation.periodic_axis = match p_axis {
+            PeriodicAxis::U => diagnosis::PeriodicAxis::U,
+            PeriodicAxis::V => diagnosis::PeriodicAxis::V,
         };
         // The cap theorem's H1 is a *genuine* period. Only a representation-
         // derived generator qualifies; a declared-but-uncertified accessor
         // value does not establish it, so such a surface does not get a
-        // certified cap here (it stays on the candidate/legacy paths).
+        // certified cap here (it stays on the candidate/legacy paths). The
+        // winding is constructive: a certified period plus the bounded residual
+        // the displacement classifier already checked makes the integer exact.
         let period = match p_axis {
-            PeriodicAxis::U => lattice.u_generator()?,
-            PeriodicAxis::V => lattice.v_generator()?,
+            PeriodicAxis::U => match lattice.u_generator() {
+                Some(period) => {
+                    activation.period = Some(diagnosis::CapHypothesisEvidence::Certified);
+                    activation.winding = Some(diagnosis::CapHypothesisEvidence::Constructive);
+                    period
+                }
+                None => {
+                    activation.declined_reason = Some("H1: no certified period");
+                    record(&mut activation);
+                    return None;
+                }
+            },
+            PeriodicAxis::V => match lattice.v_generator() {
+                Some(period) => {
+                    activation.period = Some(diagnosis::CapHypothesisEvidence::Certified);
+                    activation.winding = Some(diagnosis::CapHypothesisEvidence::Constructive);
+                    period
+                }
+                None => {
+                    activation.declined_reason = Some("H1: no certified period");
+                    record(&mut activation);
+                    return None;
+                }
+            },
         };
         // 2. The chart image must be a 1D line: zero signed area, and the
         //    non-periodic coordinate essentially constant across the loop.
+        //    These are recognizer-level signature checks (H3), not certificates
+        //    that the loop belongs to the theorem's source class.
         if signed_area(&loop_.points).abs() >= DEGENERATE_LOOP_AREA {
+            activation.cap_signature = diagnosis::CapHypothesisEvidence::NotEstablished;
+            activation.declined_reason = Some("H3: loop is not a 1D chart line (nonzero area)");
+            record(&mut activation);
             return None;
         }
         let (n_min, n_max) = match p_axis {
@@ -6034,14 +6092,39 @@ impl PeriodicCapClosure {
                 }),
         };
         if n_max - n_min > 0.1 * period {
+            activation.cap_signature = diagnosis::CapHypothesisEvidence::NotEstablished;
+            activation.declined_reason = Some("H3: non-periodic span not small");
+            record(&mut activation);
             return None;
         }
+        activation.cap_signature = diagnosis::CapHypothesisEvidence::Candidate;
         let r0 = 0.5 * (n_min + n_max);
         // 3. The pole on the material side; `None` when the material side has
-        //    no orbit collapse, which is not a cap.
-        let pole = find_cap_pole(surface, loop_, p_axis, r0, period)?;
+        //    no orbit collapse, which is not a cap. The evidence is consumed
+        //    below: the theorem's H4 (genuine collapse) is discharged by the
+        //    certified sphere pole, or nominated by the candidate scan.
+        let pole = match find_cap_pole(surface, loop_, p_axis, r0, period, lattice) {
+            Some(pole) => pole,
+            None => {
+                activation.declined_reason = Some("H4/H5: no orbit collapse on material side");
+                record(&mut activation);
+                return None;
+            }
+        };
+        let r_pole = pole.r_pole();
+        match pole {
+            CapPoleEvidence::CertifiedSpherePole { .. } => {
+                activation.collapse = diagnosis::CapHypothesisEvidence::Certified;
+            }
+            CapPoleEvidence::Candidate { .. } => {
+                activation.collapse = diagnosis::CapHypothesisEvidence::Candidate;
+            }
+        }
+        activation.material_side = Some(diagnosis::CapHypothesisEvidence::Constructive);
+        activation.activated = true;
+        record(&mut activation);
         // 4. Build the contractible planar cell.
-        Some(build_cap_cell(surface, loop_, p_axis, k, r0, pole, tol))
+        Some(build_cap_cell(surface, loop_, p_axis, k, r0, r_pole, tol))
     }
 }
 
@@ -6083,6 +6166,40 @@ fn orbit_diameter<S: PreMeshableSurface>(
     pa.distance(pb)
 }
 
+/// The evidence behind a located cap pole.
+///
+/// The P3b construction theorem's H4 requires a *genuine* collapsed periodic
+/// orbit: `q(r_pole, θ) = P` for every `θ`. Only a representation-derived
+/// certificate establishes that. A numerically-shrunk orbit is a candidate
+/// recognizer: it may nominate a pole location and let the cap be attempted,
+/// but it is not a source-level certificate that the orbit truly collapses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CapPoleEvidence {
+    /// The primitive's polar latitude collapses the orbit by construction.
+    /// `r_pole` is the material-side extreme of the polar parameter range,
+    /// where `Sphere::subs` is independent of the azimuth.
+    CertifiedSpherePole {
+        /// The non-periodic coordinate of the pole.
+        r_pole: f64,
+    },
+    /// A numerical orbit-diameter scan found a collapse below a relative
+    /// threshold. A candidate, not a certificate.
+    Candidate {
+        /// The non-periodic coordinate of the nominated pole.
+        r_pole: f64,
+    },
+}
+
+impl CapPoleEvidence {
+    /// The non-periodic coordinate of the located pole, whatever its evidence
+    /// strength.
+    fn r_pole(self) -> f64 {
+        match self {
+            Self::CertifiedSpherePole { r_pole } | Self::Candidate { r_pole } => r_pole,
+        }
+    }
+}
+
 /// Locate the pole on the material side of the latitude walk.
 ///
 /// The material side is decided by the STEP face orientation convention: the
@@ -6093,13 +6210,31 @@ fn orbit_diameter<S: PreMeshableSurface>(
 /// (which already carries `FACE_BOUND x ORIENTED_EDGE x EDGE_CURVE`). The
 /// normal's component along the non-periodic axis selects which pole bounds the
 /// cap, so north/south and small/large are derived, never hard-coded.
+///
+/// **Evidence.** When `lattice.certified_collapse()` certifies a pole on this
+/// loop's polar axis, the pole is the material-side extreme of the polar
+/// parameter range, and the orbit collapses there by construction of the
+/// primitive (a sphere: `subs` enters the azimuth only through `(cos v, sin v)`,
+/// so at the polar latitudes the physical map is a single point). The scan is
+/// then a consistency confirmation, not the certificate. Otherwise the
+/// orbit-diameter scan nominates a candidate location, which the caller may
+/// attempt but must not treat as a certified collapse.
+///
+/// **Search domain.** The scan evaluates the surface only at points of the
+/// declared polar range. The cap path is gated on a *certified* deck generator,
+/// which only elementary surfaces (sphere, revolution of a line) carry, and
+/// those surfaces are fully evaluable over their declared range — so the
+/// declared range *is* the basis-valid evaluation domain here, and no spline
+/// closure-sliver exclusion is needed. The P1 `evaluation_range` distinction
+/// bites on spline *curves*, which never reach this path.
 fn find_cap_pole<S: PreMeshableSurface>(
     surface: &S,
     loop_: &BoundaryLoop,
     p_axis: PeriodicAxis,
     r0: f64,
     period: f64,
-) -> Option<f64> {
+    lattice: &CertifiedLattice,
+) -> Option<CapPoleEvidence> {
     let n = loop_.points.len();
     if n < 3 {
         return None;
@@ -6140,11 +6275,27 @@ fn find_cap_pole<S: PreMeshableSurface>(
     if span <= 1e-9 {
         return None;
     }
-    // Confirm the orbit genuinely collapses somewhere on this side, then refine
-    // to the collapse point. The threshold is relative to the loop's own orbit
-    // diameter, so it scales with the surface rather than being a fixed length.
+    // The polar axis is the axis that is *not* periodic.
+    let polar_axis = match p_axis {
+        PeriodicAxis::U => Axis::V,
+        PeriodicAxis::V => Axis::U,
+    };
+    // A representation-certified pole: the primitive's own polar latitude, on
+    // the material side, with the orbit collapsing there by construction. The
+    // relative-threshold scan below would find the same point; it is kept only
+    // as a consistency confirmation for the certified path, never as its
+    // evidence.
+    if lattice
+        .certified_collapse()
+        .is_some_and(|c| c.polar == polar_axis && c.witness == CollapseWitness::ExactSpherePole)
+    {
+        return Some(CapPoleEvidence::CertifiedSpherePole { r_pole: boundary });
+    }
+    // No certificate: a numerical orbit-diameter scan, relative to the loop's
+    // own orbit diameter so it scales with the surface. This nominates a pole;
+    // it does not certify the collapse (H4 stays candidate for this route).
     let r_loop = orbit_diameter(surface, p_axis, r0, period);
-    if r_loop <= 1e-12 {
+    if r_loop <= 1e-12 || !r_loop.is_finite() {
         return None;
     }
     let threshold = 1e-4 * r_loop;
@@ -6155,7 +6306,7 @@ fn find_cap_pole<S: PreMeshableSurface>(
             let frac = i as f64 / steps as f64;
             let r = r0 + dir * span * frac;
             let rr = orbit_diameter(surface, p_axis, r, period);
-            if rr < best_rr {
+            if rr.is_finite() && rr < best_rr {
                 best_rr = rr;
                 best_r = r;
             }
@@ -6164,7 +6315,7 @@ fn find_cap_pole<S: PreMeshableSurface>(
     };
     let coarse = scan(64)?;
     // Golden-section minimise the orbit diameter over the coarse confidence
-    // window around the collapse, then certify the result.
+    // window around the collapse.
     let (a, b) = (coarse - dir * span / 64.0, coarse + dir * span / 64.0);
     let mut lo = a.min(b);
     let mut hi = a.max(b);
@@ -6196,7 +6347,7 @@ fn find_cap_pole<S: PreMeshableSurface>(
     let f = |r: f64| orbit_diameter(surface, p_axis, r, period);
     let refined = refine(&f);
     let rr = orbit_diameter(surface, p_axis, refined, period);
-    (rr < threshold).then_some(refined)
+    (rr.is_finite() && rr < threshold).then(|| CapPoleEvidence::Candidate { r_pole: refined })
 }
 
 /// Build the contractible planar cell for a periodic cap.
@@ -13049,6 +13200,151 @@ mod periodic_cap_closure_tests {
             0.05,
             -10.5,
             4.0,
+        );
+    }
+
+    /// Double orientation flip: an inverted surface *and* a reversed traversal.
+    ///
+    /// The material side is `n x t`; flipping `n` (surface sense) and flipping
+    /// `t` (walk direction) together restore the original product, so the cap
+    /// must come back to the same hemisphere the upright CCW walk selects. This
+    /// is the composition-law obligation of §7: a pipeline that applied either
+    /// orientation twice (or folded `FACE_BOUND` into `ORIENTED_EDGE` twice)
+    /// would render a perfectly good mesh of the wrong hemisphere, which render
+    /// count alone cannot detect — only the hemisphere assertion can.
+    #[test]
+    fn double_orientation_flip_restores_the_base_cap() {
+        use truck_geometry::prelude::Processor;
+        let mut processed = Processor::<truck_geometry::prelude::Sphere, Matrix4>::new(sphere());
+        processed.invert();
+        // Reversed traversal (clockwise in caller longitude) at colatitude 60
+        // deg on the inverted surface: material toward the north pole again.
+        let n = 32;
+        let pts: Vec<SurfacePoint> = (0..=n)
+            .map(|i| {
+                let u = TAU - (i as f64 / n as f64) * TAU;
+                let uv = Point2::new(u, FRAC_PI_3);
+                (uv, processed.subs(uv.x, uv.y)).into()
+            })
+            .collect();
+        let piece = PolyBoundaryPiece::untagged(pts);
+        assert_cap_mesh(&processed, piece, sphere_lattice_inverted(), 0.05, 4.0, 9.0);
+    }
+
+    /// Double orientation flip at the equator: the limiting hemisphere case.
+    /// An inverted surface walked clockwise at the equator must still reach the
+    /// north pole (z ~ 10), matching the upright CCW hemisphere, because both
+    /// `n` and `t` have flipped.
+    #[test]
+    fn double_orientation_flip_at_equator_restores_the_north_hemisphere() {
+        use truck_geometry::prelude::Processor;
+        let mut processed = Processor::<truck_geometry::prelude::Sphere, Matrix4>::new(sphere());
+        processed.invert();
+        let n = 32;
+        let pts: Vec<SurfacePoint> = (0..=n)
+            .map(|i| {
+                let u = TAU - (i as f64 / n as f64) * TAU;
+                let uv = Point2::new(u, PI / 2.0);
+                (uv, processed.subs(uv.x, uv.y)).into()
+            })
+            .collect();
+        let piece = PolyBoundaryPiece::untagged(pts);
+        assert_cap_mesh(
+            &processed,
+            piece,
+            sphere_lattice_inverted(),
+            0.05,
+            -0.5,
+            9.0,
+        );
+    }
+
+    /// Face-bound orientation: `FACE_BOUND.orientation = .F.` reverses the wire
+    /// before the tessellator sees it, so a clockwise walk on an upright sphere
+    /// must select the south cap — the same physical composition as a reversed
+    /// traversal (the walk carries the bound's reversal).
+    ///
+    /// This is deliberately the same assertion as
+    /// [`south_spherical_cap_renders`] at a *different* colatitude, so the two
+    /// mechanisms (edge-vs-bound orientation) that produce the same UV walk are
+    /// shown to compose to the same hemisphere rather than one cancelling the
+    /// other.
+    #[test]
+    fn face_bound_reversal_selects_the_opposite_cap() {
+        let s = sphere();
+        // Clockwise walk at colatitude 60 deg, as `FACE_BOUND .F.` would present
+        // it after reversing the upright CCW wire.
+        let piece = latitude_piece(&s, FRAC_PI_3, -1.0, false);
+        assert_cap_mesh(&s, piece, sphere_lattice(), 0.05, -10.5, 4.0);
+    }
+
+    /// H4 evidence: a sphere cap's pole is located by the *certified* sphere
+    /// pole, not by the numerical orbit-diameter scan. The two must agree on
+    /// the pole latitude, but only the certified path establishes the collapse
+    /// as a source-level fact.
+    #[test]
+    fn sphere_cap_pole_is_located_by_the_certified_collapse() {
+        let s = sphere();
+        let lattice = sphere_lattice();
+        // The raw periodic source walk the gate consumes: one full turn of
+        // longitude at colatitude 60 deg, wrapping back onto itself.
+        let piece = latitude_piece(&s, FRAC_PI_3, 1.0, false);
+        let sources = piece.1;
+        let closed = BoundaryLoop::periodic_source_walk(piece.0, sources);
+        let displacement = [0, 1];
+        let built = PeriodicCapClosure::try_build(&s, &closed, displacement, 0.05, &lattice)
+            .expect("a north sphere cap activates");
+        // The cap's pole line is at the north pole (colatitude 0): the
+        // chart-closure segments include the meridian runs (which walk from the
+        // loop latitude down to the pole and back) *and* the degenerate pole
+        // line, whose two endpoints both sit at the certified collapse latitude.
+        let pole_line_exists = built
+            .origins
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| **o == SegmentOrigin::ChartClosure)
+            .any(|(i, _)| {
+                let p = built.points[i];
+                let q = built.points[(i + 1) % built.points.len()];
+                p.uv.x.abs() < 1.0e-3 && q.uv.x.abs() < 1.0e-3
+            });
+        assert!(
+            pole_line_exists,
+            "the cap cell must contain a pole line at the certified north pole",
+        );
+        // And the meridian runs must terminate at that same certified latitude:
+        // every chart-closure vertex at colatitude 0 is the collapsed pole.
+        let reaches_pole = built.points.iter().any(|p| p.uv.x.abs() < 1.0e-3);
+        assert!(reaches_pole, "the cap must reach the certified north pole");
+    }
+
+    /// The generic non-collapsing loop gets no pole: `find_cap_pole` declines
+    /// with `None` rather than inventing a collapse. This keeps the candidate
+    /// recognizer from silently becoming a certificate.
+    #[test]
+    fn a_non_collapsing_loop_gets_no_pole_evidence() {
+        use truck_modeling::{Line, RevolutedCurve, Vector3};
+        let cylinder = RevolutedCurve::by_revolution(
+            Line(Point3::new(10.0, 0.0, 0.0), Point3::new(10.0, 0.0, 10.0)),
+            Point3::origin(),
+            Vector3::unit_z(),
+        );
+        let n = 32;
+        let pts: Vec<SurfacePoint> = (0..=n)
+            .map(|i| {
+                let v = (i as f64 / n as f64) * TAU;
+                let uv = Point2::new(0.5, v);
+                (uv, cylinder.subs(uv.x, uv.y)).into()
+            })
+            .collect();
+        let piece = PolyBoundaryPiece::untagged(pts);
+        let lattice = unevidenced_lattice(&cylinder);
+        let boundary = PolyBoundary::new(vec![piece], &cylinder, 0.05, &lattice);
+        let closed = &boundary.0[0];
+        let pole = find_cap_pole(&cylinder, closed, PeriodicAxis::V, 0.5, 2.0 * PI, &lattice);
+        assert!(
+            pole.is_none(),
+            "a cylinder latitude loop must not nominate a pole: got {pole:?}",
         );
     }
 

@@ -46,6 +46,32 @@ pub enum PeriodWitness {
     ExactSphereAzimuth,
 }
 
+/// Why a polar orbit is known to collapse to a single point.
+///
+/// A *candidate* recognizer (a small numerical orbit diameter sampled at a few
+/// angular positions) is deliberately not a witness. The generic `find_cap_pole`
+/// scan stays a heuristic that may nominate a pole location; only this enum
+/// carries a representation-derived certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollapseWitness {
+    /// A sphere's polar latitude. `Sphere::subs` enters the azimuth only through
+    /// `(cos v, sin v)` (times the latitude's sine), so at the polar latitudes
+    /// the physical map is independent of the azimuth — the orbit collapses to a
+    /// single point for every azimuth. Read from the primitive's own
+    /// parameterisation, not from a numerical sample. Preserved under any
+    /// affine map, so it survives the `Processor`'s transform and inversion.
+    ExactSpherePole,
+}
+
+/// A certified orbit collapse on one axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CertifiedCollapse {
+    /// The collapsing (polar) axis.
+    pub polar: Axis,
+    /// Why the collapse is certified.
+    pub witness: CollapseWitness,
+}
+
 /// What is known about one parameter axis.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AxisPeriodStatus {
@@ -210,6 +236,45 @@ impl CertifiedLattice {
     pub fn certified_rank(&self) -> usize {
         usize::from(self.u_generator().is_some()) + usize::from(self.v_generator().is_some())
     }
+
+    /// The certified polar orbit collapse, if the representation establishes
+    /// one.
+    ///
+    /// A sphere's azimuth witness names the primitive it was read from, and that
+    /// primitive collapses at its polar latitudes by construction — the azimuth
+    /// enters `Sphere::subs` only through `(cos v, sin v)`, so at the poles the
+    /// physical map is a single point. The polar axis is therefore the axis
+    /// that does **not** carry the certified azimuth, in the caller's own
+    /// convention (`swapped()` restates it with the axes exchanged).
+    ///
+    /// Everything else — a revolution's angular axis, an accessor value, a
+    /// numerically-shrunk orbit — returns `None`: the presence of a pole is
+    /// certified here, never inferred from how small an orbit got.
+    pub fn certified_collapse(&self) -> Option<CertifiedCollapse> {
+        match (&self.u, &self.v) {
+            (
+                AxisPeriodStatus::Exact {
+                    witness: PeriodWitness::ExactSphereAzimuth,
+                    ..
+                },
+                _,
+            ) => Some(CertifiedCollapse {
+                polar: Axis::V,
+                witness: CollapseWitness::ExactSpherePole,
+            }),
+            (
+                _,
+                AxisPeriodStatus::Exact {
+                    witness: PeriodWitness::ExactSphereAzimuth,
+                    ..
+                },
+            ) => Some(CertifiedCollapse {
+                polar: Axis::U,
+                witness: CollapseWitness::ExactSpherePole,
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// Which parameter axis a fact concerns.
@@ -260,5 +325,50 @@ mod tests {
             CertifiedLattice::revolution(Axis::V, AxisPeriodStatus::NonPeriodic).swapped();
         assert_eq!(lattice.u_generator(), Some(std::f64::consts::PI * 2.0));
         assert_eq!(lattice.v_generator(), None);
+    }
+
+    /// A sphere certifies a pole collapse on the *polar* axis — the axis that
+    /// does not carry the certified azimuth. The collapse is read from the
+    /// primitive's own parameterisation, never inferred from a small orbit.
+    #[test]
+    fn a_sphere_certifies_its_polar_collapse() {
+        let lattice = CertifiedLattice::sphere_azimuth(Axis::U);
+        let collapse = lattice
+            .certified_collapse()
+            .expect("a sphere certifies a pole");
+        assert_eq!(collapse.polar, Axis::V);
+        assert_eq!(collapse.witness, CollapseWitness::ExactSpherePole);
+    }
+
+    /// An inverted sphere restates the polar collapse on the other axis, in the
+    /// caller's convention, exactly as it restates the azimuth period.
+    #[test]
+    fn an_inverted_sphere_puts_the_certified_pole_on_the_other_axis() {
+        let lattice = CertifiedLattice::sphere_azimuth(Axis::U).swapped();
+        let collapse = lattice
+            .certified_collapse()
+            .expect("a sphere certifies a pole");
+        assert_eq!(collapse.polar, Axis::U);
+        assert_eq!(collapse.witness, CollapseWitness::ExactSpherePole);
+    }
+
+    /// A revolution's angular axis is a rotation, but that does not make the
+    /// generatrix axis a collapsed pole: a cylinder has no pole and a cone's
+    /// apex is not certified by the revolution witness alone. Numerically
+    /// shrinking an orbit is a candidate recognizer, never this certificate.
+    #[test]
+    fn a_revolution_does_not_certify_a_polar_collapse() {
+        for lattice in [
+            CertifiedLattice::revolution(Axis::V, AxisPeriodStatus::NonPeriodic),
+            CertifiedLattice::revolution(Axis::V, AxisPeriodStatus::NonPeriodic).swapped(),
+            CertifiedLattice::NON_PERIODIC,
+            CertifiedLattice::from_unevidenced_accessors(Some(6.28), None),
+        ] {
+            assert_eq!(
+                lattice.certified_collapse(),
+                None,
+                "an accessor or revolution value never certifies a pole",
+            );
+        }
     }
 }
