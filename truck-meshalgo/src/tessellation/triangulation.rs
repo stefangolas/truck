@@ -8436,12 +8436,64 @@ fn insert_surface(
                 .collect()
         })
         .collect();
-    wire_grid_constraints(triangulation, roles, polyline, &udiv, &vdiv, &insert_res);
+    // A boundary carrying a [`SegmentOrigin::Seam`] is periodic/lifted deck
+    // geometry: its seam and source edges are duplicate traversals of the same
+    // curve, and the grid wiring's boundary vertices would split those edges,
+    // leaving the seam's mod-2 traversal pairing broken and the parity flood
+    // contradicting (odd toggling vertices). The seam machinery owns that
+    // structure; the accuracy wiring applies to the non-seam generic surface
+    // path and the windows wiring is restored there verbatim.
+    let has_seam = polyline
+        .0
+        .iter()
+        .any(|loop_| loop_.origins.iter().any(|o| *o == SegmentOrigin::Seam));
+    if has_seam {
+        wire_grid_constraints_windows(triangulation, roles, &insert_res);
+    } else {
+        wire_grid_constraints(triangulation, roles, polyline, &udiv, &vdiv, &insert_res);
+    }
     // PLANAR-C backstop: a grid vertex inserted exactly on a planarized
     // boundary constraint splits it into an unclaimed child; repair those
     // before the flood.
     roles.repair_unlabeled_constraint_edges(triangulation);
     (on_boundary, location_unresolved)
+}
+
+/// The pre-accuracy grid wiring, restored for boundaries that carry a
+/// [`SegmentOrigin::Seam`] (periodic/lifted deck geometry): constrain between
+/// every consecutive *present* grid vertex, including the final u-column.
+///
+/// This is exactly the wiring the seam faces rendered with before the accuracy
+/// work; the accuracy wiring's boundary vertices are unsafe there because the
+/// seam/source duplicate traversals break under the mod-2 parity reading when
+/// split.
+fn wire_grid_constraints_windows(
+    triangulation: &mut Cdt,
+    roles: &mut ConstraintRoles,
+    insert_res: &[Vec<Option<FixedVertexHandle>>],
+) {
+    insert_res.windows(2).for_each(|vec| {
+        vec[0].windows(2).zip(&vec[1]).for_each(|(a, z)| {
+            if let Some(x) = a[0] {
+                if let Some(y) = a[1] {
+                    constrain_grid_edge(triangulation, roles, x, y);
+                }
+                if let Some(z) = z {
+                    constrain_grid_edge(triangulation, roles, x, *z);
+                }
+            }
+        });
+        let idx = vec[0].len() - 1;
+        if let (Some(x), Some(y)) = (vec[0][idx], vec[1][idx]) {
+            constrain_grid_edge(triangulation, roles, x, y);
+        }
+    });
+    let last_column = insert_res.len().saturating_sub(1);
+    for pair in insert_res[last_column].windows(2) {
+        if let (Some(x), Some(y)) = (pair[0], pair[1]) {
+            constrain_grid_edge(triangulation, roles, x, y);
+        }
+    }
 }
 
 /// Constrain the interior sampling grid so that every *material* sub-segment of
