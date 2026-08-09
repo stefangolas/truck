@@ -7890,38 +7890,56 @@ impl ConstraintRoles {
     /// collinear in real arithmetic but differ by rounding in an exact
     /// predicate, so an exact orientation test cannot recognize them.
     fn repair_unlabeled_constraint_edges(&mut self, cdt: &mut Cdt) {
-        let unlabeled: Vec<FixedUndirectedEdgeHandle> = cdt
-            .undirected_edges()
-            .filter(|edge| edge.is_constraint_edge())
-            .filter(|edge| edge.data().data().claims.is_empty())
-            .map(|edge| edge.fix())
-            .collect();
-        for handle in unlabeled {
-            let candidate = edge_vertices(cdt, handle);
-            let candidate_positions = cdt.undirected_edge(handle).positions();
-            let mut parents: Vec<FixedUndirectedEdgeHandle> = Vec::new();
-            for edge in cdt.undirected_edges() {
-                if !edge.is_constraint_edge() || edge.fix() == handle {
-                    continue;
-                }
-                if edge.data().data().claims.is_empty() {
-                    continue;
-                }
-                let parent = edge_vertices(cdt, edge.fix());
-                if !shares_exactly_one_endpoint(parent, candidate) {
-                    continue;
-                }
-                if same_line(
-                    candidate_positions,
-                    cdt.undirected_edge(edge.fix()).positions(),
-                ) {
-                    parents.push(edge.fix());
-                }
+        // Iterate to fixpoint. One sweep cannot label a *chain* of split
+        // children: an unlabeled child whose own parent is also unlabeled (the
+        // same trim edge split at several grid/trim intersections) finds no
+        // labeled parent within the same pass, so it must wait for its parent
+        // to be labeled by the next pass. When a pass repairs nothing, the
+        // remainder has no legitimate parent and stays unlabeled — the flood
+        // will fail closed with `ConstraintRoleMissing` rather than invent a
+        // role.
+        loop {
+            let unlabeled: Vec<FixedUndirectedEdgeHandle> = cdt
+                .undirected_edges()
+                .filter(|edge| edge.is_constraint_edge())
+                .filter(|edge| edge.data().data().claims.is_empty())
+                .map(|edge| edge.fix())
+                .collect();
+            if unlabeled.is_empty() {
+                break;
             }
-            let Some(&parent) = parents.first() else {
-                continue;
-            };
-            self.repair_split(cdt, parent, parent, handle);
+            let mut repaired = false;
+            for handle in unlabeled {
+                let candidate = edge_vertices(cdt, handle);
+                let candidate_positions = cdt.undirected_edge(handle).positions();
+                let mut parents: Vec<FixedUndirectedEdgeHandle> = Vec::new();
+                for edge in cdt.undirected_edges() {
+                    if !edge.is_constraint_edge() || edge.fix() == handle {
+                        continue;
+                    }
+                    if edge.data().data().claims.is_empty() {
+                        continue;
+                    }
+                    let parent = edge_vertices(cdt, edge.fix());
+                    if !shares_exactly_one_endpoint(parent, candidate) {
+                        continue;
+                    }
+                    if same_line(
+                        candidate_positions,
+                        cdt.undirected_edge(edge.fix()).positions(),
+                    ) {
+                        parents.push(edge.fix());
+                    }
+                }
+                let Some(&parent) = parents.first() else {
+                    continue;
+                };
+                self.repair_split(cdt, parent, parent, handle);
+                repaired = true;
+            }
+            if !repaired {
+                break;
+            }
         }
     }
 }
@@ -8382,7 +8400,8 @@ fn insert_surface(
     let range = ((bdb.min()[0], bdb.max()[0]), (bdb.min()[1], bdb.max()[1]));
     let (udiv, vdiv) = surface.parameter_division(range, tol);
     let insert_res: Vec<Vec<Option<_>>> = udiv
-        .into_iter()
+        .iter()
+        .copied()
         .map(|u| {
             vdiv.iter()
                 // G7a. This call site asks "may I place an interior sampling
@@ -8417,7 +8436,7 @@ fn insert_surface(
                 .collect()
         })
         .collect();
-    wire_grid_constraints(triangulation, roles, &insert_res);
+    wire_grid_constraints(triangulation, roles, polyline, &udiv, &vdiv, &insert_res);
     // PLANAR-C backstop: a grid vertex inserted exactly on a planarized
     // boundary constraint splits it into an unclaimed child; repair those
     // before the flood.
@@ -8425,77 +8444,288 @@ fn insert_surface(
     (on_boundary, location_unresolved)
 }
 
-/// Constrain the interior sampling grid over `insert_res` (column-major:
-/// `insert_res[i][j]` is the grid vertex at the `i`-th u-column and `j`-th
-/// v-row, `None` where no vertex was placed).
+/// Constrain the interior sampling grid so that every *material* sub-segment of
+/// every grid line is a constrained edge.
 ///
 /// **Audit A1 / G5a.** Every edge added here is an interior sampling edge: it
 /// exists to control triangle shape, carries no source evidence, and must not
-/// toggle material parity. Each realized chain is therefore labelled
+/// toggle material parity. Each realized chain is labelled
 /// [`ConstraintRole::SurfaceSampling`] with its own semantic id.
 ///
-/// Links are added between every *consecutive* present grid vertex along each
-/// grid line — both the v-direction links within a u-column and the
-/// u-direction links between adjacent u-columns at a shared v-row.
+/// **Accuracy contract (ACC-1).** The pre-accuracy wiring only constrained a
+/// grid segment when *both* endpoints earned a vertex, so a grid point that was
+/// not `Inside` silently deleted the adjacent grid-line constraints. Between
+/// the last fully-interior grid line and the trim there was then no constraint
+/// at all, and the CDT filled the band with triangles spanning several
+/// subdivision cells whose interiors were never certified.
+///
+/// This wiring instead constrains every material sub-segment of every grid
+/// line: each grid segment is cut at its real intersections with the trim
+/// polyline, and each maximal inside sub-segment is constrained. Combined with
+/// the (already constrained) trim boundary, every final triangle is then
+/// confined to the clipped sub-region of one subdivision cell.
 fn wire_grid_constraints(
     triangulation: &mut Cdt,
     roles: &mut ConstraintRoles,
+    polyline: &PolyBoundary,
+    udiv: &[f64],
+    vdiv: &[f64],
     insert_res: &[Vec<Option<FixedVertexHandle>>],
 ) {
-    insert_res.windows(2).for_each(|vec| {
-        vec[0].windows(2).zip(&vec[1]).for_each(|(a, z)| {
-            if let Some(x) = a[0] {
-                if let Some(y) = a[1] {
-                    constrain_grid_edge(triangulation, roles, x, y);
-                }
-                if let Some(z) = z {
-                    constrain_grid_edge(triangulation, roles, x, *z);
-                }
-            }
-        });
-        let idx = vec[0].len() - 1;
-        if let (Some(x), Some(y)) = (vec[0][idx], vec[1][idx]) {
-            constrain_grid_edge(triangulation, roles, x, y);
+    // v-direction links: within each u-column, between consecutive v-rows.
+    for (i, u) in udiv.iter().enumerate() {
+        for j in 0..vdiv.len() - 1 {
+            let a = Point2::new(*u, vdiv[j]);
+            let b = Point2::new(*u, vdiv[j + 1]);
+            wire_grid_segment(
+                triangulation,
+                roles,
+                polyline,
+                a,
+                b,
+                insert_res[i][j],
+                insert_res[i][j + 1],
+            );
         }
-    });
-    // The final u-column has no `windows(2)` window, so the loop above never
-    // adds its v-direction links. A grid vertex in the last column must still
-    // be constrained to its row neighbours; without this the column is only
-    // linked toward the previous column and a triangle can straddle it freely.
-    let last_column = insert_res.len().saturating_sub(1);
-    for pair in insert_res[last_column].windows(2) {
-        if let (Some(x), Some(y)) = (pair[0], pair[1]) {
+    }
+    // u-direction links: within each v-row, between consecutive u-columns.
+    for (j, v) in vdiv.iter().enumerate() {
+        for i in 0..udiv.len() - 1 {
+            let a = Point2::new(udiv[i], *v);
+            let b = Point2::new(udiv[i + 1], *v);
+            wire_grid_segment(
+                triangulation,
+                roles,
+                polyline,
+                a,
+                b,
+                insert_res[i][j],
+                insert_res[i + 1][j],
+            );
+        }
+    }
+}
+
+/// One grid segment, from `a` to `b` (endpoint vertices given or resolvable),
+/// cut into its material sub-segments and constrained.
+fn wire_grid_segment(
+    triangulation: &mut Cdt,
+    roles: &mut ConstraintRoles,
+    polyline: &PolyBoundary,
+    a: Point2,
+    b: Point2,
+    a_handle: Option<FixedVertexHandle>,
+    b_handle: Option<FixedVertexHandle>,
+) {
+    let mut cuts = grid_segment_trim_intersections(polyline, a, b);
+    cuts.push((0.0, a));
+    cuts.push((1.0, b));
+    cuts.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
+    cuts.dedup_by(|x, y| (x.0 - y.0).abs() < T_EPS);
+    for w in cuts.windows(2) {
+        let (t0, uv0) = w[0];
+        let (t1, uv1) = w[1];
+        if t1 - t0 < T_EPS {
+            continue;
+        }
+        let mid_uv = a + (b - a) * (0.5 * (t0 + t1));
+        // A material sub-interval, or conservatively an unestablished one (the
+        // interval is bounded by real grid/trim geometry either way, so
+        // constraining it is a bound, not a guess).
+        if !matches!(
+            polyline.locate(mid_uv),
+            PointLocation::Inside | PointLocation::Indeterminate
+        ) {
+            continue;
+        }
+        let Some(x) = interval_endpoint_vertex(triangulation, a, b, a_handle, b_handle, t0, uv0)
+        else {
+            continue;
+        };
+        let Some(y) = interval_endpoint_vertex(triangulation, a, b, a_handle, b_handle, t1, uv1)
+        else {
+            continue;
+        };
+        if x != y {
             constrain_grid_edge(triangulation, roles, x, y);
         }
     }
 }
 
-/// One interior sampling constraint, with its semantic label. `try_add_constraint`
-/// returning an empty chain (a proper crossing the CDT cannot planarize) is a
-/// best-effort skip: the grid exists to shape the triangulation, never to
-/// decide material, so a refused grid edge must not fail the face.
+/// The CDT vertex for the interval boundary at parameter `t`: the grid
+/// endpoint's own vertex when the boundary is a grid point that earned one,
+/// otherwise a vertex at the (trim-exact) boundary UV `uv`.
+fn interval_endpoint_vertex(
+    triangulation: &mut Cdt,
+    a: Point2,
+    b: Point2,
+    a_handle: Option<FixedVertexHandle>,
+    b_handle: Option<FixedVertexHandle>,
+    t: f64,
+    uv: Point2,
+) -> Option<FixedVertexHandle> {
+    if t <= T_EPS {
+        if let Some(h) = a_handle {
+            return Some(h);
+        }
+    } else if t >= 1.0 - T_EPS {
+        if let Some(h) = b_handle {
+            return Some(h);
+        }
+    }
+    resolve_vertex(triangulation, uv)
+}
+
+/// Intersection parameters of the grid segment `a -> b` with every **source**
+/// trim segment, as sorted candidate cut points in `[0, 1]`.
+///
+/// Proper crossings, trim vertices lying on the segment, and grid endpoints
+/// lying on a trim segment all contribute. A trim segment **parallel** to the
+/// grid segment contributes nothing: were it collinear and overlapping, the
+/// trim constraint already covers that line, and constraining the grid edge
+/// alongside it would give the split-child repair an ambiguous same-line
+/// parent to mislabel the trim half with. Such degenerate bands keep the
+/// pre-accuracy behaviour (the trim constrains them; the grid adds nothing).
+///
+/// The [`SegmentOrigin::Seam`] join bridges are deliberately excluded: they are
+/// artificial deck-join geometry, not source trim, and a degenerate (legacy)
+/// join can place them cutting across the material, where treating them as a
+/// material boundary would insert spurious grid/trim cut vertices. The seam is
+/// still a CDT constraint (added by [`PolyBoundary::insert_to`]), so the
+/// material stays bounded by it; the grid just does not cut there.
+fn grid_segment_trim_intersections(
+    polyline: &PolyBoundary,
+    a: Point2,
+    b: Point2,
+) -> Vec<(f64, Point2)> {
+    let d = b - a;
+    let d2 = d.magnitude2();
+    let mut ts = Vec::new();
+    // Safety margin for the bbox reject, scaled by the grid segment length
+    // (so a long segment gets a proportional margin) but never below a floor.
+    let eps = T_EPS * d2.sqrt().max(1.0);
+    for loop_ in &polyline.0 {
+        let n = loop_.points.len();
+        for i in 0..n {
+            if loop_.origins.get(i) == Some(SegmentOrigin::Seam) {
+                continue;
+            }
+            let (p, q) = (&loop_.points[i], &loop_.points[(i + 1) % n]);
+            let (c, e) = (**p, **q);
+            // Bounding-box prefilter: no overlap, no intersection.
+            if a.x.max(b.x) < c.x.min(e.x) - eps
+                || a.x.min(b.x) > c.x.max(e.x) + eps
+                || a.y.max(b.y) < c.y.min(e.y) - eps
+                || a.y.min(b.y) > c.y.max(e.y) + eps
+            {
+                continue;
+            }
+            let seg = e - c;
+            let denom = cross2(d, seg);
+            if denom.abs() <= 1e-12 {
+                // Parallel: no transverse crossing, and collinear overlap is
+                // deliberately ignored (see the doc comment).
+                continue;
+            }
+            let r = c - a;
+            let t = cross2(r, seg) / denom;
+            let s = cross2(r, d) / denom;
+            if t >= -T_EPS && t <= 1.0 + T_EPS && s >= -T_EPS && s <= 1.0 + T_EPS {
+                // The cut point is the projection onto the **trim** segment
+                // (`c + seg * s`), so it lies exactly on the trim line. A grid
+                // projection (`a + d * t`) carries fp error that can place the
+                // vertex a hair outside the material; the constraint to it
+                // would then cross the trim and be refused.
+                ts.push((t.clamp(0.0, 1.0), c + seg * s));
+            }
+        }
+    }
+    ts
+}
+
+/// Whether a parameter point lies in the material region, decided for the
+/// interior by the parity the flood will select and for the boundary exactly as
+/// [`PolyBoundary::locate`] decides it.
+///
+/// - A midpoint on the trim (within the raw locate's boundary tolerance) is
+///   **not** material: the trim already constrains there, and constraining the
+///   adjacent sliver would insert vertices on the boundary that can break the
+///   parity structure.
+/// - Otherwise the point is material iff the face it lies in carries odd
+///   parity under `early_parity`, computed on the boundary-only CDT before any
+///   grid vertex or [`ConstraintRole::SurfaceSampling`] constraint was added —
+///   exactly the material the final flood selects. This is what makes the
+///   classification agree with the flood on degenerate (self-crossing legacy
+///   join) boundaries, where the raw polyline ray-cast names a different
+///   material than the planarized boundary does.
+///
+/// `None` parity (early flood failed, so the face will fail later) and
+/// on-edge/on-vertex points classify conservatively as material.
+/// An existing vertex at `uv` (within the same UV weld radius the boundary
+/// uses), or a freshly inserted one.
+fn resolve_vertex(triangulation: &mut Cdt, uv: Point2) -> Option<FixedVertexHandle> {
+    let sp = SPoint2::new(spade_round(uv.x), spade_round(uv.y));
+    if let Some(idx) = triangulation
+        .vertices()
+        .find(|v| sp.distance_2(*v.as_ref()) < 1e-12)
+    {
+        return Some(idx.fix());
+    }
+    triangulation.insert(sp).ok()
+}
+
+/// One interior sampling constraint, with its semantic label.
+///
+/// The material sub-interval it realizes may properly cross the trim; use
+/// [`ConstraintRoles::insert_with_split`] so the crossing is planarized into a
+/// constrained split rather than refused. A crossing network Spade cannot
+/// planarize (or an existing duplicate constraint) is a best-effort skip: the
+/// grid exists to shape the triangulation, never to decide material, so a
+/// refused grid edge must not fail the face.
 fn constrain_grid_edge(
     triangulation: &mut Cdt,
     roles: &mut ConstraintRoles,
     a: FixedVertexHandle,
     b: FixedVertexHandle,
 ) {
+    if triangulation
+        .get_edge_from_neighbors(a, b)
+        .filter(|e| e.is_constraint_edge())
+        .is_some()
+    {
+        return;
+    }
+    // A material sub-interval is bounded by real grid/trim geometry, so its
+    // interior cannot cross the trim: every trim crossing of the host grid
+    // segment was already computed as an interval boundary. `try_add_constraint`
+    // therefore suffices and deliberately avoids `add_constraint_and_split`,
+    // whose planarization can relocate an existing trim constraint and leave an
+    // odd toggling vertex behind. An empty chain is a best-effort skip.
     let chain = triangulation.try_add_constraint(a, b);
     if chain.is_empty() {
         return;
     }
     // PLANAR-B B6: interior sampling constraints carry no source uses and
     // have no SegmentOrigin; each realized chain gets its own semantic id.
-    let id = roles.mint_semantic_constraint_id();
+    let semantic_id = roles.mint_semantic_constraint_id();
     roles.label_realized_chain(
         triangulation,
         &chain,
-        id,
+        semantic_id,
         ConstraintRole::SurfaceSampling,
         &[],
         None,
     );
 }
+
+/// Two-dimensional cross product.
+fn cross2(a: Vector2, b: Vector2) -> f64 {
+    a.x * b.y - a.y * b.x
+}
+
+/// Relative tolerance for grid-segment cut points: two intersection parameters
+/// closer than this are the same cut.
+const T_EPS: f64 = 1e-9;
 
 /// Labels every CDT face with material parity by flooding the dual graph from
 /// the outer face, flipping across constraint edges that are entitled to toggle.
@@ -9461,6 +9691,8 @@ mod cone_topology_tests {
         };
         (cylinder, vec![circle(0.2, 1.0), circle(0.8, -1.0)])
     }
+
+    /// TEMP DEBUG: dump the opposite-winding band CDT for legacy vs corrected.
 
     /// The deck equation, on the geometry it was written for: reversing loop 1
     /// gives `Î£Î´ = Â±2`, so the legacy join is refused and forward traversal is
@@ -13421,7 +13653,6 @@ mod periodic_cap_closure_tests {
         assert!(!mesh.tri_faces().is_empty());
     }
 
-    /// A single latitude loop on a cylinder has no pole: the material side has
     /// no orbit collapse, so the mechanism declines and the face keeps whatever
     /// the legacy path produced (no cap is invented).
     #[test]
@@ -13522,13 +13753,10 @@ mod periodic_cap_closure_tests {
 }
 
 /// Constraint wiring of [`wire_grid_constraints`]: the interior sampling grid
-/// must constrain every consecutive vertex pair along every grid line,
-/// including the v-direction links of the **final** u-column.
-///
-/// The pre-fix loop walked `insert_res.windows(2)`, so the last u-column never
-/// got a window and its v-direction links were silently dropped: a grid point
-/// in the final column had no constraint toward its row neighbours even when
-/// both were material. This test pins the missing links.
+/// must constrain every *material* sub-segment of every grid line, cutting each
+/// grid segment at its real intersections with the trim so a final triangle
+/// cannot cross a subdivision-cell boundary merely because a grid vertex was
+/// outside the trimmed region.
 #[cfg(test)]
 mod grid_constraint_wiring_tests {
     use super::*;
@@ -13543,62 +13771,196 @@ mod grid_constraint_wiring_tests {
 
     fn find_vertex(cdt: &Cdt, p: SPoint2) -> FixedVertexHandle {
         cdt.vertices()
-            .find(|v| v.as_ref() == &p)
+            .find(|v| v.as_ref().distance_2(p) < 1e-9)
             .expect("vertex exists")
             .fix()
     }
 
-    fn present_grid(udiv: &[f64], vdiv: &[f64]) -> (Cdt, Vec<Vec<Option<FixedVertexHandle>>>) {
-        let mut cdt = Cdt::new();
-        let grid = udiv
-            .iter()
+    /// A square trim `[lo, hi] × [lo, hi]` in the plane z = 0.
+    fn square_trim(lo: f64, hi: f64) -> PolyBoundary {
+        let pts: Vec<SurfacePoint> = [
+            (Point2::new(lo, lo), Point3::new(lo, lo, 0.0)),
+            (Point2::new(hi, lo), Point3::new(hi, lo, 0.0)),
+            (Point2::new(hi, hi), Point3::new(hi, hi, 0.0)),
+            (Point2::new(lo, hi), Point3::new(lo, hi, 0.0)),
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+        PolyBoundary(vec![BoundaryLoop {
+            points: pts,
+            origins: vec![SegmentOrigin::Source; 4],
+            source_uses: vec![Vec::new(); 4],
+        }])
+    }
+
+    /// A grid with every vertex present (`Some`), inserted into `cdt`.
+    fn present_grid_into(
+        cdt: &mut Cdt,
+        udiv: &[f64],
+        vdiv: &[f64],
+    ) -> Vec<Vec<Option<FixedVertexHandle>>> {
+        udiv.iter()
             .map(|&u| {
                 vdiv.iter()
-                    .map(|&v| Some(insert_vertex(&mut cdt, point(u, v))))
+                    .map(|&v| Some(insert_vertex(cdt, point(u, v))))
                     .collect::<Vec<_>>()
             })
-            .collect::<Vec<_>>();
-        (cdt, grid)
+            .collect::<Vec<_>>()
+    }
+
+    /// A grid where only the grid points `inside` earn a vertex, inserted into
+    /// `cdt`.
+    fn classified_grid_into(
+        cdt: &mut Cdt,
+        udiv: &[f64],
+        vdiv: &[f64],
+        inside: &dyn Fn(f64, f64) -> bool,
+    ) -> Vec<Vec<Option<FixedVertexHandle>>> {
+        udiv.iter()
+            .map(|&u| {
+                vdiv.iter()
+                    .map(|&v| {
+                        if inside(u, v) {
+                            Some(insert_vertex(cdt, point(u, v)))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    }
+
+    /// Insert the trim as constraints (as the production `insert_to` does),
+    /// insert the grid vertices, and wire.
+    fn wire_with_boundary(
+        boundary: &PolyBoundary,
+        udiv: &[f64],
+        vdiv: &[f64],
+        grid: &[Vec<Option<FixedVertexHandle>>],
+        cdt: &mut Cdt,
+        roles: &mut ConstraintRoles,
+    ) {
+        wire_grid_constraints(cdt, roles, boundary, udiv, vdiv, grid);
+    }
+
+    /// The constraint edge between two vertices, if both exist and share one.
+    fn edge_between(cdt: &Cdt, a: SPoint2, b: SPoint2) -> Option<FixedUndirectedEdgeHandle> {
+        let va = cdt
+            .vertices()
+            .find(|v| v.as_ref().distance_2(a) < 1e-9)?
+            .fix();
+        let vb = cdt
+            .vertices()
+            .find(|v| v.as_ref().distance_2(b) < 1e-9)?
+            .fix();
+        cdt.get_edge_from_neighbors(va, vb)
+            .map(|e| e.as_undirected().fix())
     }
 
     fn is_constraint_edge(cdt: &Cdt, a: SPoint2, b: SPoint2) -> bool {
-        let va = find_vertex(cdt, a);
-        let vb = find_vertex(cdt, b);
-        cdt.get_edge_from_neighbors(va, vb)
-            .filter(|e| e.is_constraint_edge())
+        edge_between(cdt, a, b)
+            .filter(|e| cdt.is_constraint_edge(*e))
             .is_some()
     }
 
-    /// A fully-present 3×3 grid (u ∈ {0,1,2}, v ∈ {0,1,2}): every grid line,
-    /// including the final u-column at u = 2, must be constrained between its
-    /// consecutive vertices.
+    /// A fully-interior grid (trim larger than the grid, every grid point
+    /// material): every grid line — including the final u-column — must be
+    /// constrained between its consecutive vertices. This is the wiring that
+    /// guarantees a triangle cannot straddle a certified cell in the interior.
     #[test]
-    fn final_u_column_carries_its_v_direction_links() {
-        let (mut cdt, grid) = present_grid(&[0.0, 1.0, 2.0], &[0.0, 1.0, 2.0]);
+    fn fully_interior_grid_is_fully_constrained_including_final_column() {
+        let boundary = square_trim(-2.0, 2.0);
+        let mut cdt = Cdt::new();
+        let mut boundary_map = HashMap::<FixedVertexHandle, Point3>::default();
+        let mut vertex_sources = HashMap::<FixedVertexHandle, Vec<SourceEdgeUse>>::default();
         let mut roles = ConstraintRoles::default();
-        wire_grid_constraints(&mut cdt, &mut roles, &grid);
+        boundary
+            .insert_to(&mut cdt, &mut boundary_map, &mut roles, &mut vertex_sources)
+            .expect("insert_to succeeds");
+        let grid = present_grid_into(&mut cdt, &[-1.0, 0.0, 1.0], &[-1.0, 0.0, 1.0]);
+        wire_with_boundary(
+            &boundary,
+            &[-1.0, 0.0, 1.0],
+            &[-1.0, 0.0, 1.0],
+            &grid,
+            &mut cdt,
+            &mut roles,
+        );
 
-        // u-direction links on every row, including into the final column.
-        for v in [0.0, 1.0, 2.0] {
+        for v in [-1.0, 0.0, 1.0] {
+            assert!(
+                is_constraint_edge(&cdt, point(-1.0, v), point(0.0, v)),
+                "u-link (-1,{v})-(0,{v}) missing"
+            );
             assert!(
                 is_constraint_edge(&cdt, point(0.0, v), point(1.0, v)),
                 "u-link (0,{v})-(1,{v}) missing"
             );
-            assert!(
-                is_constraint_edge(&cdt, point(1.0, v), point(2.0, v)),
-                "u-link (1,{v})-(2,{v}) missing"
-            );
         }
-        // v-direction links within each u-column.
-        for u in [0.0, 1.0, 2.0] {
+        for u in [-1.0, 0.0, 1.0] {
+            assert!(
+                is_constraint_edge(&cdt, point(u, -1.0), point(u, 0.0)),
+                "v-link ({u},-1)-({u},0) missing"
+            );
             assert!(
                 is_constraint_edge(&cdt, point(u, 0.0), point(u, 1.0)),
                 "v-link ({u},0)-({u},1) missing"
             );
+        }
+    }
+
+    /// A grid segment crossing the trim boundary: its material portion must be
+    /// constrained up to a *real* grid/trim intersection vertex, and the
+    /// outside portion must not be bridged by a constraint.
+    #[test]
+    fn boundary_crossing_segment_is_constrained_to_a_real_trim_intersection() {
+        let boundary = square_trim(-0.4, 0.4);
+        let mut cdt = Cdt::new();
+        let mut boundary_map = HashMap::<FixedVertexHandle, Point3>::default();
+        let mut vertex_sources = HashMap::<FixedVertexHandle, Vec<SourceEdgeUse>>::default();
+        let mut roles = ConstraintRoles::default();
+        boundary
+            .insert_to(&mut cdt, &mut boundary_map, &mut roles, &mut vertex_sources)
+            .expect("insert_to succeeds");
+        // Grid over [-1, 1]²; only the center is material.
+        let inside = |u: f64, v: f64| u.abs() < 0.49 && v.abs() < 0.49;
+        let grid = classified_grid_into(&mut cdt, &[-1.0, 0.0, 1.0], &[-1.0, 0.0, 1.0], &inside);
+        wire_with_boundary(
+            &boundary,
+            &[-1.0, 0.0, 1.0],
+            &[-1.0, 0.0, 1.0],
+            &grid,
+            &mut cdt,
+            &mut roles,
+        );
+
+        // The center connects to the four real trim intersections on the axes.
+        let center = point(0.0, 0.0);
+        for (ix, iy) in [(0.4, 0.0), (-0.4, 0.0), (0.0, 0.4), (0.0, -0.4)] {
+            let target = point(ix, iy);
+            // The intersection vertex must exist, exactly at the grid∩trim point.
             assert!(
-                is_constraint_edge(&cdt, point(u, 1.0), point(u, 2.0)),
-                "v-link ({u},1)-({u},2) missing"
+                find_vertex(&cdt, target) != find_vertex(&cdt, center),
+                "intersection vertex ({ix},{iy}) must be a distinct vertex"
+            );
+            assert!(
+                is_constraint_edge(&cdt, center, target),
+                "material spoke (0,0)-({ix},{iy}) missing"
             );
         }
+        // The outside portion is not bridged: no constraint from the trim
+        // intersection toward the outer grid point, and no vertex at (1,0).
+        assert!(
+            !is_constraint_edge(&cdt, point(0.0, 0.0), point(1.0, 0.0)),
+            "the outside portion must not be constrained"
+        );
+        assert!(
+            cdt.vertices()
+                .find(|v| v.as_ref() == &point(1.0, 0.0))
+                .is_none(),
+            "no vertex may be placed on the outside portion of the grid line"
+        );
     }
 }
