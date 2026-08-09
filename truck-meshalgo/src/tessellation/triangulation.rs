@@ -8373,23 +8373,6 @@ fn insert_surface(
     // defect audit A1 removed, reappearing through the chain-splitting hole
     // rather than through the one-bit test A1 fixed. Labelling the whole
     // realized chain closes it.
-    let mut constrain = |triangulation: &mut Cdt, a: FixedVertexHandle, b: FixedVertexHandle| {
-        let chain = triangulation.try_add_constraint(a, b);
-        if chain.is_empty() {
-            return;
-        }
-        // PLANAR-B B6: interior sampling constraints carry no source uses and
-        // have no SegmentOrigin; each realized chain gets its own semantic id.
-        let id = roles.mint_semantic_constraint_id();
-        roles.label_realized_chain(
-            triangulation,
-            &chain,
-            id,
-            ConstraintRole::SurfaceSampling,
-            &[],
-            None,
-        );
-    };
     let bdb: BoundingBox<Point2> = polyline
         .0
         .iter()
@@ -8434,27 +8417,84 @@ fn insert_surface(
                 .collect()
         })
         .collect();
-    insert_res.windows(2).for_each(|vec| {
-        vec[0].windows(2).zip(&vec[1]).for_each(|(a, z)| {
-            if let Some(x) = a[0] {
-                if let Some(y) = a[1] {
-                    constrain(triangulation, x, y);
-                }
-                if let Some(z) = z {
-                    constrain(triangulation, x, *z);
-                }
-            }
-        });
-        let idx = vec[0].len() - 1;
-        if let (Some(x), Some(y)) = (vec[0][idx], vec[1][idx]) {
-            constrain(triangulation, x, y);
-        }
-    });
+    wire_grid_constraints(triangulation, roles, &insert_res);
     // PLANAR-C backstop: a grid vertex inserted exactly on a planarized
     // boundary constraint splits it into an unclaimed child; repair those
     // before the flood.
     roles.repair_unlabeled_constraint_edges(triangulation);
     (on_boundary, location_unresolved)
+}
+
+/// Constrain the interior sampling grid over `insert_res` (column-major:
+/// `insert_res[i][j]` is the grid vertex at the `i`-th u-column and `j`-th
+/// v-row, `None` where no vertex was placed).
+///
+/// **Audit A1 / G5a.** Every edge added here is an interior sampling edge: it
+/// exists to control triangle shape, carries no source evidence, and must not
+/// toggle material parity. Each realized chain is therefore labelled
+/// [`ConstraintRole::SurfaceSampling`] with its own semantic id.
+///
+/// Links are added between every *consecutive* present grid vertex along each
+/// grid line — both the v-direction links within a u-column and the
+/// u-direction links between adjacent u-columns at a shared v-row.
+fn wire_grid_constraints(
+    triangulation: &mut Cdt,
+    roles: &mut ConstraintRoles,
+    insert_res: &[Vec<Option<FixedVertexHandle>>],
+) {
+    insert_res.windows(2).for_each(|vec| {
+        vec[0].windows(2).zip(&vec[1]).for_each(|(a, z)| {
+            if let Some(x) = a[0] {
+                if let Some(y) = a[1] {
+                    constrain_grid_edge(triangulation, roles, x, y);
+                }
+                if let Some(z) = z {
+                    constrain_grid_edge(triangulation, roles, x, *z);
+                }
+            }
+        });
+        let idx = vec[0].len() - 1;
+        if let (Some(x), Some(y)) = (vec[0][idx], vec[1][idx]) {
+            constrain_grid_edge(triangulation, roles, x, y);
+        }
+    });
+    // The final u-column has no `windows(2)` window, so the loop above never
+    // adds its v-direction links. A grid vertex in the last column must still
+    // be constrained to its row neighbours; without this the column is only
+    // linked toward the previous column and a triangle can straddle it freely.
+    let last_column = insert_res.len().saturating_sub(1);
+    for pair in insert_res[last_column].windows(2) {
+        if let (Some(x), Some(y)) = (pair[0], pair[1]) {
+            constrain_grid_edge(triangulation, roles, x, y);
+        }
+    }
+}
+
+/// One interior sampling constraint, with its semantic label. `try_add_constraint`
+/// returning an empty chain (a proper crossing the CDT cannot planarize) is a
+/// best-effort skip: the grid exists to shape the triangulation, never to
+/// decide material, so a refused grid edge must not fail the face.
+fn constrain_grid_edge(
+    triangulation: &mut Cdt,
+    roles: &mut ConstraintRoles,
+    a: FixedVertexHandle,
+    b: FixedVertexHandle,
+) {
+    let chain = triangulation.try_add_constraint(a, b);
+    if chain.is_empty() {
+        return;
+    }
+    // PLANAR-B B6: interior sampling constraints carry no source uses and
+    // have no SegmentOrigin; each realized chain gets its own semantic id.
+    let id = roles.mint_semantic_constraint_id();
+    roles.label_realized_chain(
+        triangulation,
+        &chain,
+        id,
+        ConstraintRole::SurfaceSampling,
+        &[],
+        None,
+    );
 }
 
 /// Labels every CDT face with material parity by flooding the dual graph from
@@ -13478,5 +13518,87 @@ mod periodic_cap_closure_tests {
         let mesh = trimming_tessellation_result(&s, &boundary, 0.05, &lattice)
             .expect("the tagged cap cell tessellates");
         assert!(!mesh.tri_faces().is_empty());
+    }
+}
+
+/// Constraint wiring of [`wire_grid_constraints`]: the interior sampling grid
+/// must constrain every consecutive vertex pair along every grid line,
+/// including the v-direction links of the **final** u-column.
+///
+/// The pre-fix loop walked `insert_res.windows(2)`, so the last u-column never
+/// got a window and its v-direction links were silently dropped: a grid point
+/// in the final column had no constraint toward its row neighbours even when
+/// both were material. This test pins the missing links.
+#[cfg(test)]
+mod grid_constraint_wiring_tests {
+    use super::*;
+
+    fn point(x: f64, y: f64) -> SPoint2 {
+        SPoint2::new(x, y)
+    }
+
+    fn insert_vertex(cdt: &mut Cdt, p: SPoint2) -> FixedVertexHandle {
+        cdt.insert(p).expect("vertex insertion succeeds")
+    }
+
+    fn find_vertex(cdt: &Cdt, p: SPoint2) -> FixedVertexHandle {
+        cdt.vertices()
+            .find(|v| v.as_ref() == &p)
+            .expect("vertex exists")
+            .fix()
+    }
+
+    fn present_grid(udiv: &[f64], vdiv: &[f64]) -> (Cdt, Vec<Vec<Option<FixedVertexHandle>>>) {
+        let mut cdt = Cdt::new();
+        let grid = udiv
+            .iter()
+            .map(|&u| {
+                vdiv.iter()
+                    .map(|&v| Some(insert_vertex(&mut cdt, point(u, v))))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        (cdt, grid)
+    }
+
+    fn is_constraint_edge(cdt: &Cdt, a: SPoint2, b: SPoint2) -> bool {
+        let va = find_vertex(cdt, a);
+        let vb = find_vertex(cdt, b);
+        cdt.get_edge_from_neighbors(va, vb)
+            .filter(|e| e.is_constraint_edge())
+            .is_some()
+    }
+
+    /// A fully-present 3×3 grid (u ∈ {0,1,2}, v ∈ {0,1,2}): every grid line,
+    /// including the final u-column at u = 2, must be constrained between its
+    /// consecutive vertices.
+    #[test]
+    fn final_u_column_carries_its_v_direction_links() {
+        let (mut cdt, grid) = present_grid(&[0.0, 1.0, 2.0], &[0.0, 1.0, 2.0]);
+        let mut roles = ConstraintRoles::default();
+        wire_grid_constraints(&mut cdt, &mut roles, &grid);
+
+        // u-direction links on every row, including into the final column.
+        for v in [0.0, 1.0, 2.0] {
+            assert!(
+                is_constraint_edge(&cdt, point(0.0, v), point(1.0, v)),
+                "u-link (0,{v})-(1,{v}) missing"
+            );
+            assert!(
+                is_constraint_edge(&cdt, point(1.0, v), point(2.0, v)),
+                "u-link (1,{v})-(2,{v}) missing"
+            );
+        }
+        // v-direction links within each u-column.
+        for u in [0.0, 1.0, 2.0] {
+            assert!(
+                is_constraint_edge(&cdt, point(u, 0.0), point(u, 1.0)),
+                "v-link ({u},0)-({u},1) missing"
+            );
+            assert!(
+                is_constraint_edge(&cdt, point(u, 1.0), point(u, 2.0)),
+                "v-link ({u},1)-({u},2) missing"
+            );
+        }
     }
 }
