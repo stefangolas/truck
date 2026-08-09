@@ -79,6 +79,24 @@ pub trait BoundedCurve: ParametricCurve {
         let (_, y) = self.parameter_range();
         self.subs(bound2opt(y).expect(UNBOUNDED_ERROR))
     }
+    /// Whether evaluation at parameter `t` is an ordinary represented point.
+    ///
+    /// This is the direct predicate behind [`BoundedCurve::evaluation_range`].
+    /// For a B-spline or NURBS curve it is the Cox–de Boor certificate at `t`:
+    /// the basis window is non-empty and its weights sum to one (the window
+    /// may be shorter than `degree + 1` at the support boundary, where the
+    /// missing functions are exactly zero). It is `false` in the exporter's
+    /// unclamped closure sliver, where the basis degenerates and `subs` does
+    /// not produce the drawn curve (an all-zero window yields the origin; a
+    /// partial window yields an off-curve point).
+    ///
+    /// A curve family that evaluates over its whole declared range — lines,
+    /// conics, polylines, and so on — has no basis-degeneracy notion, so every
+    /// parameter is an ordinary represented point and this defaults to `true`.
+    #[inline(always)]
+    fn basis_is_partition_of_unity(&self, _t: f64) -> bool {
+        true
+    }
 }
 
 /// Implementation for the test of topological methods.

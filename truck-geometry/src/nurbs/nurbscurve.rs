@@ -565,6 +565,11 @@ impl<V: Homogeneous<Scalar = f64> + ControlPoint<f64, Diff = V>> BoundedCurve fo
     fn evaluation_range(&self) -> (f64, f64) {
         self.0.evaluation_range()
     }
+
+    #[inline(always)]
+    fn basis_is_partition_of_unity(&self, t: f64) -> bool {
+        self.0.basis_is_partition_of_unity(t)
+    }
 }
 
 impl<V: Clone> Invertible for NurbsCurve<V> {

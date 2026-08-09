@@ -536,6 +536,31 @@ pub fn certify_revolution_period(
     )?)
 }
 
+/// Certify the azimuth period of a sphere.
+///
+/// `Sphere::subs(u, v)` enters the azimuth only through `(cos v, sin v)`, so
+/// the azimuth has period `2π` by construction of the primitive, for every
+/// latitude. The premise `SupportSurfaceIsASphere` is discharged by the
+/// argument: this function's caller has already read the
+/// `ExactSphereAzimuth` witness from a `Processor<Sphere, Matrix4>`.
+pub fn certify_sphere_azimuth_period(
+    axis: ParameterAxis,
+) -> Result<CertifiedPeriodGenerator, IntroductionError> {
+    let magnitude =
+        PositiveFinite::new(std::f64::consts::PI * 2.0).expect("2π is positive and finite");
+    let translation = CertifiedUvTranslation::along_axis(axis, magnitude)?;
+    let certificate = AnalyticCertificate::new(
+        AnalyticRule::SphereAzimuthPeriodIsTwoPi,
+        NonEmptyVec::one(AnalyticPremise::SupportSurfaceIsASphere),
+    )?;
+    let period_certificate = PeriodCertificate::new(EvidenceCertificate::Analytic(certificate))?;
+    Ok(CertifiedPeriodGenerator::new(
+        axis,
+        translation,
+        period_certificate,
+    )?)
+}
+
 /// Certify a period from a self-bounding numerical procedure.
 ///
 /// The certificate states the predicate, the domain, the required tolerance,
@@ -1709,14 +1734,22 @@ pub fn ambient_axis_evidence_from_legacy(
     };
 
     match status {
-        // `PeriodWitness::ExactRevolutionAngle` is the only witness the legacy
-        // type admits and it names the analytic rule directly, so this arm
-        // re-derives a real certificate through the introduction rule rather
-        // than trusting the stored number.
+        // The legacy witnesses name the analytic rule they were read from, so
+        // this arm re-derives a real certificate through the introduction rule
+        // rather than trusting the stored number.
         AxisPeriodStatus::Exact { period, witness } => {
-            let super::super::domain::lattice::PeriodWitness::ExactRevolutionAngle = witness;
-            let generator = certify_revolution_period(axis)
-                .map_err(|cause| AdapterError::GeneratorNotReconstructible { axis, cause })?;
+            let generator = match witness {
+                super::super::domain::lattice::PeriodWitness::ExactRevolutionAngle => {
+                    certify_revolution_period(axis).map_err(|cause| {
+                        AdapterError::GeneratorNotReconstructible { axis, cause }
+                    })?
+                }
+                super::super::domain::lattice::PeriodWitness::ExactSphereAzimuth => {
+                    certify_sphere_azimuth_period(axis).map_err(|cause| {
+                        AdapterError::GeneratorNotReconstructible { axis, cause }
+                    })?
+                }
+            };
             // If the legacy number disagrees with the re-derived 2π, that is a
             // contradiction between two established facts, not a reason to
             // silently prefer one.

@@ -37,6 +37,13 @@ pub enum PeriodWitness {
     /// `origin + rotation_matrix(v) · (curve(u) − origin)`, so this axis has
     /// period `2π` by construction of the map, independently of the generatrix.
     ExactRevolutionAngle,
+    /// The parameterisation is a sphere's azimuth. `Sphere::subs(u, v)` enters
+    /// `v` only through `(cos v, sin v)` — a rotation about the polar axis — so
+    /// the azimuth has period `2π` by construction of the primitive, for every
+    /// latitude. Distinct from [`ExactRevolutionAngle`]: a sphere is a
+    /// `Processor<Sphere, Matrix4>`, not a revolved curve, and the witness
+    /// names the primitive it was read from.
+    ExactSphereAzimuth,
 }
 
 /// What is known about one parameter axis.
@@ -127,6 +134,29 @@ impl CertifiedLattice {
             },
             Axis::V => Self {
                 u: generatrix,
+                v: exact,
+            },
+        }
+    }
+
+    /// The exact azimuth period of a sphere, on the axis the sphere
+    /// parameterises as longitude, with the polar axis left to the caller.
+    ///
+    /// `Sphere::subs(u, v)` enters the azimuth only through `(cos v, sin v)`,
+    /// so `2π` is a property of the primitive, not of an accessor. The polar
+    /// axis (latitude) has no period.
+    pub fn sphere_azimuth(azimuth: Axis) -> Self {
+        let exact = AxisPeriodStatus::Exact {
+            period: std::f64::consts::PI * 2.0,
+            witness: PeriodWitness::ExactSphereAzimuth,
+        };
+        match azimuth {
+            Axis::U => Self {
+                u: exact,
+                v: AxisPeriodStatus::NonPeriodic,
+            },
+            Axis::V => Self {
+                u: AxisPeriodStatus::NonPeriodic,
                 v: exact,
             },
         }

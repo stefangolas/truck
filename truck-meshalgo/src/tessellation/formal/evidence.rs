@@ -488,6 +488,11 @@ pub enum AnalyticRule {
     /// the revolved axis has period `2π` by construction of the map, for every
     /// generatrix. `domain/lattice.rs::PeriodWitness::ExactRevolutionAngle`.
     RevolutionAngularPeriodIsTwoPi,
+    /// `Sphere::subs(u, v)` enters the azimuth only through `(cos v, sin v)` —
+    /// a rotation about the polar axis — so the azimuth has period `2π` by
+    /// construction of the primitive, for every latitude.
+    /// `domain/lattice.rs::PeriodWitness::ExactSphereAzimuth`.
+    SphereAzimuthPeriodIsTwoPi,
     /// A plane's parameterization is affine and injective on `ℝ²`; no nonzero
     /// translation fixes it. Establishes *absence*, not a period.
     PlaneHasNoPeriodicDirection,
@@ -507,6 +512,7 @@ impl AnalyticRule {
             Self::RevolutionAngularPeriodIsTwoPi => {
                 &[AnalyticPremise::SupportSurfaceIsARevolvedCurve]
             }
+            Self::SphereAzimuthPeriodIsTwoPi => &[AnalyticPremise::SupportSurfaceIsASphere],
             Self::PlaneHasNoPeriodicDirection => &[AnalyticPremise::SupportSurfaceIsAPlane],
             Self::StraightGeneratrixHasNoPeriod => &[
                 AnalyticPremise::SupportSurfaceIsARevolvedCurve,
@@ -522,6 +528,7 @@ impl AnalyticRule {
     pub fn tag(self) -> &'static str {
         match self {
             Self::RevolutionAngularPeriodIsTwoPi => "revolution_angular_period_two_pi",
+            Self::SphereAzimuthPeriodIsTwoPi => "sphere_azimuth_period_two_pi",
             Self::PlaneHasNoPeriodicDirection => "plane_has_no_periodic_direction",
             Self::StraightGeneratrixHasNoPeriod => "straight_generatrix_has_no_period",
             Self::AxisAlignedGeneratorsAreIndependent => "axis_aligned_generators_independent",
@@ -535,6 +542,8 @@ pub enum AnalyticPremise {
     /// The support surface is a `RevolutedCurve`, possibly under a
     /// `Processor`.
     SupportSurfaceIsARevolvedCurve,
+    /// The support surface is a sphere (`Processor<Sphere, Matrix4>`).
+    SupportSurfaceIsASphere,
     /// The support surface is a plane.
     SupportSurfaceIsAPlane,
     /// The revolved generatrix is a straight line.

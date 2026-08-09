@@ -6,6 +6,7 @@
 
 use super::diagnosis;
 use super::diagnosis::ObservedClosure;
+use super::domain::lattice::Axis;
 use super::domain::lattice::AxisPeriodStatus;
 use super::domain::lattice::CertifiedLattice;
 use super::formal;
@@ -1501,6 +1502,24 @@ where
                 }
             }
         }
+        // A closed edge's source extent may carry the closure arc beyond the
+        // interior knot span. Those samples are genuine boundary points only
+        // where the curve's basis is still a partition of unity; in the
+        // exporter's unclamped closure sliver it is not, and evaluating there
+        // invents the off-curve/origin endpoints P1 exists to remove. Sample
+        // the declared extent exactly when the basis certificate holds at its
+        // ends, and not otherwise -- the domain is `D_source_edge_use ∩
+        // D_basis_partition_of_unity`, never the bare declared range.
+        if edge.vertices.0 == edge.vertices.1 {
+            if let Some((rt0, rt1)) = curve.try_range_tuple() {
+                if rt0 < range.0 - 1.0e-12 && curve.basis_is_partition_of_unity(rt0) {
+                    range.0 = rt0;
+                }
+                if rt1 > range.1 + 1.0e-12 && curve.basis_is_partition_of_unity(rt1) {
+                    range.1 = rt1;
+                }
+            }
+        }
         let mut poly = PolylineCurve::from_curve(curve, range, tol);
         if poly.len() <= 2 && range.1 - range.0 > 1e-4 {
             let mut pts = Vec::new();
@@ -1770,11 +1789,15 @@ where
                 }
             }
         };
-        // A certified rejection -- intrinsic degenerate (FACE-VALIDITY) or
-        // singular-ambiguous (P2) -- is the one terminal state no recovery
-        // route may touch. `rejected` covers the pre-tessellation validity
-        // certificate; a P2 `RejectedAmbiguous` arrives as the lift's own
-        // failure reason, so the routes below gate on the union.
+        // A certified rejection -- intrinsic degenerate (FACE-VALIDITY) or a
+        // genuine source-level singular ambiguity -- is the one terminal state
+        // no recovery route may touch. `rejected` covers the pre-tessellation
+        // validity certificate. `RejectedAmbiguous` exists as a reason for a
+        // *certificate-backed* source ambiguity (two distinct source-consistent
+        // continuations); no production mechanism currently constructs one, so
+        // the P2 singular-transition analysis leaves the lift unresolved
+        // (`AmbiguousLift`) instead of emitting it. The union below is
+        // deliberately kept so a future genuine certificate is still terminal.
         let rejected_terminal = rejected
             || matches!(
                 failure,
@@ -4131,9 +4154,12 @@ impl PolyBoundaryPiece {
         // Audit A-ambient: periodicity now arrives as a descriptor whose type
         // distinguishes exact from accessor-only evidence. `declared_period`
         // is what this path read before, so the boundary is introduced with no
-        // semantic change; moving a site to `generator` is separate and must
-        // be measured on its own.
+        // semantic change. The P2 singular continuation and the P3b cap are
+        // theorem paths whose hypothesis is a *genuine* period: they consume
+        // the representation-derived generators, so an uncertified accessor
+        // value never silently certifies them.
         let (up, vp) = (lattice.declared_u_period(), lattice.declared_v_period());
+        let (up_gen, vp_gen) = (lattice.u_generator(), lattice.v_generator());
         let (urange, vrange) = surface.try_range_tuple();
         // How many polylines this bound is assembled from, and how long each
         // is. A bound winding twice is either fed two once-winding pieces --
@@ -4512,8 +4538,8 @@ impl PolyBoundaryPiece {
                                     match singular_transition_branch(
                                         surface,
                                         &sp,
-                                        up,
-                                        vp,
+                                        up_gen,
+                                        vp_gen,
                                         (u0, v0),
                                         previous_point,
                                         (ou, ov, opt_pt),
@@ -4562,10 +4588,20 @@ impl PolyBoundaryPiece {
                                             pending.push((resume_point, false, resume_tag));
                                             continue;
                                         }
-                                        SingularTransitionOutcome::CertifiedAmbiguous => {
-                                            return Err(
-                                                TessellationFailureReason::RejectedAmbiguous,
-                                            );
+                                        SingularTransitionOutcome::InsufficientEvidence => {
+                                            // This mechanism could not select a
+                                            // continuation. Negative evidence is
+                                            // not a source-level ambiguity
+                                            // certificate, so the lift falls
+                                            // through to the ordinary
+                                            // `AmbiguousLift` (unresolved), never
+                                            // to a `RejectedAmbiguous` rejection.
+                                            if lift_probe {
+                                                eprintln!(
+                                                    "P2_INSUFFICIENT_EVIDENCE step left \
+                                                     singular without a determined branch"
+                                                );
+                                            }
                                         }
                                         SingularTransitionOutcome::NotApplicable => {}
                                     }
@@ -5075,8 +5111,11 @@ const SINGULAR_HALF_PERIOD_TOL: f64 = 0.02;
 /// pole's own parameter, is the L1/L2 gate:
 ///
 /// - a uniquely determined continuation renders (recover and continue);
-/// - a singular transition whose incident geometry underdetermines the branch
-///   is a source-level ambiguity and becomes a `RejectedAmbiguous` certificate;
+/// - a singular transition whose incident geometry does not determine the
+///   branch leaves the lift unresolved -- the mechanism lacks positive
+///   evidence of a continuation, which is not a source-level ambiguity
+///   certificate (an ambiguity rejection would require constructing two
+///   distinct source-consistent continuations);
 /// - a transition that is not this mechanism leaves the lift unresolved.
 enum SingularTransitionOutcome {
     /// The branch is uniquely determined by the leaving edge's plane. Resume
@@ -5087,9 +5126,12 @@ enum SingularTransitionOutcome {
         pole_point: Point3,
         resume_point: Point3,
     },
-    /// The singular transition underdetermines the continuation: a certified
-    /// source-level `RejectedAmbiguous` outcome.
-    CertifiedAmbiguous,
+    /// The mechanism could not determine a continuation (the leaving edge's
+    /// own first sample is a pole, or no usable leaving sample exists). This
+    /// is negative evidence about this mechanism only: it proves "no
+    /// continuation could be selected here", never "the source admits two
+    /// distinct continuations". The lift stays unresolved.
+    InsufficientEvidence,
     /// Not a recoverable singular periodic transition; leave the lift
     /// unresolved.
     NotApplicable,
@@ -5121,6 +5163,13 @@ impl LongitudeAxis {
 /// recover the *incoming* longitude: the branch is selected as the period copy
 /// of the outgoing longitude nearest the already-lifted incoming longitude,
 /// never from the pole's own (arbitrary) coordinate.
+///
+/// The gate never certifies a source-level ambiguity. A continuation is either
+/// determined by the oriented incident geometry (`Continue`), or it is not;
+/// in the latter case the lift stays unresolved (`InsufficientEvidence` /
+/// `NotApplicable`). "This mechanism cannot select a continuation" is not a
+/// certificate that the STEP source admits two distinct continuations, and it
+/// must never become a `RejectedAmbiguous` rejection.
 fn singular_transition_branch<S>(
     surface: &S,
     sp: &impl SP<S>,
@@ -5172,8 +5221,10 @@ where
             if collapsed_axis(ou, ov).is_some() {
                 // The leaving edge's own first sample is also a pole, so its
                 // longitude is undefined and the plane does not determine a
-                // unique continuation. Source-level singular ambiguity.
-                return SingularTransitionOutcome::CertifiedAmbiguous;
+                // continuation here. That is negative evidence about this
+                // mechanism, not a proof that the source admits two distinct
+                // continuations -- leave the lift unresolved.
+                return SingularTransitionOutcome::InsufficientEvidence;
             }
             let outgoing = axis.coordinate(Point2::new(ou, ov));
             let Some(incoming) = incoming_longitude(axis) else {
@@ -5196,7 +5247,10 @@ where
                 let pole_idx = bdry3d.iter().position(|p| p.distance(opt_pt) < 1.0e-3);
                 let leaving = pole_idx.and_then(|i| bdry3d.get(i + 1).copied());
                 let Some(leaving_pt) = leaving else {
-                    return SingularTransitionOutcome::CertifiedAmbiguous;
+                    // No usable leaving sample ahead; insufficient evidence for
+                    // this mechanism to select a continuation. Unresolved, not
+                    // certified ambiguous.
+                    return SingularTransitionOutcome::InsufficientEvidence;
                 };
                 // The leaving edge's first non-pole sample; the closed-form
                 // inverse fixes its longitude.
@@ -5205,7 +5259,10 @@ where
                     None => return SingularTransitionOutcome::NotApplicable,
                 };
                 if collapsed_axis(lu, lv).is_some() {
-                    return SingularTransitionOutcome::CertifiedAmbiguous;
+                    // The leaving sample is itself a pole; its longitude is
+                    // undefined, so no branch is determined. Insufficient
+                    // evidence for this mechanism, not a source ambiguity.
+                    return SingularTransitionOutcome::InsufficientEvidence;
                 }
                 let outgoing = axis.coordinate(Point2::new(lu, lv));
                 // The step's start is the already-lifted incoming longitude.
@@ -5949,9 +6006,13 @@ impl PeriodicCapClosure {
             [0, kv] if kv.abs() == 1 => (PeriodicAxis::V, kv),
             _ => return None,
         };
+        // The cap theorem's H1 is a *genuine* period. Only a representation-
+        // derived generator qualifies; a declared-but-uncertified accessor
+        // value does not establish it, so such a surface does not get a
+        // certified cap here (it stays on the candidate/legacy paths).
         let period = match p_axis {
-            PeriodicAxis::U => lattice.declared_u_period()?,
-            PeriodicAxis::V => lattice.declared_v_period()?,
+            PeriodicAxis::U => lattice.u_generator()?,
+            PeriodicAxis::V => lattice.v_generator()?,
         };
         // 2. The chart image must be a 1D line: zero signed area, and the
         //    non-periodic coordinate essentially constant across the loop.
@@ -7848,16 +7909,22 @@ pub enum TessellationFailureReason {
     /// failure: the census must classify it as `rejected_intrinsic`, never as
     /// a mesh or as an unexplained loss.
     RejectedDegenerate,
-    /// The face was certified singular-ambiguous: a rank-deficient periodic
-    /// transition (a sphere pole) where the oriented incident source geometry
-    /// does not determine a unique continuation, so the lift branch is a
-    /// *source-level* ambiguity rather than a numerical one.
+    /// The face was certified singular-ambiguous: the oriented incident source
+    /// geometry admits two *distinct source-consistent* continuations, and the
+    /// certificate carries positive evidence for both. This is the only
+    /// `Ambiguous` classification a face may carry: an ordinary
+    /// [`Self::AmbiguousLift`] is a tessellation outcome, not an ambiguity
+    /// certificate.
     ///
-    /// This is the only `Ambiguous` classification a face may carry: an
-    /// ordinary [`Self::AmbiguousLift`] is a tessellation outcome, not an
-    /// ambiguity certificate. Like [`Self::RejectedDegenerate`] this is a
-    /// terminal state no recovery route may touch; the certificate's
-    /// supporting evidence travels in the face diagnosis.
+    /// **No production mechanism currently emits this.** The P2 singular
+    /// transition analysis never constructs a second continuation: its
+    /// negative evidence ("this mechanism could not select a continuation")
+    /// proves nothing about the source, so it leaves the lift unresolved
+    /// (`AmbiguousLift`). The variant is retained as the target type for a
+    /// future certificate that *does* build two continuations. Like
+    /// [`Self::RejectedDegenerate`] this is a terminal state no recovery route
+    /// may touch; the certificate's supporting evidence travels in the face
+    /// diagnosis.
     RejectedAmbiguous,
     /// A constraint chain did not close. **Never constructed.**
     ConstraintChainNotClosed,
@@ -8894,6 +8961,14 @@ fn closed_spline_boundary_is_sampled_over_the_evaluable_knot_domain() {
     // The off-support extremes evaluate to the zero vector.
     assert!(curve.subs(-0.03125).to_vec().magnitude() < 1e-12);
     assert!(curve.subs(1.0625).to_vec().magnitude() < 1e-12);
+    // The basis certificate is the predicate behind `evaluation_range()`: it
+    // is a partition of unity on the interior span and a degenerate partial
+    // basis (or all-zero window) in the exporter's closure sliver.
+    assert!(curve.basis_is_partition_of_unity(0.0));
+    assert!(curve.basis_is_partition_of_unity(0.5));
+    assert!(curve.basis_is_partition_of_unity(1.0));
+    assert!(!curve.basis_is_partition_of_unity(-0.03125));
+    assert!(!curve.basis_is_partition_of_unity(1.0625));
     // Interior samples are genuinely on the curve.
     assert!(curve.subs(0.0).to_vec().magnitude() > 1.0);
     assert!(curve.subs(1.0).to_vec().magnitude() > 1.0);
@@ -8927,6 +9002,111 @@ fn closed_spline_boundary_is_sampled_over_the_evaluable_knot_domain() {
         bad.iter().any(|p| p.to_vec().magnitude() < 1e-9),
         "the pre-fix range must reproduce the off-support origin sample"
     );
+}
+
+/// A closed spline in the ABC `00007705` exporter convention: unclamped end
+/// knots (end multiplicity 2, interior multiplicity 1) whose knot vector
+/// extends symmetrically past the genuine loop, and a small closed control
+/// net. This is the corpus family that once "rendered" a basis-degenerate
+/// lens from the sliver. The basis certificate must keep the sampling domain
+/// on the interior span where the genuine (tiny) loop lives, never on the
+/// sliver.
+#[test]
+fn closed_spline_with_unclamped_ends_keeps_the_genuine_loop_and_rejects_the_sliver() {
+    use truck_geometry::prelude::ParametricCurve;
+    use truck_modeling::{BSplineCurve, KnotVec};
+    let degree = 3;
+    // 37 distinct knots, uniform 0.03125 spacing, from -0.0625 to 1.0625.
+    let mut distinct = Vec::new();
+    for i in 0..=36 {
+        distinct.push(-0.0625 + i as f64 * 0.03125);
+    }
+    let mut knots = Vec::new();
+    knots.push(distinct[0]);
+    knots.push(distinct[0]);
+    for k in distinct.iter().skip(1).take(35) {
+        knots.push(*k);
+    }
+    knots.push(distinct[36]);
+    knots.push(distinct[36]);
+    assert_eq!(knots.len(), 39);
+    let knot_vec = KnotVec::from(knots);
+    // A small closed control net: 32 points on a tiny loop around the vertex
+    // (radius ~0.06, in the xz-plane at y = 0.125), then the 3-point wrap.
+    let mut ctrl: Vec<Point3> = (0..32)
+        .map(|i| {
+            let a = i as f64 / 32.0 * std::f64::consts::TAU;
+            Point3::new(-1.54 + 0.06 * a.cos(), 0.125, -0.033 + 0.06 * a.sin())
+        })
+        .collect();
+    let wrap = ctrl[..degree].to_vec();
+    ctrl.extend_from_slice(&wrap);
+    assert_eq!(ctrl.len(), 35);
+    let curve = BSplineCurve::new(knot_vec, ctrl);
+
+    // The declared extent runs into the sliver; the evaluable support is the
+    // interior knot span where the basis is a partition of unity.
+    assert_eq!(curve.range_tuple(), (-0.0625, 1.0625));
+    assert_eq!(curve.evaluation_range(), (0.0, 1.0));
+    assert!((curve.range_tuple().1 - curve.range_tuple().0 - 1.125).abs() < 1e-12);
+
+    // The basis certificate: genuine on the interior span, degenerate in the
+    // exporter's closure sliver.
+    for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+        assert!(
+            curve.basis_is_partition_of_unity(t),
+            "interior {t} must be genuine"
+        );
+    }
+    assert!(!curve.basis_is_partition_of_unity(-0.0625));
+    assert!(!curve.basis_is_partition_of_unity(1.0625));
+    assert!(!curve.basis_is_partition_of_unity(-0.03));
+
+    // The sliver extremes evaluate to the origin (all-zero basis window).
+    assert!(curve.subs(-0.0625).to_vec().magnitude() < 1e-12);
+    assert!(curve.subs(1.0625).to_vec().magnitude() < 1e-12);
+
+    // The genuine loop closes over the interior span: both ends are the
+    // closure point on the small loop.
+    let (er0, er1) = curve.evaluation_range();
+    assert!(curve.subs(er0).distance(curve.subs(er1)) < 1e-9);
+
+    // The boundary polyline over the derived (evaluable) domain carries only
+    // the genuine tiny loop: every sample stays within the small control hull,
+    // none is the synthetic origin, and the loop closes.
+    let poly = PolylineCurve::from_curve(&curve, (er0, er1), 1e-3);
+    assert!(poly.len() > 4, "the genuine loop must not collapse");
+    assert!(
+        poly.iter().all(|p| p.to_vec().magnitude() > 1e-3),
+        "no boundary sample may be the synthetic origin"
+    );
+    assert!(
+        poly.iter()
+            .all(|p| p.distance(Point3::new(-1.54, 0.125, -0.033)) < 0.2),
+        "every genuine sample stays on the small loop, not a lens through the origin"
+    );
+
+    // Sampling the declared extent injects the origin endpoints the sliver
+    // produces -- the exact failure the sampling-domain policy must prevent.
+    let bad = PolylineCurve::from_curve(&curve, curve.range_tuple(), 1e-3);
+    assert!(
+        bad.iter().any(|p| p.to_vec().magnitude() < 1e-9),
+        "the declared range must reproduce the sliver origin sample"
+    );
+
+    // The derived sampling domain for a closed edge: extend the evaluable
+    // core into the declared extent only while the basis certificate holds.
+    // The sliver extremes fail the certificate, so the domain stays the
+    // interior span.
+    let mut derived = curve.evaluation_range();
+    let (rt0, rt1) = curve.range_tuple();
+    if rt0 < derived.0 - 1.0e-12 && curve.basis_is_partition_of_unity(rt0) {
+        derived.0 = rt0;
+    }
+    if rt1 > derived.1 + 1.0e-12 && curve.basis_is_partition_of_unity(rt1) {
+        derived.1 = rt1;
+    }
+    assert_eq!(derived, (er0, er1));
 }
 
 /*
@@ -12426,6 +12606,14 @@ mod sphere_pole_recovery_tests {
         Sphere::new(Point3::origin(), R)
     }
 
+    /// The certified lattice of the geometry sphere: azimuth (geometry-`v`) has
+    /// period `2π` by construction of the primitive; the polar axis has none.
+    /// The P2 continuation is a theorem path, so the tests drive it with the
+    /// certified generator rather than an unevidenced accessor value.
+    fn sphere_lattice() -> CertifiedLattice {
+        CertifiedLattice::sphere_azimuth(Axis::V)
+    }
+
     fn spt(u: f64, v: f64) -> Point3 {
         sphere().subs(u, v)
     }
@@ -12507,7 +12695,7 @@ mod sphere_pole_recovery_tests {
 
     fn lift(wire: Vec<SourcePolyline>) -> PolyBoundaryPiece {
         let s = sphere();
-        let lattice = unevidenced_lattice(&s);
+        let lattice = sphere_lattice();
         PolyBoundaryPiece::try_new(
             &s,
             wire.into_iter(),
@@ -12634,11 +12822,13 @@ mod sphere_pole_recovery_tests {
     }
 
     #[test]
-    fn underdetermined_leaving_edge_is_certified_ambiguous() {
+    fn underdetermined_leaving_edge_returns_unresolved_not_rejected() {
         // The step departs from the pole, but the leaving edge's own first
-        // sample is also the pole: its longitude is undefined, so the source
-        // geometry does not determine a unique continuation. That is the
-        // certificate case, never a render.
+        // sample is also the pole: its longitude is undefined, so this
+        // mechanism cannot determine a continuation. That is negative evidence
+        // about the mechanism only -- it does not prove the STEP source admits
+        // two distinct continuations, so the outcome must be UNRESOLVED
+        // (InsufficientEvidence), never a `RejectedAmbiguous` certificate.
         let s = sphere();
         let pole = spt(0.0, 0.0);
         let previous = (0.0, 0.0);
@@ -12655,8 +12845,8 @@ mod sphere_pole_recovery_tests {
             &[],
         );
         assert!(
-            matches!(outcome, SingularTransitionOutcome::CertifiedAmbiguous),
-            "an underdetermined pole continuation must carry the certificate",
+            matches!(outcome, SingularTransitionOutcome::InsufficientEvidence),
+            "an underdetermined pole continuation is unresolved, never rejected"
         );
     }
 
@@ -12668,7 +12858,7 @@ mod sphere_pole_recovery_tests {
         // tessellates. Kept ignored; the graduating tests live in
         // `periodic_cap_closure_tests`.
         let s = sphere();
-        let lattice = unevidenced_lattice(&s);
+        let lattice = sphere_lattice();
         let pts: Vec<SurfacePoint> = (0..=32)
             .map(|i| {
                 let v = (i as f64 / 32.0) * 2.0 * std::f64::consts::PI;
@@ -12701,6 +12891,19 @@ mod periodic_cap_closure_tests {
 
     fn sphere() -> truck_geometry::prelude::Sphere {
         truck_geometry::prelude::Sphere::new(Point3::origin(), R)
+    }
+
+    /// The certified lattice of the geometry sphere: azimuth (geometry-`v`) has
+    /// period `2π` by construction of the primitive. The cap theorem's H1 is a
+    /// genuine period, so the tests drive the cap with the certified generator.
+    fn sphere_lattice() -> CertifiedLattice {
+        CertifiedLattice::sphere_azimuth(Axis::V)
+    }
+
+    /// The certified lattice of an inverted sphere processor: the azimuth moves
+    /// to the caller's `u` axis.
+    fn sphere_lattice_inverted() -> CertifiedLattice {
+        CertifiedLattice::sphere_azimuth(Axis::U)
     }
 
     fn use_(bound: usize, index: usize, orientation: bool) -> SourceEdgeUse {
@@ -12751,11 +12954,11 @@ mod periodic_cap_closure_tests {
     fn assert_cap_mesh(
         surface: &impl PreMeshableSurface,
         piece: PolyBoundaryPiece,
+        lattice: CertifiedLattice,
         tol: f64,
         expect_floor: f64,
         expect_reach: f64,
     ) {
-        let lattice = unevidenced_lattice(surface);
         let boundary = PolyBoundary::new(vec![piece], surface, tol, &lattice);
         assert_eq!(
             boundary.0.len(),
@@ -12786,7 +12989,7 @@ mod periodic_cap_closure_tests {
     fn north_spherical_cap_renders() {
         let s = sphere();
         let piece = latitude_piece(&s, FRAC_PI_3, 1.0, false);
-        assert_cap_mesh(&s, piece, 0.05, 4.0, 9.0);
+        assert_cap_mesh(&s, piece, sphere_lattice(), 0.05, 4.0, 9.0);
     }
 
     /// South spherical cap: the same latitude circle traversed clockwise. The
@@ -12795,7 +12998,7 @@ mod periodic_cap_closure_tests {
     fn south_spherical_cap_renders() {
         let s = sphere();
         let piece = latitude_piece(&s, 2.0 * FRAC_PI_3, -1.0, false);
-        assert_cap_mesh(&s, piece, 0.05, -10.5, -6.0);
+        assert_cap_mesh(&s, piece, sphere_lattice(), 0.05, -10.5, -6.0);
     }
 
     /// Hemisphere / equator boundary: the equator is a limiting cap whose
@@ -12804,7 +13007,7 @@ mod periodic_cap_closure_tests {
     fn hemisphere_equator_boundary_renders() {
         let s = sphere();
         let piece = latitude_piece(&s, PI / 2.0, 1.0, false);
-        assert_cap_mesh(&s, piece, 0.05, -0.5, 9.0);
+        assert_cap_mesh(&s, piece, sphere_lattice(), 0.05, -0.5, 9.0);
     }
 
     /// Reversed traversal: the north cap walked clockwise selects the opposite
@@ -12814,7 +13017,7 @@ mod periodic_cap_closure_tests {
     fn reversed_traversal_selects_opposite_side() {
         let s = sphere();
         let piece = latitude_piece(&s, FRAC_PI_6, -1.0, false);
-        assert_cap_mesh(&s, piece, 0.05, -10.5, 8.0);
+        assert_cap_mesh(&s, piece, sphere_lattice(), 0.05, -10.5, 8.0);
     }
 
     /// Reversed face/surface orientation: the same counterclockwise walk on a
@@ -12839,7 +13042,14 @@ mod periodic_cap_closure_tests {
             })
             .collect();
         let piece = PolyBoundaryPiece::untagged(pts);
-        assert_cap_mesh(&processed, piece, 0.05, -10.5, 4.0);
+        assert_cap_mesh(
+            &processed,
+            piece,
+            sphere_lattice_inverted(),
+            0.05,
+            -10.5,
+            4.0,
+        );
     }
 
     /// |k|=0 ordinary spherical loop is untouched: a small non-degenerate
@@ -12848,7 +13058,7 @@ mod periodic_cap_closure_tests {
     #[test]
     fn ordinary_spherical_loop_is_unaffected() {
         let s = sphere();
-        let lattice = unevidenced_lattice(&s);
+        let lattice = sphere_lattice();
         // Three vertices spanning a genuine 2D chart region (varying both
         // colatitude and longitude), closed back on the start.
         let a = s.subs(FRAC_PI_3, 0.0);
@@ -12916,7 +13126,7 @@ mod periodic_cap_closure_tests {
     #[test]
     fn chart_closure_carries_no_source_identity_or_physical_role() {
         let s = sphere();
-        let lattice = unevidenced_lattice(&s);
+        let lattice = sphere_lattice();
         let piece = latitude_piece(&s, FRAC_PI_3, 1.0, true);
         let boundary = PolyBoundary::new(vec![piece], &s, 0.05, &lattice);
         let cell = &boundary.0[0];

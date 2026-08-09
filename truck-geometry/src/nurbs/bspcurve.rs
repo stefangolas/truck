@@ -419,6 +419,20 @@ impl<P: ControlPoint<f64>> BoundedCurve for BSplineCurve<P> {
             (knots[0], knots[n - 1])
         }
     }
+
+    #[inline(always)]
+    fn basis_is_partition_of_unity(&self, t: f64) -> bool {
+        let degree = self.degree();
+        let Ok(window) = self.knot_vec.try_bspline_basis_functions(degree, 0, t) else {
+            return false;
+        };
+        let values = window.as_slice();
+        if values.is_empty() {
+            return false;
+        }
+        let sum: f64 = values.iter().sum();
+        (sum - 1.0).abs() <= 1.0e-6
+    }
 }
 
 impl<P: ControlPoint<f64> + Tolerance> BSplineCurve<P> {

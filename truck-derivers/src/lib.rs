@@ -207,6 +207,7 @@ pub fn derive_bounded_curve(input: TokenStream) -> TokenStream {
                 variants, trait_name,
                 fn range_tuple(&self,) -> (f64, f64),
                 fn evaluation_range(&self,) -> (f64, f64),
+                fn basis_is_partition_of_unity(&self, t: f64) -> bool,
                 fn front(&self,) -> Self::Point,
                 fn back(&self,) -> Self::Point,
             };
@@ -238,6 +239,9 @@ pub fn derive_bounded_curve(input: TokenStream) -> TokenStream {
                         = <#field_type as truck_geotrait::ParametricCurve>::Point>, {
                     fn range_tuple(&self) -> (f64, f64) { self.0.range_tuple() }
                     fn evaluation_range(&self) -> (f64, f64) { self.0.evaluation_range() }
+                    fn basis_is_partition_of_unity(&self, t: f64) -> bool {
+                        self.0.basis_is_partition_of_unity(t)
+                    }
                     fn front(&self) -> Self::Point { self.0.front() }
                     fn back(&self) -> Self::Point { self.0.back() }
                 }
