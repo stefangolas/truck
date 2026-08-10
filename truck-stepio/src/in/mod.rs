@@ -147,6 +147,34 @@ pub struct Table {
     /// degrees necessarily also contains a radian `SI_UNIT` — referenced, not
     /// assigned. Ignoring that cost one wrong refusal before it was noticed.
     pub plane_angle_measures: HashMap<u64, (f64, Option<u64>)>,
+    /// `UNCERTAINTY_MEASURE_WITH_UNIT` by entity id, in the file's native
+    /// length units.
+    ///
+    /// The declared geometric-uncertainty of a shape's representation context:
+    /// "the maximum model space distance between geometric entities at asserted
+    /// connectivities". It is the tolerance under which the file asserts that a
+    /// source vertex lies on an edge-curve carrier. It is read in native units
+    /// because model coordinates are left in native units; converting the value
+    /// to millimetres while the geometry stays in inches would be wrong by the
+    /// same scale factor the rest of the importer deliberately ignores.
+    pub uncertainty_measures: HashMap<u64, f64>,
+    /// `GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT` complex entities, by context
+    /// entity id.
+    ///
+    /// A geometric representation context that assigns an uncertainty is the
+    /// complex entity
+    ///
+    /// ```text
+    /// #c = ( GEOMETRIC_REPRESENTATION_CONTEXT(3)
+    ///        GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#u))
+    ///        ... REPRESENTATION_CONTEXT('ctx', '3D') );
+    /// ```
+    ///
+    /// so the uncertainty belongs to the context entity, not to the
+    /// `REPRESENTATION_CONTEXT` record inside it. This map carries the
+    /// assignment so a shape representation can be resolved to its uncertainty
+    /// by way of its `context_of_items` reference.
+    pub global_uncertainty_assigned_contexts: HashMap<u64, Vec<u64>>,
 }
 
 /// A `PLANE_ANGLE_UNIT` declaration, reduced to what conversion needs.
@@ -874,6 +902,7 @@ impl Table {
             }
         }
         self.collect_plane_angle_unit(instance);
+        self.collect_geometric_uncertainty(instance);
         Ok(())
     }
 
@@ -926,6 +955,153 @@ impl Table {
                 }
             }
         }
+    }
+
+    /// Record the file's geometric-uncertainty declarations as they go past.
+    ///
+    /// Separate from the main dispatch above for the same reason the plane-angle
+    /// collector is: this is bookkeeping about how to read a number that other
+    /// entities reference, not an entity to convert.
+    fn collect_geometric_uncertainty(&mut self, instance: &EntityInstance) {
+        match instance {
+            EntityInstance::Simple { id, record } => {
+                // `UNCERTAINTY_MEASURE_WITH_UNIT(value, unit, name, description)`.
+                // The value is written either bare or inside a typed length
+                // measure -- both `#u=UNCERTAINTY_MEASURE_WITH_UNIT(1.0E-6, ...)`
+                // and `#u=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(0.005), ...)`
+                // occur in the wild -- and it is always in the model's native
+                // length unit.
+                if record.name == "UNCERTAINTY_MEASURE_WITH_UNIT" {
+                    if let Parameter::List(params) = &record.parameter {
+                        let value = params.first().and_then(|value| match value {
+                            Parameter::Real(value) => Some(*value),
+                            Parameter::Typed { parameter, .. } => match &**parameter {
+                                Parameter::Real(value) => Some(*value),
+                                _ => None,
+                            },
+                            _ => None,
+                        });
+                        if let Some(value) = value {
+                            self.uncertainty_measures.insert(*id, value);
+                        }
+                    }
+                }
+            }
+            EntityInstance::Complex {
+                id,
+                subsuper: SubSuperRecord(records),
+            } => {
+                // A `GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#u1, #u2, ...))` is a
+                // supertype of `REPRESENTATION_CONTEXT`, so a context that
+                // declares an uncertainty is a complex entity. The assignment
+                // record names the uncertainty measures; the value itself is a
+                // simple `UNCERTAINTY_MEASURE_WITH_UNIT` recorded above, and
+                // the two are joined by reference because entity order in the
+                // file is not a guarantee of anything.
+                for record in records {
+                    if record.name != "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT" {
+                        continue;
+                    }
+                    let mut measures = Vec::new();
+                    if let Parameter::List(params) = &record.parameter {
+                        for set in params {
+                            if let Parameter::List(members) = set {
+                                for member in members {
+                                    if let Parameter::Ref(Name::Entity(measure)) = member {
+                                        measures.push(*measure);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !measures.is_empty() {
+                        self.global_uncertainty_assigned_contexts
+                            .insert(*id, measures);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The declared geometric uncertainty of the shape representation that owns
+    /// `shell_id`, in the file's native length units.
+    ///
+    /// Resolves the chain
+    ///
+    /// ```text
+    /// shell → owning solid/shell model → shape representation
+    ///     → representation context → GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT
+    ///     → UNCERTAINTY_MEASURE_WITH_UNIT
+    /// ```
+    ///
+    /// and returns the first finite, positive value, or `None` when the shell is
+    /// not owned by any representation, the representation declares no
+    /// uncertainty, or the declared value is unusable. `None` is the honest
+    /// answer to "the source supplies no usable uncertainty" -- the caller then
+    /// falls back to its own numerical tolerance rather than inventing one.
+    pub fn source_geometric_uncertainty(&self, shell_id: u64) -> Option<f64> {
+        use PlaceHolder::Ref;
+        // The shell id is what the owning solid's `outer` (or a shell model's
+        // boundary) names. Find a solid or shell model that references it.
+        let solid_id = self
+            .manifold_solid_brep
+            .iter()
+            .find_map(|(&id, solid)| {
+                self.shell_entity_id(&solid.outer)
+                    .filter(|outer| *outer == shell_id)
+                    .map(|_| id)
+            })
+            .or_else(|| {
+                self.shell_based_surface_model
+                    .iter()
+                    .find_map(|(&id, model)| {
+                        model
+                            .sbsm_boundary
+                            .iter()
+                            .any(|boundary| {
+                                self.shell_entity_id(boundary)
+                                    .map_or(false, |b| b == shell_id)
+                            })
+                            .then_some(id)
+                    })
+            })?;
+        // The shape representation whose items name that solid or model.
+        let representation = self.shape_representation.values().find(|sr| {
+            sr.items.iter().any(|item| {
+                if let Ref(Name::Entity(item_id)) = item {
+                    *item_id == solid_id
+                } else {
+                    false
+                }
+            })
+        })?;
+        // The context the representation declares, resolved to an entity id.
+        let Ref(Name::Entity(context_id)) = &representation.context_of_items else {
+            return None;
+        };
+        // The uncertainty assigned to that context.
+        let measures = self.global_uncertainty_assigned_contexts.get(context_id)?;
+        measures.iter().find_map(|measure_id| {
+            let value = self.uncertainty_measures.get(measure_id)?;
+            value.is_finite().then_some(*value).filter(|v| *v > 0.0)
+        })
+    }
+
+    /// The entity id of the shell a solid's `outer` or a shell model's boundary
+    /// names, following an oriented-shell indirection when present.
+    fn shell_entity_id(&self, shell_any: &PlaceHolder<ShellAnyHolder>) -> Option<u64> {
+        use PlaceHolder::Ref;
+        let Ref(Name::Entity(id)) = shell_any else {
+            return None;
+        };
+        if self.shell.contains_key(id) {
+            return Some(*id);
+        }
+        let oriented = self.oriented_shell.get(id)?;
+        let Ref(Name::Entity(element)) = &oriented.shell_element else {
+            return None;
+        };
+        Some(*element)
     }
 
     /// Radians per unit for the angles in this file, or 1 if that is unknowable.
@@ -3679,5 +3855,109 @@ mod parameter_value_conversion_tests {
                 .abs()
                 < 1e-12
         );
+    }
+}
+
+#[cfg(test)]
+mod source_geometric_uncertainty_tests {
+    use super::*;
+
+    /// A single-solid table, hand-built exactly as the parser would fill it:
+    /// shell #5 owned by solid #4, representation #6 naming that solid and
+    /// declaring context #3, context #3 assigned uncertainty measure #2.
+    ///
+    /// Built by hand rather than parsed because the resolution logic is what is
+    /// under test; the real-file parsing is exercised by the corpus sweeps.
+    fn table_with_uncertainty() -> Table {
+        let mut table = Table::default();
+        table.shell.insert(
+            5,
+            ShellHolder {
+                label: String::new(),
+                cfs_faces: Vec::new(),
+            },
+        );
+        table.manifold_solid_brep.insert(
+            4,
+            ManifoldSolidBrepHolder {
+                label: String::new(),
+                outer: PlaceHolder::Ref(Name::Entity(5)),
+                voids: Vec::new(),
+            },
+        );
+        table.shape_representation.insert(
+            6,
+            ShapeRepresentationHolder {
+                name: String::new(),
+                items: vec![PlaceHolder::Ref(Name::Entity(4))],
+                context_of_items: PlaceHolder::Ref(Name::Entity(3)),
+            },
+        );
+        table.uncertainty_measures.insert(2, 5.0e-3);
+        table
+            .global_uncertainty_assigned_contexts
+            .insert(3, vec![2]);
+        table
+    }
+
+    /// The value the file declares is the value the shell's representation is
+    /// resolved to, in the file's native units.
+    #[test]
+    fn a_typed_length_uncertainty_resolves_to_its_value() {
+        let table = table_with_uncertainty();
+        let uncertainty = table.source_geometric_uncertainty(5);
+        assert_eq!(uncertainty, Some(5.0e-3));
+    }
+
+    /// The chain survives an oriented-shell indirection: a solid may name an
+    /// `ORIENTED_CLOSED_SHELL` rather than the shell directly.
+    #[test]
+    fn an_oriented_shell_reference_still_resolves() {
+        let mut table = table_with_uncertainty();
+        table.oriented_shell.insert(
+            40,
+            OrientedShellHolder {
+                label: String::new(),
+                shell_element: PlaceHolder::Ref(Name::Entity(5)),
+                orientation: true,
+            },
+        );
+        table.manifold_solid_brep.insert(
+            4,
+            ManifoldSolidBrepHolder {
+                label: String::new(),
+                outer: PlaceHolder::Ref(Name::Entity(40)),
+                voids: Vec::new(),
+            },
+        );
+        assert_eq!(table.source_geometric_uncertainty(5), Some(5.0e-3));
+    }
+
+    /// A shell that no representation owns has no applicable uncertainty: the
+    /// honest answer is `None`, not an invented number.
+    #[test]
+    fn an_owned_shell_without_a_declared_uncertainty_is_none() {
+        let mut table = table_with_uncertainty();
+        table.global_uncertainty_assigned_contexts.clear();
+        assert_eq!(table.source_geometric_uncertainty(5), None);
+    }
+
+    /// A shell that is not referenced by any solid or representation at all has
+    /// no applicable uncertainty either.
+    #[test]
+    fn an_unowned_shell_is_none() {
+        let table = table_with_uncertainty();
+        assert_eq!(table.source_geometric_uncertainty(999), None);
+    }
+
+    /// A declared uncertainty that is unusable (non-finite or non-positive) is
+    /// not passed on: the source supplied no usable value.
+    #[test]
+    fn a_non_positive_uncertainty_is_none() {
+        let mut table = table_with_uncertainty();
+        table.uncertainty_measures.insert(2, 0.0);
+        assert_eq!(table.source_geometric_uncertainty(5), None);
+        table.uncertainty_measures.insert(2, f64::NAN);
+        assert_eq!(table.source_geometric_uncertainty(5), None);
     }
 }

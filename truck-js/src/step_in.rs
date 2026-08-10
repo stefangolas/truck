@@ -46,7 +46,7 @@ impl Table {
     pub fn get_shape(&self, idx: u64) -> Option<ShapeFromStep> {
         let stepshell = self.shell.get(&idx)?;
         let shell = self
-            .to_compressed_shell(stepshell)
+            .to_compressed_shell(idx, stepshell)
             .map_err(|e| gloo::console::error!(format!("{e}")))
             .ok()?;
         Some(SubShapeFromStep::Shell(shell).into())

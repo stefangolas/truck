@@ -570,24 +570,30 @@ impl Table {
     /// // take one shell (this is only one shell)
     /// let step_shell = table.shell.values().next().unwrap();
     /// // convert STEP shell to `CompressedShell`
-    /// let cshell = table.to_compressed_shell(step_shell).unwrap();
+    /// let cshell = table.to_compressed_shell(0, step_shell).unwrap();
     /// // The cube has 6 faces!
     /// assert_eq!(cshell.faces.len(), 6);
     /// ```
     pub fn to_compressed_shell(
         &self,
+        shell_id: u64,
         shell: &impl StepShell,
     ) -> Result<CompressedShell<Point3, Curve3D, Surface>, StepConvertingError> {
-        shell.to_compressed_shell(self)
+        let mut cshell = shell.to_compressed_shell(self)?;
+        cshell.source_geometric_uncertainty = self.source_geometric_uncertainty(shell_id);
+        Ok(cshell)
     }
 
     /// As [`Self::to_compressed_shell`], and also why each lost face was lost.
     pub fn to_compressed_shell_with_losses(
         &self,
+        shell_id: u64,
         shell: &impl StepShell,
     ) -> Result<(CompressedShell<Point3, Curve3D, Surface>, Vec<FaceLoss>), StepConvertingError>
     {
-        shell.to_compressed_shell_with_losses(self)
+        let (mut cshell, losses) = shell.to_compressed_shell_with_losses(self)?;
+        cshell.source_geometric_uncertainty = self.source_geometric_uncertainty(shell_id);
+        Ok((cshell, losses))
     }
 
     /// Constructs `CompressedShell`s of `truck` from `ShellBasedSurfaceModel` in STEP file
@@ -601,9 +607,9 @@ impl Table {
                 return Err("failed to reference an element of `sbsm_boundary`".into());
             };
             if let Some(shell) = self.shell.get(idx) {
-                res.push(self.to_compressed_shell(shell)?);
+                res.push(self.to_compressed_shell(*idx, shell)?);
             } else if let Some(oriented_shell) = self.oriented_shell.get(idx) {
-                res.push(self.to_compressed_shell(oriented_shell)?);
+                res.push(self.to_compressed_shell(*idx, oriented_shell)?);
             } else {
                 return Err("failed to reference an element of `sbsm_boundary`".into());
             }
@@ -640,9 +646,9 @@ impl Table {
             return Err("failed to reference `solid.outer`".into());
         };
         let outer_shell = if let Some(step_shell) = self.shell.get(outer_idx) {
-            self.to_compressed_shell(step_shell)
+            self.to_compressed_shell(*outer_idx, step_shell)
         } else if let Some(step_shell) = self.oriented_shell.get(outer_idx) {
-            self.to_compressed_shell(step_shell)
+            self.to_compressed_shell(*outer_idx, step_shell)
         } else {
             Err("failed to reference `solid.outer`".into())
         }?;
@@ -654,7 +660,7 @@ impl Table {
             let Some(oriented_shell) = self.oriented_shell.get(outer_idx) else {
                 return Err("failed to reference an element of `solid.voids`".into());
             };
-            boundaries.push(self.to_compressed_shell(oriented_shell)?);
+            boundaries.push(self.to_compressed_shell(*outer_idx, oriented_shell)?);
         }
         Ok(CompressedSolid { boundaries })
     }
@@ -900,6 +906,10 @@ impl StepShell for ShellHolder {
                 vertices: vertices.into_items(),
                 edges: edges.into_items(),
                 faces,
+                // Set by `Table::to_compressed_shell(_with_losses)` from the
+                // shell's shape representation; the trait conversion itself has
+                // no shell id to resolve it against.
+                source_geometric_uncertainty: None,
             },
             losses,
         ))

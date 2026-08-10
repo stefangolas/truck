@@ -288,6 +288,19 @@ pub struct CompressedShell<P, C, S> {
     pub edges: Vec<CompressedEdge<C>>,
     /// all geometries and boundaries of faces
     pub faces: Vec<CompressedFace<S>>,
+    /// The geometric-uncertainty declared by the source representation that
+    /// owns this shell, in the source's native coordinate units.
+    ///
+    /// STEP declares it in the shape's geometric representation context
+    /// (`GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT` / `UNCERTAINTY_MEASURE_WITH_UNIT`),
+    /// and it is the tolerance under which the source asserts its connectivity
+    /// (vertex↔carrier incidence). It is semantic provenance, not a numerical
+    /// floor: a downstream consumer may use it to judge whether a source vertex
+    /// realizes a point on an edge-curve carrier, and must never replace it with
+    /// a generic epsilon. `None` when the source declares none, in which case a
+    /// consumer falls back to its own numerical tolerance.
+    #[serde(default)]
+    pub source_geometric_uncertainty: Option<f64>,
 }
 
 /// Serialized compressed solid
@@ -386,6 +399,12 @@ impl<P: Clone, C: Clone, S: Clone> Shell<P, C, S> {
             vertices,
             edges,
             faces,
+            // Compressing an in-memory `Shell` recovers no source
+            // representation, so no geometric uncertainty is claimed. Anything
+            // that round-trips through the editable `Shell` form loses the
+            // importer's provenance, exactly as `CompressedFace`'s provenance
+            // is lost; `None` states that rather than fabricating a number.
+            source_geometric_uncertainty: None,
         }
     }
 
@@ -395,6 +414,7 @@ impl<P: Clone, C: Clone, S: Clone> Shell<P, C, S> {
             vertices,
             edges,
             faces,
+            source_geometric_uncertainty: _,
         } = cshell;
         let vertices: Vec<_> = vertices.into_iter().map(Vertex::new).collect();
         let edges = edges

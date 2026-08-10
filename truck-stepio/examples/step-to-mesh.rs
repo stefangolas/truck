@@ -136,6 +136,7 @@ fn output_vtk(polyshells: Vec<MeshedCShell>, path: &Path) {
                  vertices,
                  edges,
                  faces,
+                 source_geometric_uncertainty: _,
              }| {
                 let faces = faces
                     .into_iter()
@@ -152,6 +153,7 @@ fn output_vtk(polyshells: Vec<MeshedCShell>, path: &Path) {
                     vertices,
                     edges,
                     faces,
+                    source_geometric_uncertainty: None,
                 }
                 .to_data_set() else {
                     unreachable!()

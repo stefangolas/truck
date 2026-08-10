@@ -34,6 +34,7 @@ fn test_split_closed_edges() {
         vertices,
         edges,
         faces,
+        source_geometric_uncertainty: None,
     };
     assert!(Shell::extract(shell.clone()).is_err());
 
@@ -44,6 +45,7 @@ fn test_split_closed_edges() {
         vertices,
         edges,
         faces,
+        source_geometric_uncertainty: _,
     } = &shell;
     assert_eq!(vertices.len(), 2);
     assert_near!(vertices[0], Point2::new(1.0, 0.0));
@@ -196,6 +198,7 @@ fn test_split_closed_face_simple_cylinder_case() {
         vertices,
         edges,
         faces,
+        source_geometric_uncertainty: None,
     };
 
     assert!(Shell::extract(shell.clone()).is_err());
@@ -207,6 +210,7 @@ fn test_split_closed_face_simple_cylinder_case() {
         ref vertices,
         ref edges,
         ref mut faces,
+        source_geometric_uncertainty: _,
     } = shell;
     assert_eq!(vertices.len(), 4);
     assert_eq!(edges.len(), 6);
@@ -462,6 +466,7 @@ fn test_split_closed_face_cylinder_with_hole() {
         vertices,
         edges,
         faces,
+        source_geometric_uncertainty: None,
     };
 
     assert!(Shell::extract(shell.clone()).is_err());
@@ -472,6 +477,7 @@ fn test_split_closed_face_cylinder_with_hole() {
         ref vertices,
         ref edges,
         ref mut faces,
+        source_geometric_uncertainty: _,
     } = shell;
     assert_eq!(vertices.len(), 6);
     assert_eq!(edges.len(), 9);
@@ -749,6 +755,7 @@ fn test_split_closed_face_cylinder_with_rotated_hole() {
         vertices,
         edges,
         faces,
+        source_geometric_uncertainty: None,
     };
 
     assert!(Shell::extract(shell.clone()).is_err());
@@ -759,6 +766,7 @@ fn test_split_closed_face_cylinder_with_rotated_hole() {
         ref vertices,
         ref edges,
         ref mut faces,
+        source_geometric_uncertainty: _,
     } = shell;
     assert_eq!(vertices.len(), 8);
     assert_eq!(edges.len(), 11);
@@ -959,6 +967,7 @@ fn too_simple_cylinder() {
         vertices,
         edges,
         faces,
+        source_geometric_uncertainty: None,
     };
 
     assert!(Shell::extract(shell.clone()).is_err());
@@ -970,6 +979,7 @@ fn too_simple_cylinder() {
         ref vertices,
         ref edges,
         ref mut faces,
+        source_geometric_uncertainty: _,
     } = shell;
 
     assert_eq!(vertices.len(), 4);
@@ -1192,6 +1202,7 @@ fn double_closed_boundary_cylinder() {
         vertices,
         edges,
         faces,
+        source_geometric_uncertainty: None,
     };
 
     assert!(Shell::extract(shell.clone()).is_err());
@@ -1203,6 +1214,7 @@ fn double_closed_boundary_cylinder() {
         ref vertices,
         ref edges,
         ref mut faces,
+        source_geometric_uncertainty: _,
     } = shell;
 
     assert_eq!(vertices.len(), 8);
@@ -1457,6 +1469,7 @@ fn many_closed_boundary_cylinder() {
         vertices,
         edges,
         faces,
+        source_geometric_uncertainty: None,
     };
 
     assert!(Shell::extract(shell.clone()).is_err());
@@ -1468,6 +1481,7 @@ fn many_closed_boundary_cylinder() {
         ref vertices,
         ref edges,
         ref mut faces,
+        source_geometric_uncertainty: _,
     } = shell;
 
     assert_eq!(vertices.len(), (2 + NUM_OF_CIRCLES) * 2);
@@ -1552,8 +1566,8 @@ fn step_import() {
         let path = [STEP_DIRECTORY, file_name].concat();
         let step_string = std::fs::read_to_string(path).unwrap();
         let table = Table::from_step(&step_string).unwrap();
-        table.shell.values().for_each(|step_shell| {
-            let mut cshell = table.to_compressed_shell(step_shell).unwrap();
+        table.shell.iter().for_each(|(&shell_id, step_shell)| {
+            let mut cshell = table.to_compressed_shell(shell_id, step_shell).unwrap();
             cshell.robust_split_closed_edges_and_faces(0.05);
             truck_topology::Shell::extract(cshell).unwrap();
         });

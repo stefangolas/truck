@@ -1058,7 +1058,7 @@ pub fn derive_projection_status(reason: TessellationFailureReason) -> ObservedPr
         R::BoundaryProjectionFailed | R::BoundaryPointOffSurface => {
             ObservedProjectionStatus::FailedTyped
         }
-        R::BoundaryWireEmpty | R::BoundaryConstructionFailed => {
+        R::BoundaryWireEmpty | R::BoundaryConstructionFailed | R::EdgeTraversalUnresolved => {
             ObservedProjectionStatus::Unavailable
         }
         _ => ObservedProjectionStatus::Successful,
@@ -1714,7 +1714,8 @@ fn derive_arr_signature(
         },
     };
     let failure_stage = match terminal_reason {
-        R::BoundaryProjectionFailed | R::BoundaryPointOffSurface | R::BoundaryWireEmpty => {
+        R::BoundaryProjectionFailed | R::BoundaryPointOffSurface | R::BoundaryWireEmpty
+        | R::EdgeTraversalUnresolved => {
             ArrFailureStage::BoundaryConstruction
         }
         R::AmbiguousLift => ArrFailureStage::LiftAmbiguous,

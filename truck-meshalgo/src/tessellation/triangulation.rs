@@ -1352,6 +1352,27 @@ where
     )
 }
 
+/// The outcome of tessellating one source edge.
+///
+/// Every edge is either sampled into a polyline, or had no certified source
+/// traversal. The latter is *not* an invalid edge and is *not* sampled over
+/// its evaluator domain: a closed source crescent sampled as a full loop
+/// re-emits the malformed boundary this abstraction exists to remove. A face
+/// whose boundary references an unresolved edge fails its boundary
+/// construction, which reaches the caller through the tessellation outcome
+/// mechanism as a named reason.
+enum EstablishedEdge {
+    /// The edge was sampled into a polyline.
+    Mesh(CompressedEdge<PolylineCurve>),
+    /// The edge's source traversal could not be established.
+    Unresolved {
+        /// The edge's source vertices, preserved for the meshed shell record.
+        vertices: (usize, usize),
+        /// A short stable reason tag.
+        reason: &'static str,
+    },
+}
+
 /// The one tessellation body every entry point above funnels into.
 #[allow(clippy::too_many_arguments)]
 fn cshell_tessellation_inner<'a, C, S>(
@@ -1445,6 +1466,17 @@ where
     // them. Assigned once per shell here, before the parallel face loop, so
     // every face of one shell shares it.
     let shell_ordinal = SHELL_ORDINAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // The source-incidence tolerance for this shell's edges. The STEP source
+    // uncertainty declared by the shape's geometric representation context is
+    // the authority for whether a source vertex realizes a point on its
+    // edge-curve carrier; Truck's fixed numerical tolerance is only the
+    // fallback for a source that declares none. The two remain distinct
+    // concepts: this value admits incidence residuals, it never merges root
+    // candidates or licenses a seam wrap (see `source_edge`).
+    let source_tolerance = shell
+        .source_geometric_uncertainty
+        .filter(|uncertainty| uncertainty.is_finite() && *uncertainty > 0.0)
+        .unwrap_or(source_edge::SOURCE_INCIDENCE_TOLERANCE);
     let tessellate_edge = |edge: &CompressedEdge<C>| {
         let curve = &edge.curve;
         let range = curve.range_tuple();
@@ -1496,6 +1528,47 @@ where
             );
         }
         let mut range = curve.evaluation_range();
+        // Establish which portion of the curve this topological edge actually
+        // denotes. The evaluator domain is the traversal only when the evidence
+        // says so; a closed source crescent with interior source vertices is
+        // sampled over its source interval instead, and a traversal that cannot
+        // be established is propagated as `Unresolved` rather than sampled as a
+        // whole loop.
+        let (start_pos, end_pos) = match (
+            vertices.as_slice().get(edge.vertices.0),
+            vertices.as_slice().get(edge.vertices.1),
+        ) {
+            (Some(start), Some(end)) => (*start, *end),
+            _ => {
+                return EstablishedEdge::Unresolved {
+                    vertices: edge.vertices,
+                    reason: "source_vertex_position_missing",
+                }
+            }
+        };
+        let traversal_verdict = source_edge::establish_source_edge_traversal(
+            curve,
+            start_pos,
+            end_pos,
+            edge.vertices.0 == edge.vertices.1,
+            source_tolerance,
+        );
+        range = match traversal_verdict {
+            source_edge::SourceEdgeTraversal::CanonicalByEvalRange { range } => range,
+            source_edge::SourceEdgeTraversal::CanonicalBySourceInterval { traversal, .. } => {
+                let poly = source_edge::sample_traversal(curve, &traversal, tol);
+                return EstablishedEdge::Mesh(CompressedEdge {
+                    vertices: edge.vertices,
+                    curve: poly,
+                });
+            }
+            source_edge::SourceEdgeTraversal::Unresolved { reason } => {
+                return EstablishedEdge::Unresolved {
+                    vertices: edge.vertices,
+                    reason,
+                };
+            }
+        };
         if edge.vertices.0 == edge.vertices.1 && (range.1 - range.0).abs() < 1e-4 {
             if let Some(period) = curve.period() {
                 if period > 1e-4 {
@@ -1531,15 +1604,15 @@ where
             }
             poly = PolylineCurve::from(pts);
         }
-        CompressedEdge {
+        EstablishedEdge::Mesh(CompressedEdge {
             vertices: edge.vertices,
             curve: poly,
-        }
+        })
     };
     #[cfg(not(target_arch = "wasm32"))]
-    let edges: Vec<_> = shell.edges.par_iter().map(tessellate_edge).collect();
+    let edges: Vec<EstablishedEdge> = shell.edges.par_iter().map(tessellate_edge).collect();
     #[cfg(target_arch = "wasm32")]
-    let edges: Vec<_> = shell.edges.iter().map(tessellate_edge).collect();
+    let edges: Vec<EstablishedEdge> = shell.edges.iter().map(tessellate_edge).collect();
     // Which surface in this shell does a face's own boundary actually lie on?
     //
     // A residual says the boundary and the surface it was handed are
@@ -1575,7 +1648,10 @@ where
                 .boundaries
                 .iter()
                 .flatten()
-                .filter_map(|e| edges.get(e.index))
+                .filter_map(|e| match edges.get(e.index) {
+                    Some(EstablishedEdge::Mesh(edge)) => Some(edge),
+                    _ => None,
+                })
                 .flat_map(|e| e.curve.iter().copied())
                 .step_by(3)
                 .take(8)
@@ -1640,7 +1716,10 @@ where
                 declared_face_index,
                 source_face_id,
                 face,
-                &edges,
+                // The source edge identities are preserved verbatim by
+                // `tessellate_edge`; the tessellated polyline carrier is not
+                // what this seam reads.
+                &shell.edges,
             );
             emit_evidence_probe(&input, source_face_id, declared_face_index, &lattice);
         }
@@ -1664,21 +1743,34 @@ where
             // `create_edge` produced it before, plus the synthetic source
             // identity `(BoundId(bound_index), use_index, orientation)` that is
             // the last cheap provenance this seam still has.
-            let wire_iter = wire.iter().enumerate().filter_map(|(use_index, edge_idx)| {
-                let curve = match edge_idx.orientation {
-                    true => edges.get(edge_idx.index)?.curve.clone(),
-                    false => edges.get(edge_idx.index)?.curve.inverse(),
+            //
+            // A wire that references an edge with no established source
+            // traversal fails the boundary outright: dropping that edge would
+            // let the remaining samples close over the missing arc, which is
+            // exactly the invented geometry `Unresolved` exists to refuse.
+            let mut wire_iter = Vec::with_capacity(wire.len());
+            for (use_index, edge_idx) in wire.iter().enumerate() {
+                let edge = match edges.get(edge_idx.index) {
+                    Some(EstablishedEdge::Mesh(edge)) => edge,
+                    Some(EstablishedEdge::Unresolved { .. }) => {
+                        return Err(TessellationFailureReason::EdgeTraversalUnresolved);
+                    }
+                    None => continue,
                 };
-                Some(SourcePolyline {
+                let curve = match edge_idx.orientation {
+                    true => edge.curve.clone(),
+                    false => edge.curve.inverse(),
+                };
+                wire_iter.push(SourcePolyline {
                     curve,
                     source: SourceEdgeUse {
                         bound,
                         index: use_index,
                         orientation: edge_idx.orientation,
                     },
-                })
-            });
-            PolyBoundaryPiece::try_new(surface, wire_iter, &sp, tol, &lattice)
+                });
+            }
+            PolyBoundaryPiece::try_new(surface, wire_iter.into_iter(), &sp, tol, &lattice)
         };
         let preboundary: std::result::Result<Vec<_>, _> =
             boundaries.iter().enumerate().map(create_boundary).collect();
@@ -2352,8 +2444,25 @@ where
     MeshedShellOutcome {
         shell: MeshedCShell {
             vertices,
-            edges,
+            // The meshed shell's edge record: polyline edges as sampled, and a
+            // deliberately empty polyline for an edge whose source traversal
+            // was not established. No face bound may reference the latter --
+            // boundary construction fails on it -- so the empty record never
+            // reaches a renderer.
+            edges: edges
+                .into_iter()
+                .map(|established| match established {
+                    EstablishedEdge::Mesh(edge) => edge,
+                    EstablishedEdge::Unresolved { vertices, .. } => CompressedEdge {
+                        vertices,
+                        curve: PolylineCurve::from(Vec::new()),
+                    },
+                })
+                .collect(),
             faces,
+            // The meshed shell is the same source representation as the input,
+            // so the declared geometric uncertainty is carried through.
+            source_geometric_uncertainty: shell.source_geometric_uncertainty,
         },
         face_failures,
         face_diagnoses,
@@ -8027,6 +8136,15 @@ pub enum TessellationFailureReason {
     BoundaryConstructionFailed,
     /// A bound contributed no points at all, so it cannot bound anything.
     BoundaryWireEmpty,
+    /// A boundary edge's source traversal could not be established, so the
+    /// face has no renderable boundary.
+    ///
+    /// Distinct from an invalid edge: the curve and the source vertices are
+    /// not known to contradict, only that no traversal is *certified*. The
+    /// edge is deliberately not sampled over its evaluator domain, because a
+    /// closed source crescent sampled as a whole loop would re-emit the
+    /// malformed boundary this outcome exists to refuse.
+    EdgeTraversalUnresolved,
     /// A boundary sample had no parameter on the face's own surface.
     BoundaryProjectionFailed,
     /// A boundary sample lay further from its own surface than the
