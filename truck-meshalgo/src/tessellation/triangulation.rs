@@ -5840,6 +5840,125 @@ fn record_two_loop_join(
     });
 }
 
+/// The number of distinct source edge uses a closed loop's segments reference.
+///
+/// A loop built from a single full-circle edge references exactly one source
+/// edge use; a loop that contains a genuine source seam (arcs + seam lines)
+/// references several. The count separates the two correspondence classes:
+/// a single-source full-period loop's parameterization origin is arbitrary,
+/// while a multi-source loop carries a source-established seam.
+fn distinct_source_edge_uses(loop_: &BoundaryLoop) -> usize {
+    let mut ids = rustc_hash::FxHashSet::default();
+    for seg in &loop_.source_uses {
+        for use_ in seg {
+            ids.insert((use_.bound.0, use_.index, use_.orientation));
+        }
+    }
+    ids.len()
+}
+
+/// Cyclically re-index loop 1 so its seam reference (the phase of its first
+/// sample, modulo the period) matches loop 0's.
+///
+/// The two bounds of a full 360° band are each a single self-closing circle
+/// edge whose parameterization origin is arbitrary: no source edge, vertex, or
+/// seam connects a specific point of one circle to a specific point of the
+/// other. The source therefore establishes no correspondence, and the correct
+/// one is geometric — points on the two loops that share the same periodic
+/// surface coordinate (v mod period) lie on a common generator (ruling) of the
+/// cylinder, and the straight segment between them lies exactly on the surface.
+/// Aligning the loops' seam references makes the two synthetic seam bridges
+/// these generator lines.
+///
+/// The re-index is a cyclic rotation of the sample array plus a periodic
+/// re-lift of the wrapped tail (each moved sample's uv is shifted by the
+/// loop's own displacement, which maps to the same 3D point on the periodic
+/// surface), so every realized boundary point is preserved exactly.
+///
+/// Gated to the single-source population: a multi-source loop's seam is
+/// source-established and must not be moved. Returns true when loop 1 was
+/// re-indexed.
+fn align_two_loop_phase(
+    loop0: &BoundaryLoop,
+    loop1: &mut BoundaryLoop,
+    loop1_displacement: [i64; 2],
+    lattice: &CertifiedLattice,
+) -> bool {
+    if distinct_source_edge_uses(loop0) != 1 || distinct_source_edge_uses(loop1) != 1 {
+        return false;
+    }
+    let (axis, period) = if loop1_displacement[1] != 0 {
+        (1usize, lattice.declared_v_period())
+    } else if loop1_displacement[0] != 0 {
+        (0usize, lattice.declared_u_period())
+    } else {
+        return false;
+    };
+    let Some(period) = period else {
+        return false;
+    };
+    let winding = if axis == 1 {
+        loop1_displacement[1]
+    } else {
+        loop1_displacement[0]
+    };
+    if winding.unsigned_abs() != 1 {
+        return false;
+    }
+    let n = loop1.points.len();
+    if n < 2 {
+        return false;
+    }
+    let distinct = n - 1;
+    let phase = |uv: Point2| if axis == 1 { uv.y } else { uv.x };
+    let target = phase(loop0.points[0].uv).rem_euclid(period);
+    let circular = |a: f64, b: f64| {
+        let d = (a - b).abs();
+        d.min(period - d)
+    };
+    let mut best = 0usize;
+    let mut best_d = f64::INFINITY;
+    for i in 0..distinct {
+        let d = circular(phase(loop1.points[i].uv).rem_euclid(period), target);
+        if d < best_d {
+            best_d = d;
+            best = i;
+        }
+    }
+    if best == 0 {
+        return false;
+    }
+    let disp_axis = phase(loop1.points[n - 1].uv) - phase(loop1.points[0].uv);
+    let mut points = Vec::with_capacity(n);
+    let mut origins = Vec::with_capacity(n);
+    let mut source_uses = Vec::with_capacity(n);
+    for i in 0..distinct {
+        let src = (best + i) % distinct;
+        let mut p = loop1.points[src];
+        if src < best {
+            if axis == 1 {
+                p.uv.y += disp_axis;
+            } else {
+                p.uv.x += disp_axis;
+            }
+        }
+        points.push(p);
+        origins.push(loop1.origins[src]);
+        source_uses.push(loop1.source_uses[src].clone());
+    }
+    let mut wrap = points[0];
+    if axis == 1 {
+        wrap.uv.y += disp_axis;
+    } else {
+        wrap.uv.x += disp_axis;
+    }
+    points.push(wrap);
+    origins.push(SegmentOrigin::Seam);
+    source_uses.push(Vec::new());
+    *loop1 = BoundaryLoop::new(points, origins, source_uses);
+    true
+}
+
 /// The parameter-space area below which a closed loop is treated as degenerate
 /// â€” a band's boundary circle, which encloses no area in the chart because it
 /// *is* a chart-crossing line.
@@ -6637,6 +6756,20 @@ impl PolyBoundary {
                         }
                     }
                 }
+                // PHASE-CORRESPONDENCE. For a band whose two bounds are each a
+                // single full-period circle edge, the source establishes no
+                // seam correspondence: neither the circle edges nor the
+                // placement ref directions connect a specific point of one
+                // circle to a specific point of the other. The correct
+                // correspondence is the surface's own generator structure —
+                // points with equal periodic coordinate v (mod period) lie on
+                // a common ruling, and the seam bridges must be rulings. The
+                // integer mean-translate above preserves the fractional phase
+                // residual (a π offset is irreducible by integer periods), so
+                // cyclically re-index loop1's samples so both loops share the
+                // same seam reference (mod period). This is a pure re-lift:
+                // every realized 3D point is preserved.
+                align_two_loop_phase(&loop0, &mut loop1, loop1_displacement, lattice);
                 // Both halves are source-derived, but joining a loop to a
                 // *reversed* loop introduces two segments that neither
                 // supplied: the jump from `loop0`'s end to `loop1`'s reversed
@@ -10722,11 +10855,261 @@ mod cone_topology_tests {
     }
 }
 
+/// PHASE-ALIGNMENT tests — the two-loop seam-reference correspondence.
+///
+/// The two bounds of a full 360° band are each a single self-closing circle
+/// edge whose parameterization origin is arbitrary: no source edge, vertex, or
+/// seam connects a specific point of one circle to a specific point of the
+/// other. The correct seam correspondence is the surface's own generator
+/// structure — points with equal periodic coordinate (v mod period) lie on a
+/// common ruling, and the synthetic seam bridges must be rulings. This module
+/// exercises `align_two_loop_phase`, which cyclically re-indexes a single-source
+/// full-period loop so both loops share the same seam reference.
+#[cfg(test)]
+mod phase_alignment_tests {
+    use super::*;
+    use std::f64::consts::PI;
+    use truck_modeling::{Line, Point2, Point3, RevolutedCurve, Vector3};
+
+    fn cylinder() -> RevolutedCurve<Line<Point3>> {
+        RevolutedCurve::by_revolution(
+            Line(Point3::new(10.0, 0.0, 0.0), Point3::new(10.0, 0.0, 10.0)),
+            Point3::origin(),
+            Vector3::unit_z(),
+        )
+    }
+
+    fn lattice(cyl: &RevolutedCurve<Line<Point3>>) -> CertifiedLattice {
+        unevidenced_lattice(cyl)
+    }
+
+    fn use_(bound: usize, index: usize) -> SourceEdgeUse {
+        SourceEdgeUse {
+            bound: BoundId(bound),
+            index,
+            orientation: true,
+        }
+    }
+
+    /// A single-source full-period circle loop on the cylinder at height `u`,
+    /// whose samples start at angular phase `phase0` (radians). `src` is the one
+    /// source edge use every segment carries (single-source gate).
+    fn circle_loop(
+        cyl: &RevolutedCurve<Line<Point3>>,
+        u: f64,
+        phase0: f64,
+        src: SourceEdgeUse,
+    ) -> BoundaryLoop {
+        let n = 32usize;
+        let points: Vec<SurfacePoint> = (0..=n)
+            .map(|i| {
+                let v = phase0 + (i as f64 / n as f64) * 2.0 * PI;
+                let uv = Point2::new(u, v);
+                (uv, cyl.subs(uv.x, uv.y)).into()
+            })
+            .collect();
+        let source_uses: Vec<SegmentSources> = (0..=n).map(|_| vec![src]).collect();
+        BoundaryLoop::periodic_source_walk(points, source_uses)
+    }
+
+    /// A loop whose segments alternately reference two source edge uses, so the
+    /// single-source gate must refuse to re-index it (the source seam is
+    /// established; correspondence is not free).
+    fn multi_source_loop(cyl: &RevolutedCurve<Line<Point3>>, u: f64, phase0: f64) -> BoundaryLoop {
+        let n = 32usize;
+        let points: Vec<SurfacePoint> = (0..=n)
+            .map(|i| {
+                let v = phase0 + (i as f64 / n as f64) * 2.0 * PI;
+                let uv = Point2::new(u, v);
+                (uv, cyl.subs(uv.x, uv.y)).into()
+            })
+            .collect();
+        let source_uses: Vec<SegmentSources> = (0..=n)
+            .map(|i| vec![if i % 2 == 0 { use_(0, 0) } else { use_(0, 1) }])
+            .collect();
+        BoundaryLoop::periodic_source_walk(points, source_uses)
+    }
+
+    fn v_phase(p: &SurfacePoint) -> f64 {
+        p.uv.y.rem_euclid(2.0 * PI)
+    }
+
+    /// The aligned phase after the join: both loops' start samples carry the
+    /// same phase mod 2π, so the seam bridges are generator lines.
+    #[test]
+    fn t2_half_period_loops_are_aligned() {
+        let cyl = cylinder();
+        let ltt = lattice(&cyl);
+        let loop0 = circle_loop(&cyl, 0.2, 0.0, use_(0, 0));
+        let mut loop1 = circle_loop(&cyl, 0.8, PI, use_(1, 0));
+        assert!(
+            align_two_loop_phase(&loop0, &mut loop1, [0, 1], &ltt),
+            "a half-period offset must be re-indexed"
+        );
+        assert!(
+            (v_phase(&loop1.points[0]) - v_phase(&loop0.points[0])).abs() < 1e-9,
+            "both loops must share the seam reference mod period: l0={} l1={}",
+            v_phase(&loop0.points[0]),
+            v_phase(&loop1.points[0]),
+        );
+    }
+
+    /// T1 — aligned full-period loops (phase offset 0) are not touched: the
+    /// function reports no re-index and the loops keep their start phases.
+    #[test]
+    fn t1_aligned_loops_are_unchanged() {
+        let cyl = cylinder();
+        let ltt = lattice(&cyl);
+        let loop0 = circle_loop(&cyl, 0.2, 0.0, use_(0, 0));
+        let mut loop1 = circle_loop(&cyl, 0.8, 0.0, use_(1, 0));
+        assert!(
+            !align_two_loop_phase(&loop0, &mut loop1, [0, 1], &ltt),
+            "an already-aligned loop must not be re-indexed"
+        );
+        assert_eq!(
+            v_phase(&loop1.points[0]),
+            0.0,
+            "the loop start phase is unchanged"
+        );
+    }
+
+    /// T3 — an arbitrary fractional start offset (period / 3) is aligned to the
+    /// nearest sample, so the residual phase is bounded by half a sample step.
+    #[test]
+    fn t3_fractional_start_is_aligned() {
+        let cyl = cylinder();
+        let ltt = lattice(&cyl);
+        let loop0 = circle_loop(&cyl, 0.2, 0.0, use_(0, 0));
+        let mut loop1 = circle_loop(&cyl, 0.8, 2.0 * PI / 3.0, use_(1, 0));
+        assert!(
+            align_two_loop_phase(&loop0, &mut loop1, [0, 1], &ltt),
+            "a fractional offset must be re-indexed"
+        );
+        let step = 2.0 * PI / 32.0;
+        let raw = (v_phase(&loop1.points[0]) - v_phase(&loop0.points[0])).abs();
+        let residual = raw.min(2.0 * PI - raw);
+        assert!(
+            residual < step / 2.0 + 1e-9,
+            "residual phase bounded by half a sample step: {residual}"
+        );
+    }
+
+    /// The re-index is a pure cyclic rotation plus a full-period re-lift, so the
+    /// multiset of realized 3D boundary samples on loop1 is preserved exactly:
+    /// no sample is added, dropped, or moved to a different 3D location. This is
+    /// the preservation invariant — the alignment changes only the arbitrary
+    /// cyclic starting index of the sampled full-period loop.
+    #[test]
+    fn reindexing_preserves_realized_samples() {
+        let cyl = cylinder();
+        let ltt = lattice(&cyl);
+        let loop0 = circle_loop(&cyl, 0.2, 0.0, use_(0, 0));
+        let mut loop1 = circle_loop(&cyl, 0.8, PI, use_(1, 0));
+        let before: Vec<Point3> = loop1.points.iter().map(|p| p.point).collect();
+        assert!(
+            align_two_loop_phase(&loop0, &mut loop1, [0, 1], &ltt),
+            "a half-period offset must be re-indexed"
+        );
+        let after: Vec<Point3> = loop1.points.iter().map(|p| p.point).collect();
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "no realized sample is added or dropped"
+        );
+        for p in &after {
+            assert!(
+                before.iter().any(|q| q.distance(*p) < 1e-9),
+                "every realized sample survives the re-index: {p:?}"
+            );
+        }
+    }
+
+    /// T5 — a multi-source loop carries a source-established seam and must not
+    /// be re-indexed: the function reports refusal.
+    #[test]
+    fn t5_multi_source_loop_is_not_reindexed() {
+        let cyl = cylinder();
+        let ltt = lattice(&cyl);
+        let loop0 = circle_loop(&cyl, 0.2, 0.0, use_(0, 0));
+        let mut loop1 = multi_source_loop(&cyl, 0.8, PI);
+        let before = loop1.points.clone();
+        assert!(
+            !align_two_loop_phase(&loop0, &mut loop1, [0, 1], &ltt),
+            "a multi-source loop must refuse re-indexing"
+        );
+        assert!(
+            loop1
+                .points
+                .iter()
+                .zip(&before)
+                .all(|(a, b)| a.uv == b.uv && a.point == b.point),
+            "the loop is byte-identical"
+        );
+    }
+
+    /// T4 — the alignment composes with the deck-consistent direction decision:
+    /// re-indexing does not change the loop displacement, so the two-loop join
+    /// still tessellates and the old bow-tie case stays fixed. The phase-aligned
+    /// band must tessellate to a non-empty mesh.
+    #[test]
+    fn t4_alignment_composes_with_deck_consistent() {
+        let cyl = cylinder();
+        let ltt = lattice(&cyl);
+        let pieces = vec![
+            PolyBoundaryPiece::untagged(
+                (0..=32)
+                    .map(|i| {
+                        let v = (i as f64 / 32.0) * 2.0 * PI;
+                        let uv = Point2::new(0.2, v);
+                        (uv, cyl.subs(uv.x, uv.y)).into()
+                    })
+                    .collect(),
+            ),
+            PolyBoundaryPiece::untagged(
+                (0..=32)
+                    .map(|i| {
+                        let v = PI + (i as f64 / 32.0) * 2.0 * PI;
+                        let uv = Point2::new(0.8, v);
+                        (uv, cyl.subs(uv.x, uv.y)).into()
+                    })
+                    .collect(),
+            ),
+        ];
+        let boundary = PolyBoundary::new(pieces, &cyl, 0.01, &ltt);
+        assert_eq!(boundary.0.len(), 1, "the join yields one closed loop");
+        let mesh = trimming_tessellation_result(&cyl, &boundary, 0.01, &ltt)
+            .expect("the phase-aligned band tessellates");
+        assert!(!mesh.tri_faces().is_empty(), "and produces triangles");
+    }
+
+    /// The mean-translate preserves the fractional phase residual (a π offset is
+    /// irreducible by integer periods), so the alignment must act after it — the
+    /// combined operation still aligns a half-period-offset loop.
+    #[test]
+    fn alignment_acts_after_integer_mean_translate() {
+        let cyl = cylinder();
+        let ltt = lattice(&cyl);
+        let loop0 = circle_loop(&cyl, 0.2, 0.0, use_(0, 0));
+        let mut loop1 = circle_loop(&cyl, 0.8, PI, use_(1, 0));
+        // Simulate an integer period translate that cannot remove the π residual.
+        for p in &mut loop1.points {
+            p.uv.y += 2.0 * PI;
+        }
+        assert!(
+            align_two_loop_phase(&loop0, &mut loop1, [0, 1], &ltt),
+            "the fractional residual is still aligned"
+        );
+        assert!(
+            (v_phase(&loop1.points[0]) - v_phase(&loop0.points[0])).abs() < 1e-9,
+            "both loops share the seam reference mod period"
+        );
+    }
+}
+
 #[cfg(test)]
 mod singular_transition_tests {
     use super::*;
     use truck_modeling::{Point2, Point3, Vector3};
-
     /// `v` collapses at `u = 1`: the whole `u = 1` row maps to the single
     /// point `(0, 1, 0)`, so every `(1, v)` is a legitimate UV representative
     /// of that one singular 3D point. This is the abstract shape of the
