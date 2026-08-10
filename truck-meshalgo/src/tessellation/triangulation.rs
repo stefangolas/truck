@@ -5796,11 +5796,11 @@ fn record_piece_deck(
 
 /// Record what the two-closed-loop join did to the deck sum.
 ///
-/// `Î£Î´áµ¢ = Î”_walk`, and `Î”_walk = 0` for a contractible regular boundary. The
-/// branch traverses loop 1 **reversed**, unconditionally, so the sum it
-/// realises is `Î´â‚€ âˆ’ Î´â‚`. `forward_would_close` is the discriminator: it is
-/// true exactly when the reversal is what broke the equation and traversing
-/// forward would satisfy it, which is the case package 1 is about.
+/// `Σδᵢ = Δ_walk`, and `Δ_walk = 0` for a contractible regular boundary. The
+/// join realises `δ₀ − δ₁` when it reverses loop 1 and `δ₀ + δ₁` when it
+/// traverses loop 1 forward; the deck equation decides which direction closes.
+/// `forward_would_close` is the discriminator: it is true exactly when the
+/// reversal is what broke the equation and traversing forward would satisfy it.
 fn record_two_loop_join(
     loop0_displacement: [i64; 2],
     loop1_displacement: [i64; 2],
@@ -5914,16 +5914,21 @@ fn working_range(
 /// How the two-closed-loop branch traverses the second loop.
 ///
 /// The branch has always reversed loop 1 unconditionally. For a quotient-closed
-/// boundary walk `Î£Î´áµ¢ = Î”_walk`, with `Î”_walk = 0` for a contractible regular
+/// boundary walk `Σδᵢ = Δ_walk`, with `Δ_walk = 0` for a contractible regular
 /// boundary, so the reversal is only correct when the two loops wind the *same*
-/// way. The two boundary circles of a band wind opposite â€” as they must, for
-/// the face boundary to be coherently oriented â€” and there the reversal makes
-/// `Î£Î´ = Â±2`, which is exactly the crossing the CDT then refuses.
+/// way. The two boundary circles of a band wind opposite — as they must, for
+/// the face boundary to be coherently oriented — and there the reversal makes
+/// `Σδ = ±2`, which is exactly the crossing the CDT then refuses.
+///
+/// [`PolyBoundary::new`] runs the two-loop join under [`Self::DeckConsistent`]:
+/// the primary rendered-face path chooses the loop-1 traversal from the deck
+/// equation. [`Self::Legacy`] is retained for the explicit legacy reference in
+/// tests and as the fallback semantics inside `DeckConsistent`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TwoLoopJoinPolicy {
     /// Reverse loop 1 unconditionally.
     Legacy,
-    /// Traverse loop 1 in whichever direction satisfies `Î£Î´ = 0`, and fall back
+    /// Traverse loop 1 in whichever direction satisfies `Σδ = 0`, and fall back
     /// to [`Self::Legacy`] when no direction does or both do. The equation is
     /// decidable, so this guesses nothing: a direction is chosen only when it
     /// is the unique solution.
@@ -6416,7 +6421,22 @@ impl PolyBoundary {
         tol: f64,
         lattice: &CertifiedLattice,
     ) -> Self {
-        Self::new_with_join(pieces, surface, tol, lattice, TwoLoopJoinPolicy::Legacy).0
+        // The primary rendered-face path resolves the two-loop join against the
+        // periodic deck equation rather than the legacy unconditional reversal.
+        // Reversing loop 1 unconditionally realises `δ₀ − δ₁`; for the two
+        // boundary circles of a band that is `±2` — the crossing seam bridge
+        // that PLANAR-C then planarizes into a chart-centre pivot and the
+        // radius-scale fan. The deck-consistent policy keeps the legacy
+        // reversal when it closes (`δ₀ = δ₁`) and takes forward traversal only
+        // when that is the unique solution (`δ₀ = −δ₁`).
+        Self::new_with_join(
+            pieces,
+            surface,
+            tol,
+            lattice,
+            TwoLoopJoinPolicy::DeckConsistent,
+        )
+        .0
     }
 
     fn new_with_join(
@@ -6574,11 +6594,12 @@ impl PolyBoundary {
             // ARR-SEAM W2: a valid non-degenerate deck pair must reach this
             // join too. The legacy area gate admits only the collapsed cohort;
             // under `DeckConsistent` the semantic predicate is that both loops
-            // are genuine deck walks (non-zero lattice displacement), which
-            // `PolyBoundary::new` never triggers because it passes `Legacy`.
-            // The legacy area condition stays the first disjunct so the primary
-            // path is byte-identical (INV-W2-1); the deck equation and its
-            // `Unresolved`/`Inconsistent` refusal are already computed below.
+            // are genuine deck walks (non-zero lattice displacement), which is
+            // what `PolyBoundary::new` now passes on the primary rendered-face
+            // path. The legacy area condition stays the first disjunct so the
+            // collapsed cohort is admitted under both policies; the deck
+            // equation and its `Unresolved`/`Inconsistent` refusal are already
+            // computed below.
             let deck_pair = join_policy == TwoLoopJoinPolicy::DeckConsistent
                 && closed_displacements[0] != [0, 0]
                 && closed_displacements[1] != [0, 0];
@@ -9784,11 +9805,21 @@ mod cone_topology_tests {
     /// its two crossing bridges are proper interior crossings, so
     /// `add_constraint_and_split` planarizes them instead of refusing, and the
     /// material region comes out identical to the corrected traversal.
+    ///
+    /// `PolyBoundary::new` now runs the join under `DeckConsistent` (the
+    /// primary rendered-face path), so the explicit `Legacy` reference is used
+    /// to demonstrate the planarized legacy traversal selects the same band.
     #[test]
     fn opposite_winding_band_tessellates_only_when_deck_consistent() {
         let (cylinder, pieces) = opposite_winding_band_pieces();
         let lattice = unevidenced_lattice(&cylinder);
-        let legacy = PolyBoundary::new(pieces.clone(), &cylinder, 0.01, &lattice);
+        let (legacy, _) = PolyBoundary::new_with_join(
+            pieces.clone(),
+            &cylinder,
+            0.01,
+            &lattice,
+            TwoLoopJoinPolicy::Legacy,
+        );
         let legacy_mesh = trimming_tessellation_result(&cylinder, &legacy, 0.01, &lattice)
             .expect("PLANAR-C planarizes the crossing bridges instead of refusing");
         let (corrected, _) = PolyBoundary::new_with_join(
@@ -10258,6 +10289,142 @@ mod cone_topology_tests {
             !mesh.faces().tri_faces().is_empty(),
             "and produces triangles",
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // BOW-TIE-ORIENTATION â€” the primary path resolves two-loop joins against
+    // the deck equation, so the synthetic seam bridges are the two non-crossing
+    // sides of the periodic chart.
+    // -----------------------------------------------------------------------
+
+    /// The two synthetic seam bridges of a joined loop, as UV segments.
+    ///
+    /// A two-loop join produces exactly two `Seam`-origin bridges (INV-W2-3);
+    /// this extracts them so a test can assert the chart-closure invariant:
+    /// the two bridges must not have a proper interior crossing.
+    fn joined_seam_bridges(boundary: &PolyBoundary) -> Vec<[(f64, f64); 2]> {
+        let mut bridges = Vec::new();
+        for loop_ in &boundary.0 {
+            let points = &loop_.points;
+            assert_eq!(points.len(), loop_.origins.len());
+            for (i, origin) in loop_.origins.iter().enumerate() {
+                if *origin == SegmentOrigin::Seam {
+                    let a = points[i].uv;
+                    let b = points[(i + 1) % points.len()].uv;
+                    bridges.push([(a.x, a.y), (b.x, b.y)]);
+                }
+            }
+        }
+        bridges
+    }
+
+    /// Whether two UV segments have a *proper* interior crossing: an
+    /// intersection point strictly inside both open segments. Shared endpoints
+    /// (the rectangle corners the two bridges legitimately share) and
+    /// collinear overlaps are not proper crossings.
+    fn segments_properly_cross(a: [(f64, f64); 2], b: [(f64, f64); 2]) -> bool {
+        let orient = |p: (f64, f64), q: (f64, f64), r: (f64, f64)| {
+            (q.0 - p.0) * (r.1 - p.1) - (q.1 - p.1) * (r.0 - p.0)
+        };
+        let d1 = orient(a[0], a[1], b[0]);
+        let d2 = orient(a[0], a[1], b[1]);
+        let d3 = orient(b[0], b[1], a[0]);
+        let d4 = orient(b[0], b[1], a[1]);
+        (d1 * d2 < 0.0) && (d3 * d4 < 0.0)
+    }
+
+    /// The chart-closure invariant: the two synthetic seam bridges of a joined
+    /// periodic band must be the two non-crossing sides of the chart, so no
+    /// proper interior crossing exists and no synthetic chart-centre vertex is
+    /// required. This is the assertion the bow-tie defect violates.
+    fn assert_seam_bridges_do_not_cross(boundary: &PolyBoundary) {
+        let bridges = joined_seam_bridges(boundary);
+        assert_eq!(
+            bridges.len(),
+            2,
+            "the join produces exactly two seam bridges"
+        );
+        assert!(
+            !segments_properly_cross(bridges[0], bridges[1]),
+            "the two synthetic seam bridges must not have a proper interior crossing \
+             (the bow-tie invariant): {bridges:?}",
+        );
+    }
+
+    /// Test A â€” the `(false, true)` / opposite-displacement population
+    /// (`loop0_disp=[0,1]`, `loop1_disp=[0,-1]`, the `ftc_08 #5921` class).
+    ///
+    /// The primary path must select the forward traversal (the unique deck
+    /// solution), so the bridges are the two rectangle sides rather than the
+    /// crossing diagonals, and no chart-centre synthetic vertex is required.
+    #[test]
+    fn opposite_displacement_primary_path_joins_without_crossing() {
+        let (cylinder, pieces) = opposite_winding_band_pieces();
+        let lattice = unevidenced_lattice(&cylinder);
+        let boundary = PolyBoundary::new(pieces, &cylinder, 0.01, &lattice);
+        assert_eq!(boundary.0.len(), 1, "the join yields one closed loop");
+        assert_seam_bridges_do_not_cross(&boundary);
+        let mesh = trimming_tessellation_result(&cylinder, &boundary, 0.01, &lattice)
+            .expect("the deck-consistent primary boundary tessellates");
+        assert!(!mesh.tri_faces().is_empty(), "and produces triangles");
+    }
+
+    /// Test B â€“ the `(true, false)` / same-displacement population
+    /// (`loop0_disp == loop1_disp`). The deck equation selects the reversed
+    /// traversal there, so the primary path must keep the legacy reversal and
+    /// the bridges must again be non-crossing.
+    #[test]
+    fn same_displacement_primary_path_joins_without_crossing() {
+        let cylinder = RevolutedCurve::by_revolution(
+            Line(Point3::new(10.0, 0.0, 0.0), Point3::new(10.0, 0.0, 10.0)),
+            Point3::origin(),
+            Vector3::unit_z(),
+        );
+        let circle = |u: f64| -> PolyBoundaryPiece {
+            PolyBoundaryPiece::untagged(
+                (0..=32)
+                    .map(|i| {
+                        let v = (i as f64 / 32.0) * 2.0 * PI;
+                        let uv = Point2::new(u, v);
+                        (uv, cylinder.subs(uv.x, uv.y)).into()
+                    })
+                    .collect(),
+            )
+        };
+        let lattice = unevidenced_lattice(&cylinder);
+        let boundary = PolyBoundary::new(vec![circle(0.2), circle(0.8)], &cylinder, 0.01, &lattice);
+        assert_eq!(boundary.0.len(), 1, "the join yields one closed loop");
+        assert_seam_bridges_do_not_cross(&boundary);
+        let mesh = trimming_tessellation_result(&cylinder, &boundary, 0.01, &lattice)
+            .expect("the same-displacement band tessellates");
+        assert!(!mesh.tri_faces().is_empty(), "and produces triangles");
+    }
+
+    /// Test C â€” a representative previously-correct two-loop join (the
+    /// non-degenerate deck pair) must keep its emitted boundary topology: the
+    /// primary path still resolves forward and the band still tessellates to a
+    /// non-empty mesh with exactly the two seam bridges.
+    #[test]
+    fn non_degenerate_band_primary_path_keeps_valid_topology() {
+        let (cylinder, pieces) = non_degenerate_band_pieces();
+        let lattice = unevidenced_lattice(&cylinder);
+        let boundary = PolyBoundary::new(pieces, &cylinder, 0.01, &lattice);
+        assert_eq!(boundary.0.len(), 1, "the join yields one closed loop");
+        assert_seam_bridges_do_not_cross(&boundary);
+        let mesh = trimming_tessellation_result(&cylinder, &boundary, 0.01, &lattice)
+            .expect("the non-degenerate deck pair tessellates");
+        assert!(!mesh.tri_faces().is_empty(), "and produces triangles");
+    }
+
+    /// Test D â€“ the invariant for a legitimate simple periodic two-loop band:
+    /// the two synthetic closure segments never have a proper interior
+    /// intersection, for both resolved orientation classes.
+    #[test]
+    fn seam_closure_segments_never_properly_cross() {
+        let (cylinder, opposite) = opposite_winding_band_pieces();
+        let boundary =
+            PolyBoundary::new(opposite, &cylinder, 0.01, &unevidenced_lattice(&cylinder));
+        assert_seam_bridges_do_not_cross(&boundary);
     }
 
     // -----------------------------------------------------------------------
