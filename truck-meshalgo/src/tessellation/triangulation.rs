@@ -50,6 +50,20 @@ std::thread_local! {
 
     static PROBE_FACE_CONTEXT: std::cell::Cell<(Option<u64>, usize, u8)> =
         const { std::cell::Cell::new((None, usize::MAX, 0)) };
+
+    /// Refinement support points: argmax-deviation sample UVs of unsafe
+    /// material triangles, collected by the outcome pass and consumed by the
+    /// refinement loop's next-pass CDT rebuild. Cleared per face per pass.
+    static REFINE_SUPPORT_CELL: std::cell::RefCell<Vec<Point2>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+
+    /// Refinement trajectory: the per-pass row the outcome pass records
+    /// (triangle count, unsafe count, max exact deviation, deviation excess
+    /// sum, worst-triangle provenance). The max-deviation field is the
+    /// acceptance functional the refinement loop decides on. Cleared per face
+    /// per pass.
+    static REFINE_TRAJECTORY: std::cell::RefCell<Vec<RefineTrajectoryRow>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 type MeshedShell = Shell<Point3, PolylineCurve, Option<PolygonMesh>>;
@@ -8402,55 +8416,209 @@ fn trimming_tessellation_with_diagnostics<S>(
 where
     S: PreMeshableSurface,
 {
-    let mut triangulation = Cdt::new();
-    let mut boundary_map = HashMap::<FixedVertexHandle, Point3>::default();
-    let mut vertex_sources = HashMap::<FixedVertexHandle, Vec<SourceEdgeUse>>::default();
-    let mut roles = ConstraintRoles::default();
-    if let Err(reason) = polyboundary.insert_to(
-        &mut triangulation,
-        &mut boundary_map,
-        &mut roles,
-        &mut vertex_sources,
-    ) {
-        return TessellationOutcome::Failed(reason.into());
-    }
-    let (samples_on_boundary, sampling_location_unresolved) =
-        insert_surface(&mut triangulation, surface, polyboundary, tol, &mut roles);
-    let outcome = triangulation_into_polymesh_outcome(
-        &triangulation,
-        surface,
-        polyboundary,
-        &boundary_map,
-        &roles,
-        &vertex_sources,
-        lattice,
-    );
-    if std::env::var_os("TRUCK_PROBE_ROLES").is_some() {
-        // The population sizes the A1 comparison rests on. `unresolved` is the
-        // honest gap: constraint edges the flood met that no `record` call had
-        // claimed, which keep their legacy toggling behaviour. A large number
-        // here would mean the experiment is less causal than it looks.
-        let count = |role| roles.recorded.get(&role).copied().unwrap_or(0);
-        let by_origin = |o| roles.origin_census.get(&o).copied().unwrap_or(0);
-        eprintln!(
-            "ROLES\tphysical={}\tsampling={}\tartificial={}\tnative={}\t\
-             unresolved_synth={}\tunresolved_at_flood={}\t\
-             samples_on_boundary={}\tsampling_location_unresolved={}\t\
-             origin_source={}\torigin_synthetic={}\torigin_seam={}",
-            count(ConstraintRole::PhysicalBoundary),
-            count(ConstraintRole::SurfaceSampling),
-            count(ConstraintRole::ArtificialCut),
-            count(ConstraintRole::NativeBoundary),
-            count(ConstraintRole::UnresolvedSyntheticClosure),
-            roles.unresolved_at_flood.get(),
-            samples_on_boundary,
-            sampling_location_unresolved,
-            by_origin(SegmentOrigin::Source),
-            by_origin(SegmentOrigin::SyntheticClosure),
-            by_origin(SegmentOrigin::Seam),
+    let refine = std::env::var_os("TRUCK_SGC_REFINE").is_some();
+    trimming_tessellation_with_refinement(surface, polyboundary, tol, lattice, refine)
+}
+
+/// The shared refinement body. `enable_refine` selects the CDT-aware refinement
+/// path; tests drive it directly with an explicit flag so the acceptance rule
+/// is exercised deterministically and in parallel, while production reads the
+/// env gate in [`trimming_tessellation_with_diagnostics`].
+fn trimming_tessellation_with_refinement<S>(
+    surface: &S,
+    polyboundary: &PolyBoundary,
+    tol: f64,
+    lattice: &CertifiedLattice,
+    refine_enabled: bool,
+) -> TessellationOutcome
+where
+    S: PreMeshableSurface,
+{
+    // CDT-aware refinement driven by the *maximum* sampled exact-surface
+    // deviation E(mesh) = max over material triangles of the surface-vs-flat
+    // deviation measured with exact S(uv) triangle corners.
+    //
+    // Acceptance theorem: a candidate mesh is retained only when it strictly
+    // reduces E below the current best by a small numerical-progress tolerance;
+    // refinement terminates as soon as E <= tolerance. `excess_sum`,
+    // `unsafe_count` and triangle count are diagnostics only — they never
+    // authorize a mesh. With `refine_enabled` false this is the ordinary single
+    // pass, byte-identical to the pre-refinement behavior.
+    const MAX_REFINE_PASSES: usize = 8;
+    // Numerical progress epsilon, not a geometric tuning parameter: only guards
+    // against accepting a pass whose max deviation did not actually move.
+    const E_PROGRESS: f64 = 1e-9;
+    let mut support_uvs: Vec<Point2> = Vec::new();
+    let mut best_outcome: Option<TessellationOutcome> = None;
+    let mut best_max_dev = f64::INFINITY;
+    let mut best_supports = 0usize;
+    let mut best_tris = 0usize;
+    let mut termination: &'static str = "max_passes";
+    for pass in 0..MAX_REFINE_PASSES {
+        let mut triangulation = Cdt::new();
+        let mut boundary_map = HashMap::<FixedVertexHandle, Point3>::default();
+        let mut vertex_sources = HashMap::<FixedVertexHandle, Vec<SourceEdgeUse>>::default();
+        let mut roles = ConstraintRoles::default();
+        if let Err(reason) = polyboundary.insert_to(
+            &mut triangulation,
+            &mut boundary_map,
+            &mut roles,
+            &mut vertex_sources,
+        ) {
+            return TessellationOutcome::Failed(reason.into());
+        }
+        REFINE_SUPPORT_CELL.with(|cell| cell.borrow_mut().clear());
+        REFINE_TRAJECTORY.with(|cell| cell.borrow_mut().clear());
+        let (samples_on_boundary, sampling_location_unresolved) = insert_surface(
+            &mut triangulation,
+            surface,
+            polyboundary,
+            tol,
+            &mut roles,
+            &support_uvs,
         );
+        let outcome = triangulation_into_polymesh_outcome(
+            &triangulation,
+            surface,
+            polyboundary,
+            &boundary_map,
+            &roles,
+            &vertex_sources,
+            lattice,
+            tol,
+            refine_enabled,
+        );
+        if !refine_enabled {
+            if std::env::var_os("TRUCK_PROBE_ROLES").is_some() {
+                // The population sizes the A1 comparison rests on. `unresolved`
+                // is the honest gap: constraint edges the flood met that no
+                // `record` call had claimed, which keep their legacy toggling
+                // behaviour. A large number here would mean the experiment is
+                // less causal than it looks.
+                let count = |role| roles.recorded.get(&role).copied().unwrap_or(0);
+                let by_origin = |o| roles.origin_census.get(&o).copied().unwrap_or(0);
+                eprintln!(
+                    "ROLES\tphysical={}\tsampling={}\tartificial={}\tnative={}\t\
+                     unresolved_synth={}\tunresolved_at_flood={}\t\
+                     samples_on_boundary={}\tsampling_location_unresolved={}\t\
+                     origin_source={}\torigin_synthetic={}\torigin_seam={}",
+                    count(ConstraintRole::PhysicalBoundary),
+                    count(ConstraintRole::SurfaceSampling),
+                    count(ConstraintRole::ArtificialCut),
+                    count(ConstraintRole::NativeBoundary),
+                    count(ConstraintRole::UnresolvedSyntheticClosure),
+                    roles.unresolved_at_flood.get(),
+                    samples_on_boundary,
+                    sampling_location_unresolved,
+                    by_origin(SegmentOrigin::Source),
+                    by_origin(SegmentOrigin::SyntheticClosure),
+                    by_origin(SegmentOrigin::Seam),
+                );
+            }
+            return outcome;
+        }
+        // The exact-surface max deviation of this pass's mesh, read from the
+        // trajectory the outcome pass recorded.
+        let row = REFINE_TRAJECTORY.with(|cell| cell.borrow().first().cloned());
+        let face = PROBE_FACE_CONTEXT.with(std::cell::Cell::get).0;
+        let max_dev = row.as_ref().map(|r| r.max_dev).unwrap_or(f64::INFINITY);
+        let tris = row.as_ref().map(|r| r.triangles).unwrap_or(0);
+        let excess = row.as_ref().map(|r| r.excess_sum).unwrap_or(0.0);
+        let unsafe_count = row.as_ref().map(|r| r.unsafe_count).unwrap_or(0);
+        if std::env::var_os("TRUCK_SGC_REFINE_TRACE").is_some() {
+            eprintln!(
+                "REFINE_PASS\tface={face:?}\tpass={pass}\ttris={tris}\tunsafe={unsafe_count}\tmax_dev={max_dev:.6}\texcess_sum={excess:.6}\tsupports={}",
+                support_uvs.len(),
+            );
+        }
+        let candidate_acceptable = matches!(outcome, TessellationOutcome::Mesh(_))
+            && max_dev.is_finite()
+            && max_dev < best_max_dev - E_PROGRESS;
+        if best_outcome.is_none() {
+            // Pass 0 is the ordinary mesh; it is the incumbent regardless of
+            // whether it satisfies tolerance (a face that cannot be improved
+            // returns it unchanged).
+            best_max_dev = max_dev;
+            best_outcome = Some(outcome);
+            best_supports = support_uvs.len();
+            best_tris = tris;
+            if !candidate_acceptable {
+                termination = "no_mesh_at_pass0";
+                break;
+            }
+            if max_dev <= tol {
+                termination = "tolerance_met_at_pass0";
+                break;
+            }
+        } else if candidate_acceptable {
+            best_max_dev = max_dev;
+            best_outcome = Some(outcome);
+            best_supports = support_uvs.len();
+            best_tris = tris;
+            if max_dev <= tol {
+                termination = "tolerance_met";
+                if std::env::var_os("TRUCK_SGC_REFINE_TRACE").is_some() {
+                    eprintln!(
+                        "REFINE_DONE\tface={face:?}\tpass={pass}\tmax_dev={max_dev:.6}\ttol={tol:.6}"
+                    );
+                }
+                break;
+            }
+        } else {
+            termination = "no_strict_progress";
+            if std::env::var_os("TRUCK_SGC_REFINE_TRACE").is_some() {
+                eprintln!(
+                    "REFINE_REJECT\tface={face:?}\tpass={pass}\tmax_dev={max_dev:.6}\tbest={best_max_dev:.6}\ttol={tol:.6}"
+                );
+            }
+            break;
+        }
+        let new_supports = REFINE_SUPPORT_CELL.with(|cell| cell.borrow().clone());
+        if new_supports.is_empty() {
+            termination = "no_supports_offered";
+            break;
+        }
+        if pass + 1 >= MAX_REFINE_PASSES {
+            termination = "pass_cap";
+            if std::env::var_os("TRUCK_SGC_REFINE_TRACE").is_some() {
+                eprintln!(
+                    "REFINE_CAP\tface={face:?}\tpasses={}\tsupports={}",
+                    pass + 1,
+                    support_uvs.len(),
+                );
+            }
+            break;
+        }
+        let before = support_uvs.len();
+        for sp in new_supports {
+            if !support_uvs.iter().any(|x| (x - sp).magnitude() < 1e-9) {
+                support_uvs.push(sp);
+            }
+        }
+        if support_uvs.len() == before {
+            termination = "support_stall";
+            if std::env::var_os("TRUCK_SGC_REFINE_TRACE").is_some() {
+                eprintln!(
+                    "REFINE_STALL\tface={face:?}\tpass={pass}\tsupports={}\tno_new_supports",
+                    support_uvs.len(),
+                );
+            }
+            break;
+        }
     }
-    outcome
+    if std::env::var_os("TRUCK_SGC_REFINE_TRACE").is_some() {
+        if let Some(outcome) = &best_outcome {
+            if matches!(outcome, TessellationOutcome::Mesh(_)) {
+                eprintln!(
+                    "REFINE_ACCEPT\tface={:?}\tmax_dev={best_max_dev:.6}\ttol={tol:.6}\ttris={best_tris}\tsupports={best_supports}\ttermination={termination}",
+                    PROBE_FACE_CONTEXT.with(std::cell::Cell::get).0,
+                );
+            }
+        }
+    }
+    best_outcome.unwrap_or_else(|| {
+        TessellationOutcome::Failed(TessellationFailureReason::BoundaryConstructionFailed.into())
+    })
 }
 
 /// Tessellates one surface trimmed by polyline, returning `TessellationOutcome`.
@@ -8527,6 +8695,7 @@ fn insert_surface(
     polyline: &PolyBoundary,
     tol: f64,
     roles: &mut ConstraintRoles,
+    extra_supports: &[Point2],
 ) -> (usize, usize) {
     // Grid samples on a boundary segment, by direct test.
     let mut on_boundary = 0usize;
@@ -8590,6 +8759,33 @@ fn insert_surface(
                 .collect()
         })
         .collect();
+    // Insert refinement support points as interior vertices, gated by `Inside`
+    // exactly like the grid samples. Each support is the argmax-deviation
+    // sample of a previously-unsafe material triangle; after insertion the
+    // Delaunay triangulation reconnects to it, splitting the offending flat
+    // span. No constraint is added for a support vertex; it is a pure Steiner
+    // point that owns no parity role.
+    let mut support_inserted = 0usize;
+    for &sp in extra_supports {
+        match polyline.locate(sp) {
+            PointLocation::Inside => {
+                if triangulation.insert(SPoint2::new(sp.x, sp.y)).is_ok() {
+                    support_inserted += 1;
+                }
+            }
+            PointLocation::Outside => {}
+            PointLocation::Boundary => on_boundary += 1,
+            PointLocation::Indeterminate => location_unresolved += 1,
+        }
+    }
+    if support_inserted > 0 && std::env::var_os("TRUCK_SGC_REFINE_TRACE").is_some() {
+        eprintln!(
+            "REFINE\tface={:?}\tsupports_offered={}\tsupports_inserted={}",
+            PROBE_FACE_CONTEXT.with(std::cell::Cell::get).0,
+            extra_supports.len(),
+            support_inserted,
+        );
+    }
     // A boundary carrying a [`SegmentOrigin::Seam`] is periodic/lifted deck
     // geometry: its seam and source edges are duplicate traversals of the same
     // curve, and the grid wiring's boundary vertices would split those edges,
@@ -9063,6 +9259,8 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
     roles: &ConstraintRoles,
     vertex_sources: &HashMap<FixedVertexHandle, Vec<SourceEdgeUse>>,
     lattice: &CertifiedLattice,
+    tol: f64,
+    refine: bool,
 ) -> TessellationOutcome {
     use std::collections::HashMap as StdHashMap;
 
@@ -9231,6 +9429,85 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
         })
         .collect();
 
+    // Collect the argmax-deviation sample UV of every material triangle whose
+    // *exact-surface* sampled deviation exceeds the face tolerance. The
+    // exact-surface estimator evaluates the flat triangle with its corners
+    // taken as the true surface points `S(uv)`, so only genuine CDT
+    // curvature-bypass activates refinement; boundary-realization error (coarse
+    // trim polyline vertices) is invisible to it. The caller uses these as
+    // interior support points for a subsequent CDT rebuild. No-op when `refine`
+    // is false.
+    if refine {
+        let mut collected = 0usize;
+        let mut max_dev_any = 0.0f64;
+        let mut excess_sum = 0.0f64;
+        let mut worst_prov: Option<(&VertexMetadata, &VertexMetadata, &VertexMetadata)> = None;
+        const MAX_REFINE_COLLECT: usize = 1 << 10;
+        for &[i0, i1, i2] in &tri_faces_raw {
+            let uv_a = Point2::new(uv_coords[i0].x, uv_coords[i0].y);
+            let uv_b = Point2::new(uv_coords[i1].x, uv_coords[i1].y);
+            let uv_c = Point2::new(uv_coords[i2].x, uv_coords[i2].y);
+            let (dev, argmax) = triangle_sampled_deviation_exact(surface, uv_a, uv_b, uv_c);
+            if dev > max_dev_any {
+                max_dev_any = dev;
+                worst_prov = Some((
+                    &vertex_metadata[i0],
+                    &vertex_metadata[i1],
+                    &vertex_metadata[i2],
+                ));
+            }
+            if dev > tol {
+                excess_sum += dev - tol;
+                if collected < MAX_REFINE_COLLECT {
+                    REFINE_SUPPORT_CELL.with(|cell| cell.borrow_mut().push(argmax));
+                    collected += 1;
+                }
+            }
+        }
+        let (worst_seam, worst_singular, worst_boundary) = match worst_prov {
+            Some((a, b, c)) => {
+                let has = |r: &VertexMetadata, bit: u16| r.roles.contains(bit);
+                (
+                    has(a, VertexRoles::ARTIFICIAL_SEAM)
+                        || has(b, VertexRoles::ARTIFICIAL_SEAM)
+                        || has(c, VertexRoles::ARTIFICIAL_SEAM),
+                    has(a, VertexRoles::SINGULAR_COLLAPSE)
+                        || has(b, VertexRoles::SINGULAR_COLLAPSE)
+                        || has(c, VertexRoles::SINGULAR_COLLAPSE),
+                    has(a, VertexRoles::PHYSICAL_BOUNDARY)
+                        || has(b, VertexRoles::PHYSICAL_BOUNDARY)
+                        || has(c, VertexRoles::PHYSICAL_BOUNDARY),
+                )
+            }
+            None => (false, false, false),
+        };
+        REFINE_TRAJECTORY.with(|cell| {
+            cell.borrow_mut().push(RefineTrajectoryRow {
+                triangles: tri_faces_raw.len(),
+                unsafe_count: collected,
+                max_dev: max_dev_any,
+                excess_sum,
+                worst_seam,
+                worst_singular,
+                worst_boundary,
+            });
+        });
+        if std::env::var_os("TRUCK_SGC_REFINE_TRACE").is_some() {
+            eprintln!(
+                "REFINE_SCAN\tface={:?}\tunsafe={}\ttol={:.6}\ttris={}\tmax_dev={:.6}\texcess_sum={:.6}\tworst_seam={}\tworst_sing={}\tworst_bnd={}",
+                PROBE_FACE_CONTEXT.with(std::cell::Cell::get).0,
+                collected,
+                tol,
+                tri_faces_raw.len(),
+                max_dev_any,
+                excess_sum,
+                worst_seam,
+                worst_singular,
+                worst_boundary,
+            );
+        }
+    }
+
     if diagnosis::diag_enabled() {
         diagnosis::record_cdt_stages(
             stage_raw_cdt_triangles,
@@ -9299,6 +9576,108 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
     })
 }
 
+/// Sampled surface-vs-flat deviation estimator for the material triangle
+/// realized at `(p_a, p_b, p_c)` with UV corners `(uv_a, uv_b, uv_c)`.
+///
+/// Samples the surface at the three edge midpoints and the barycenter, and for
+/// each sample measures the physical distance between the real surface point
+/// `S(q)` and the linear point in the realized triangle at the same UV
+/// barycentric weights. Returns `(max_dev, argmax_sample_uv)`.
+///
+/// This is a diagnostic estimator, not a general mathematical certificate.
+fn triangle_sampled_deviation<S: ParametricSurface3D>(
+    surface: &S,
+    uv_a: Point2,
+    uv_b: Point2,
+    uv_c: Point2,
+    p_a: Point3,
+    p_b: Point3,
+    p_c: Point3,
+) -> (f64, Point2) {
+    let corners = [(uv_a, p_a), (uv_b, p_b), (uv_c, p_c)];
+    sampled_deviation_impl(surface, &corners)
+}
+
+/// Same estimator, but the triangle corners are taken as the *exact* surface
+/// points `S(uv)` of the three UV corners rather than the realized mesh
+/// vertices. This isolates the CDT curvature-bypass component of the deviation:
+/// a triangle whose corners are exact surface points can only deviate if the
+/// flat CDT triangle spans genuine surface curvature. Boundary-realization
+/// error (coarse trim polyline vertices stored in `boundary_map`, which sit off
+/// the analytic surface) is invisible to this estimator, so a face limited only
+/// by boundary realization does not activate refinement.
+fn triangle_sampled_deviation_exact<S: ParametricSurface3D>(
+    surface: &S,
+    uv_a: Point2,
+    uv_b: Point2,
+    uv_c: Point2,
+) -> (f64, Point2) {
+    let corners = [
+        (uv_a, surface.subs(uv_a.x, uv_a.y)),
+        (uv_b, surface.subs(uv_b.x, uv_b.y)),
+        (uv_c, surface.subs(uv_c.x, uv_c.y)),
+    ];
+    sampled_deviation_impl(surface, &corners)
+}
+
+fn sampled_deviation_impl<S: ParametricSurface3D>(
+    surface: &S,
+    corners: &[(Point2, Point3); 3],
+) -> (f64, Point2) {
+    let (uv_a, p_a) = corners[0];
+    let (uv_b, p_b) = corners[1];
+    let (uv_c, p_c) = corners[2];
+    // Barycentric weights of `q` in the UV triangle `(a, b, c)`, via 2D
+    // cross-product areas. Returns `None` for a degenerate UV triangle.
+    let cross2 = |p: Vector2, q: Vector2| p.x * q.y - p.y * q.x;
+    let barycentric = |q: Point2, a: Point2, b: Point2, c: Point2| -> Option<(f64, f64, f64)> {
+        let d = cross2(b - a, c - a);
+        if d.abs() <= 1e-14 {
+            return None;
+        }
+        let w_a = cross2(b - q, c - q) / d;
+        let w_b = cross2(c - q, a - q) / d;
+        let w_c = 1.0 - w_a - w_b;
+        Some((w_a, w_b, w_c))
+    };
+    let samples = [
+        uv_a + (uv_b - uv_a) * 0.5,
+        uv_b + (uv_c - uv_b) * 0.5,
+        uv_c + (uv_a - uv_c) * 0.5,
+        uv_a + ((uv_b - uv_a) + (uv_c - uv_a)) / 3.0,
+    ];
+    let mut max_dev = 0.0f64;
+    let mut argmax = samples[0];
+    for q in samples {
+        if let Some((w_a, w_b, w_c)) = barycentric(q, uv_a, uv_b, uv_c) {
+            let linear = p_a + (p_b - p_a) * w_b + (p_c - p_a) * w_c;
+            let real = surface.subs(q.x, q.y);
+            let dev = (real - linear).magnitude();
+            if dev.is_finite() && dev > max_dev {
+                max_dev = dev;
+                argmax = q;
+            }
+        }
+    }
+    (max_dev, argmax)
+}
+
+/// One per-pass record of the refinement trajectory for a face. The acceptance
+/// rule is justified by the geometric error functional here — triangle count is
+/// deliberately not the whole story.
+#[derive(Clone, Debug)]
+struct RefineTrajectoryRow {
+    triangles: usize,
+    unsafe_count: usize,
+    max_dev: f64,
+    excess_sum: f64,
+    /// Whether the worst-offending triangle touches seam/singular/boundary
+    /// structure (role bits from its three vertex metadata entries).
+    worst_seam: bool,
+    worst_singular: bool,
+    worst_boundary: bool,
+}
+
 #[allow(dead_code)]
 fn triangulation_into_polymesh<S: ParametricSurface3D>(
     triangulation: &Cdt,
@@ -9317,6 +9696,8 @@ fn triangulation_into_polymesh<S: ParametricSurface3D>(
         roles,
         &vertex_sources,
         lattice,
+        f64::INFINITY,
+        false,
     ) {
         TessellationOutcome::Mesh(ft) => ft.mesh,
         TessellationOutcome::Failed(_) => PolygonMesh::default(),
@@ -14563,6 +14944,326 @@ mod grid_constraint_wiring_tests {
                 .find(|v| v.as_ref() == &point(1.0, 0.0))
                 .is_none(),
             "no vertex may be placed on the outside portion of the grid line"
+        );
+    }
+}
+
+/// Structural tests for CDT refinement.
+///
+/// These assert the *invariant* — a refinement pass is retained only when it
+/// strictly reduces the face's maximum sampled exact-surface deviation, and
+/// refinement terminates when that deviation satisfies tolerance — rather than
+/// any particular face population. They drive
+/// [`trimming_tessellation_with_refinement`] directly with an explicit
+/// `enable_refine` flag so the acceptance rule is exercised deterministically.
+#[cfg(test)]
+mod cdt_refinement_tests {
+    use super::*;
+    use std::f64::consts::{FRAC_PI_2, PI};
+    use truck_modeling::{Line, Point2, Point3, RevolutedCurve, Vector3};
+
+    fn cylinder() -> RevolutedCurve<Line<Point3>> {
+        RevolutedCurve::by_revolution(
+            Line(Point3::new(10.0, 0.0, 0.0), Point3::new(10.0, 0.0, 10.0)),
+            Point3::origin(),
+            Vector3::unit_z(),
+        )
+    }
+
+    fn sphere() -> truck_geometry::prelude::Sphere {
+        truck_geometry::prelude::Sphere::new(Point3::origin(), 10.0)
+    }
+
+    fn plane() -> truck_geometry::prelude::Plane {
+        truck_geometry::prelude::Plane::new(
+            Point3::origin(),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        )
+    }
+
+    /// A quad trim on a surface: four edges sampled as polylines, forming one
+    /// closed loop. `(u0, u1)` spans the straight axis, `(v0, v1)` the curved
+    /// axis; `arc_pts` samples the curved edges, `gen_pts` the straight
+    /// generator edges. With coarse `arc_pts` (2 = just the corners) the CDT
+    /// bridges the full curved span — the canonical interior-starved
+    /// mechanism; with fine `arc_pts` the boundary chords already keep every
+    /// triangle within tolerance.
+    ///
+    /// The boundary is constructed directly as a raw closed [`BoundaryLoop`]
+    /// (origins all `Source`, empty provenance) rather than through
+    /// [`PolyBoundary::new`], so the test controls the exact polyline and the
+    /// periodic/join machinery does not re-lift or densify it.
+    fn quad_boundary<S: PreMeshableSurface>(
+        surface: &S,
+        u0: f64,
+        u1: f64,
+        v0: f64,
+        v1: f64,
+        arc_pts: usize,
+        gen_pts: usize,
+    ) -> PolyBoundary {
+        let mk = |u: f64, v: f64| -> SurfacePoint {
+            let uv = Point2::new(u, v);
+            (uv, surface.subs(u, v)).into()
+        };
+        let n = arc_pts;
+        let m = gen_pts;
+        let mut pts = Vec::new();
+        // bottom generator: u0 -> u1 at v0 (straight edge)
+        for i in 0..m {
+            pts.push(mk(u0 + (u1 - u0) * (i as f64 / (m - 1) as f64), v0));
+        }
+        // right arc: v0 -> v1 at u1 (curved edge)
+        for i in 1..n {
+            pts.push(mk(u1, v0 + (v1 - v0) * (i as f64 / (n - 1) as f64)));
+        }
+        // top generator: u1 -> u0 at v1 (straight edge)
+        for i in (0..m - 1).rev() {
+            pts.push(mk(u0 + (u1 - u0) * (i as f64 / (m - 1) as f64), v1));
+        }
+        // left arc: v1 -> v0 at u0 (curved edge)
+        for i in (1..n).rev() {
+            pts.push(mk(u0, v0 + (v1 - v0) * (i as f64 / (n - 1) as f64)));
+        }
+        let k = pts.len();
+        let origins = vec![SegmentOrigin::Source; k];
+        let source_uses = vec![Vec::new(); k];
+        PolyBoundary(vec![BoundaryLoop::new(pts, origins, source_uses)])
+    }
+
+    /// The maximum sampled exact-surface deviation of a mesh: corners taken as
+    /// the true surface points `S(uv)`, so boundary realization is invisible.
+    fn mesh_max_dev<S: ParametricSurface3D>(surface: &S, mesh: &PolygonMesh) -> f64 {
+        let mut max = 0.0f64;
+        for tri in mesh.faces().tri_faces() {
+            let uv = [
+                mesh.uv_coords()[tri[0].pos],
+                mesh.uv_coords()[tri[1].pos],
+                mesh.uv_coords()[tri[2].pos],
+            ];
+            let a = Point2::new(uv[0].x, uv[0].y);
+            let b = Point2::new(uv[1].x, uv[1].y);
+            let c = Point2::new(uv[2].x, uv[2].y);
+            let (d, _) = triangle_sampled_deviation_exact(surface, a, b, c);
+            if d > max {
+                max = d;
+            }
+        }
+        max
+    }
+
+    fn tess_mesh<S: PreMeshableSurface + ParametricSurface3D>(
+        surface: &S,
+        boundary: &PolyBoundary,
+        tol: f64,
+        refine: bool,
+    ) -> PolygonMesh {
+        let lattice = unevidenced_lattice(surface);
+        match trimming_tessellation_with_refinement(surface, boundary, tol, &lattice, refine) {
+            TessellationOutcome::Mesh(ft) => ft.mesh,
+            TessellationOutcome::Failed(reason) => panic!("tessellation failed: {reason:?}"),
+        }
+    }
+
+    /// T1 — unsafe curved-span triangle: a ruled surface whose ordinary CDT can
+    /// bridge a tolerance-invalid curved span. Refinement must activate and
+    /// reduce the maximum exact-surface deviation.
+    #[test]
+    fn t1_unsafe_curved_span_triggers_refinement() {
+        // A sphere band at mid latitude (v in [0.8, 1.4]), spanning nearly the
+        // full u azimuth. The flat CDT triangles across the longitude direction
+        // deviate from the sphere by a mid-latitude chord sagitta; with a
+        // tolerance below that sagitta the span is tolerance-invalid and the
+        // argmax deviation is an interior point (not the pole), so refinement
+        // must activate and reduce it.
+        let sph = sphere();
+        let tol = 0.02;
+        let boundary = quad_boundary(&sph, 0.0, PI, 0.8, 1.4, 2, 2);
+        let base = tess_mesh(&sph, &boundary, tol, false);
+        let refined = tess_mesh(&sph, &boundary, tol, true);
+        let base_dev = mesh_max_dev(&sph, &base);
+        let refined_dev = mesh_max_dev(&sph, &refined);
+        assert!(
+            base_dev > tol,
+            "baseline must exceed tolerance, got {base_dev:.4} vs tol {tol}"
+        );
+        assert!(
+            refined_dev <= tol,
+            "refinement must bring max deviation within tolerance, got {refined_dev:.4} vs tol {tol}"
+        );
+        assert!(
+            refined_dev < base_dev,
+            "refinement must strictly reduce max deviation: {base_dev:.4} -> {refined_dev:.4}"
+        );
+    }
+
+    /// T2 — safe `inside=0` case: similar independent divisions, but the
+    /// boundary/constraint topology already keeps every actual triangle within
+    /// tolerance, so refinement must not activate.
+    #[test]
+    fn t2_safe_quad_within_tolerance_does_not_refine() {
+        let cyl = cylinder();
+        // A small angular patch (30 degrees), coarse arcs (corners only). The
+        // CDT bridges the full 30-degree span, but on R = 10 that chord has
+        // sagitta 10(1 - cos 15°) ≈ 0.34 < tol, so every actual triangle is
+        // already safe even though the interior grid is empty (`inside = 0`).
+        let tol = 0.93;
+        let boundary = quad_boundary(&cyl, 0.0, 1.0, 0.0, FRAC_PI_2, 2, 4);
+        let base = tess_mesh(&cyl, &boundary, tol, false);
+        let refined = tess_mesh(&cyl, &boundary, tol, true);
+        let base_dev = mesh_max_dev(&cyl, &base);
+        let refined_dev = mesh_max_dev(&cyl, &refined);
+        assert!(
+            base_dev <= tol,
+            "baseline must already be within tolerance, got {base_dev:.4} vs tol {tol}"
+        );
+        assert!(
+            (refined_dev - base_dev).abs() < 1e-6,
+            "safe face must be unchanged by refinement: {base_dev:.4} -> {refined_dev:.4}"
+        );
+    }
+
+    /// T3 — long-axis complexity: greatly increase the straight-axis length
+    /// while preserving the same local curved geometry. Refinement cost must
+    /// not scale as `straight_length / tiny_orthogonal_interval`.
+    #[test]
+    fn t3_long_axis_does_not_scale_refinement() {
+        let cyl = cylinder();
+        let tol = 0.93;
+        // Short patch: u in [0, 1].
+        let short_b = quad_boundary(&cyl, 0.0, 1.0, 0.0, FRAC_PI_2, 2, 4);
+        let short = tess_mesh(&cyl, &short_b, tol, true);
+        // Long patch: u in [0, 100] — 100x the straight axis, same 90-degree
+        // curved span.
+        let long_b = quad_boundary(&cyl, 0.0, 100.0, 0.0, FRAC_PI_2, 2, 4);
+        let long = tess_mesh(&cyl, &long_b, tol, true);
+        let short_tris = short.tri_faces().len();
+        let long_tris = long.tri_faces().len();
+        assert!(
+            long_tris < short_tris * 3,
+            "refinement must not scale with straight-axis length: short {short_tris} tris, long {long_tris} tris"
+        );
+        assert!(
+            mesh_max_dev(&cyl, &long) <= tol,
+            "long axis must still satisfy tolerance after refinement"
+        );
+    }
+
+    /// T4 — planar surface: no refinement, no deviation.
+    #[test]
+    fn t4_planar_never_refines() {
+        let pl = plane();
+        let tol = 0.93;
+        let boundary = quad_boundary(&pl, 0.0, 10.0, 0.0, 10.0, 2, 4);
+        let base = tess_mesh(&pl, &boundary, tol, false);
+        let refined = tess_mesh(&pl, &boundary, tol, true);
+        assert!(
+            mesh_max_dev(&pl, &refined) < 1e-9,
+            "planar mesh must have zero exact deviation"
+        );
+        assert_eq!(
+            refined.tri_faces().len(),
+            base.tri_faces().len(),
+            "planar refinement must not add triangles"
+        );
+    }
+
+    /// T5 — actual support realization: the chosen support point becomes part
+    /// of the material CDT connectivity. The refined mesh must contain a vertex
+    /// whose UV is strictly interior (not on the boundary) that was not present
+    /// in the baseline mesh.
+    #[test]
+    fn t5_support_point_becomes_mesh_vertex() {
+        // The same sphere band as T1: a tolerance-invalid curved span whose
+        // argmax deviation is an interior point, so refinement inserts an
+        // interior support that must appear as a material mesh vertex.
+        let sph = sphere();
+        let tol = 0.02;
+        let boundary = quad_boundary(&sph, 0.0, PI, 0.8, 1.4, 2, 2);
+        let base = tess_mesh(&sph, &boundary, tol, false);
+        let refined = tess_mesh(&sph, &boundary, tol, true);
+        // Interior criterion: u strictly inside the azimuth span, v strictly
+        // inside the latitude band.
+        let base_uvs: std::collections::HashSet<(i64, i64)> = base
+            .uv_coords()
+            .iter()
+            .map(|v| ((v.x * 1e6).round() as i64, (v.y * 1e6).round() as i64))
+            .collect();
+        let mut found_interior = false;
+        for uv in refined.uv_coords() {
+            let key = ((uv.x * 1e6).round() as i64, (uv.y * 1e6).round() as i64);
+            if !base_uvs.contains(&key)
+                && uv.x > 1e-3
+                && uv.x < PI - 1e-3
+                && uv.y > 0.8 + 1e-3
+                && uv.y < 1.4 - 1e-3
+            {
+                found_interior = true;
+                break;
+            }
+        }
+        assert!(
+            found_interior,
+            "refinement must insert a strictly-interior support vertex into the mesh"
+        );
+    }
+
+    /// T6 — deterministic result: identical input produces identical
+    /// support/refinement decisions and meshes.
+    #[test]
+    fn t6_refinement_is_deterministic() {
+        let cyl = cylinder();
+        let tol = 0.93;
+        let boundary = quad_boundary(&cyl, 0.0, 1.0, 0.0, FRAC_PI_2, 2, 4);
+        let m1 = tess_mesh(&cyl, &boundary, tol, true);
+        let m2 = tess_mesh(&cyl, &boundary, tol, true);
+        assert_eq!(
+            m1.tri_faces().len(),
+            m2.tri_faces().len(),
+            "deterministic triangle count"
+        );
+        assert_eq!(
+            m1.positions().len(),
+            m2.positions().len(),
+            "deterministic vertex count"
+        );
+        let d1 = mesh_max_dev(&cyl, &m1);
+        let d2 = mesh_max_dev(&cyl, &m2);
+        assert!(
+            (d1 - d2).abs() < 1e-12,
+            "deterministic max deviation: {d1:.12} vs {d2:.12}"
+        );
+    }
+
+    /// T7 — defensive termination: a pathological face whose maximum cannot be
+    /// reduced by interior support (boundary/pole-pinned) must terminate
+    /// without unbounded support insertion or a blown-up triangle count.
+    #[test]
+    fn t7_pinned_maximum_terminates_without_explosion() {
+        // Sphere pole patch: v near 0 is the pole where the sphere's u-axis
+        // collapses; the flat triangles there carry large exact deviation that
+        // interior support cannot reduce. The acceptance rule must reject every
+        // candidate and return the baseline.
+        let sph = sphere();
+        let tol = 0.93;
+        let boundary = quad_boundary(&sph, 0.0, PI, 0.0, 0.5, 8, 4);
+        let base = tess_mesh(&sph, &boundary, tol, false);
+        let refined = tess_mesh(&sph, &boundary, tol, true);
+        let base_tris = base.tri_faces().len();
+        let refined_tris = refined.tri_faces().len();
+        let base_dev = mesh_max_dev(&sph, &base);
+        let refined_dev = mesh_max_dev(&sph, &refined);
+        // Either the baseline is already within tolerance (no activation), or
+        // the maximum is pinned and every candidate is rejected, returning the
+        // baseline. In the pinned case the refined mesh must not explode.
+        assert!(
+            refined_tris <= base_tris.max(64),
+            "pinned maximum must not blow up triangles: base {base_tris}, refined {refined_tris}"
+        );
+        assert!(
+            refined_dev <= base_dev + 1e-9,
+            "refinement must never increase max deviation: {base_dev:.6} -> {refined_dev:.6}"
         );
     }
 }
