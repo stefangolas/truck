@@ -44,6 +44,24 @@ pub enum PeriodWitness {
     /// `Processor<Sphere, Matrix4>`, not a revolved curve, and the witness
     /// names the primitive it was read from.
     ExactSphereAzimuth,
+    /// The parameter axis is declared closed by the *source representation*,
+    /// and the converted evaluator satisfies the seam identification required
+    /// for periodic continuation.
+    ///
+    /// This is the witness for a source-declared-closed B-spline or NURBS
+    /// surface, whose generic evaluator is bounded to its native knot domain
+    /// rather than globally periodic. The theorem is: the STEP source declares
+    /// the axis closed (`.T.`), and the converted spline satisfies the
+    /// representation-level seam conditions `S(u, a) == S(u, b)` and
+    /// `Sv(u, a) == Sv(u, b)` over the active interval `[a, b]`; therefore the
+    /// deck translation `P = b - a` is a valid topological lattice generator.
+    ///
+    /// The source declaration is the authority; the seam evaluation is a
+    /// *compatibility check that may reject an incompatible conversion*, never
+    /// the source of the closure. This witness is deliberately distinct from
+    /// [`ExactRevolutionAngle`] — a spline is not a rotation, and the period is
+    /// the native span `b - a`, not `2π`.
+    SourceDeclaredClosedSplineAxis,
 }
 
 /// Why a polar orbit is known to collapse to a single point.

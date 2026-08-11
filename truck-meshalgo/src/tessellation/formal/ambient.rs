@@ -1749,6 +1749,33 @@ pub fn ambient_axis_evidence_from_legacy(
                         AdapterError::GeneratorNotReconstructible { axis, cause }
                     })?
                 }
+                // The composition layer certified a source-declared spline
+                // closure by checking the converted evaluator's seam
+                // identification (`S(u,a)==S(u,b)` and `Sv(u,a)==Sv(u,b)` over
+                // the active interval `[a,b]`). That is not an analytic rule
+                // about the parameterisation — a spline is not a rotation — so
+                // the formal Step-1 model has no rule that can *re-derive* the
+                // generator from the representation. The honest mapping is
+                // `DeclaredButUncertified`: the period value is carried, and
+                // this model records that it has no certifying rule for a
+                // spline. It never treats the value as a certified generator
+                // of its own.
+                super::super::domain::lattice::PeriodWitness::SourceDeclaredClosedSplineAxis => {
+                    let value = PositiveFinite::new(period)
+                        .map_err(|cause| AdapterError::PeriodValueOutOfDomain { axis, cause })?;
+                    return Ok(PeriodAxisEvidence::DeclaredButUncertified {
+                        axis,
+                        value: UncertifiedPeriodValue::Observed(ObservedPeriod {
+                            value,
+                            origin: non_authoritative,
+                        }),
+                        reason: PeriodCertificationFailure::NoCertifyingRuleForSchema,
+                        attempts: attempt(
+                            AttemptOutcome::NoCertifyingRuleForRepresentation,
+                            ResolutionMethod::RepresentationDerivedWitness,
+                        ),
+                    });
+                }
             };
             // If the legacy number disagrees with the re-derived 2π, that is a
             // contradiction between two established facts, not a reason to

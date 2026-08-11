@@ -2532,6 +2532,24 @@ pub struct BSplineSurfaceWithKnots {
     knot_spec: KnotType,
 }
 
+impl BSplineSurfaceWithKnots {
+    /// The source-declared closure of the `u` axis.
+    ///
+    /// Only an explicit `.T.` is closure. `Unknown` (`.U.`) and `.F.` are
+    /// both "not declared closed"; the STEP declaration is the authority and
+    /// nothing downstream may infer closure from the geometry.
+    pub fn u_closed(&self) -> bool {
+        matches!(self.u_closed, Logical::True)
+    }
+
+    /// The source-declared closure of the `v` axis.
+    ///
+    /// See [`Self::u_closed`] for the semantics.
+    pub fn v_closed(&self) -> bool {
+        matches!(self.v_closed, Logical::True)
+    }
+}
+
 impl TryFrom<&BSplineSurfaceWithKnots> for BSplineSurface<Point3> {
     type Error = StepConvertingError;
     #[inline(always)]
@@ -2607,6 +2625,18 @@ pub struct UniformSurface {
     self_intersect: Logical,
 }
 
+impl UniformSurface {
+    /// The source-declared closure of the `u` axis.
+    pub fn u_closed(&self) -> bool {
+        matches!(self.u_closed, Logical::True)
+    }
+
+    /// The source-declared closure of the `v` axis.
+    pub fn v_closed(&self) -> bool {
+        matches!(self.v_closed, Logical::True)
+    }
+}
+
 impl TryFrom<&UniformSurface> for BSplineSurface<Point3> {
     type Error = StepConvertingError;
     #[inline(always)]
@@ -2641,6 +2671,18 @@ pub struct QuasiUniformSurface {
     u_closed: Logical,
     v_closed: Logical,
     self_intersect: Logical,
+}
+
+impl QuasiUniformSurface {
+    /// The source-declared closure of the `u` axis.
+    pub fn u_closed(&self) -> bool {
+        matches!(self.u_closed, Logical::True)
+    }
+
+    /// The source-declared closure of the `v` axis.
+    pub fn v_closed(&self) -> bool {
+        matches!(self.v_closed, Logical::True)
+    }
 }
 
 impl TryFrom<&QuasiUniformSurface> for BSplineSurface<Point3> {
@@ -2678,6 +2720,18 @@ pub struct BezierSurface {
     u_closed: Logical,
     v_closed: Logical,
     self_intersect: Logical,
+}
+
+impl BezierSurface {
+    /// The source-declared closure of the `u` axis.
+    pub fn u_closed(&self) -> bool {
+        matches!(self.u_closed, Logical::True)
+    }
+
+    /// The source-declared closure of the `v` axis.
+    pub fn v_closed(&self) -> bool {
+        matches!(self.v_closed, Logical::True)
+    }
 }
 
 impl From<&BezierSurface> for BSplineSurface<Point3> {
@@ -2724,6 +2778,32 @@ impl TryFrom<&NonRationalBSplineSurface> for BSplineSurface<Point3> {
     }
 }
 
+impl NonRationalBSplineSurface {
+    /// The source-declared closure of the `u` axis, forwarded from whichever
+    /// concrete form the source entity took.
+    pub fn u_closed(&self) -> bool {
+        use NonRationalBSplineSurface::*;
+        match self {
+            BSplineSurfaceWithKnots(x) => x.u_closed(),
+            UniformSurface(x) => x.u_closed(),
+            QuasiUniformSurface(x) => x.u_closed(),
+            BezierSurface(x) => x.u_closed(),
+        }
+    }
+
+    /// The source-declared closure of the `v` axis, forwarded from whichever
+    /// concrete form the source entity took.
+    pub fn v_closed(&self) -> bool {
+        use NonRationalBSplineSurface::*;
+        match self {
+            BSplineSurfaceWithKnots(x) => x.v_closed(),
+            UniformSurface(x) => x.v_closed(),
+            QuasiUniformSurface(x) => x.v_closed(),
+            BezierSurface(x) => x.v_closed(),
+        }
+    }
+}
+
 /// `rational_b_spline_surface` as complex entity
 ///
 /// This struct is an ad hoc implementation that differs from the definition by EXPRESS:
@@ -2753,6 +2833,20 @@ impl TryFrom<&RationalBSplineSurface> for NurbsSurface<Vector4> {
             surface,
             weights_data.clone(),
         )?)
+    }
+}
+
+impl RationalBSplineSurface {
+    /// The source-declared closure of the `u` axis, forwarded from the wrapped
+    /// non-rational form that actually carries the declaration.
+    pub fn u_closed(&self) -> bool {
+        self.non_rational_b_spline_surface.u_closed()
+    }
+
+    /// The source-declared closure of the `v` axis, forwarded from the wrapped
+    /// non-rational form that actually carries the declaration.
+    pub fn v_closed(&self) -> bool {
+        self.non_rational_b_spline_surface.v_closed()
     }
 }
 

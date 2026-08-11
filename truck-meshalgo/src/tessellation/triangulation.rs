@@ -6518,6 +6518,57 @@ fn build_cap_cell<S: PreMeshableSurface>(
     path.close(PartJoin::SharedEndpoint)
 }
 
+/// The first-pass two-loop join policy for a face's boundary pieces.
+///
+/// Selects [`TwoLoopJoinPolicy::DeckConsistent`] only for the certified
+/// structural deck-pair class: exactly two closed loops, both genuine full-period
+/// deck walks (non-zero lattice displacement), whose displacements satisfy the
+/// deck equation in exactly one traversal direction. Everything else keeps
+/// [`TwoLoopJoinPolicy::Legacy`], so the legacy area gate and the recovery
+/// DeckConsistent arm (which remains gated on a legacy
+/// `ContradictoryDualParity` failure) stay byte-identical for every other face.
+///
+/// The classification reproduces exactly what `new_with_join` computes per
+/// piece, so the primary path and this selector cannot disagree about which
+/// loops are closed or by how much they wind.
+fn primary_two_loop_join_policy(
+    pieces: &[PolyBoundaryPiece],
+    lattice: &CertifiedLattice,
+) -> TwoLoopJoinPolicy {
+    let u_period = lattice.declared_u_period();
+    let v_period = lattice.declared_v_period();
+    let mut displacements: Vec<[i64; 2]> = Vec::new();
+    for PolyBoundaryPiece(vec, _) in pieces {
+        let p0 = vec[0].uv;
+        let p1 = vec[vec.len() - 1].uv;
+        if p0.distance(p1) < 1.0e-3 {
+            displacements.push([0, 0]);
+            continue;
+        }
+        let ku = u_period
+            .and_then(|up| periodic_displacement(p0.x, p1.x, up, 1e-3))
+            .unwrap_or(0);
+        let kv = v_period
+            .and_then(|vp| periodic_displacement(p0.y, p1.y, vp, 1e-3))
+            .unwrap_or(0);
+        if (ku != 0 || kv != 0) && vec[0].point.distance(vec[vec.len() - 1].point) < 1e-3 {
+            displacements.push([ku, kv]);
+        }
+    }
+    if displacements.len() == 2 {
+        let d0 = displacements[0];
+        let d1 = displacements[1];
+        // Both loops are genuine deck walks, and the deck equation decides a
+        // traversal (`δ₀ = δ₁` reversed, or `δ₀ = −δ₁` forward, but not
+        // both and not neither). A decided equation is what makes the join a
+        // choice rather than a coin toss.
+        if d0 != [0, 0] && d1 != [0, 0] && (d0 == d1) != (d0 == [-d1[0], -d1[1]]) {
+            return TwoLoopJoinPolicy::DeckConsistent;
+        }
+    }
+    TwoLoopJoinPolicy::Legacy
+}
+
 impl PolyBoundary {
     fn new(
         pieces: Vec<PolyBoundaryPiece>,
@@ -6525,7 +6576,8 @@ impl PolyBoundary {
         tol: f64,
         lattice: &CertifiedLattice,
     ) -> Self {
-        Self::new_with_join(pieces, surface, tol, lattice, TwoLoopJoinPolicy::Legacy).0
+        let join_policy = primary_two_loop_join_policy(&pieces, lattice);
+        Self::new_with_join(pieces, surface, tol, lattice, join_policy).0
     }
 
     fn new_with_join(
@@ -9894,6 +9946,23 @@ mod cone_topology_tests {
             outcome,
             TwoLoopJoinOutcome::NotAttempted,
             "the legacy policy must not admit a non-degenerate deck pair",
+        );
+    }
+
+    /// The first-pass classifier routes the certified structural deck-pair class
+    /// through `DeckConsistent` on `PolyBoundary::new` — the production entry —
+    /// so a non-degenerate full-period deck pair is joined without waiting for a
+    /// legacy failure to open the recovery arm. `Legacy` would leave it as two
+    /// separate closed loops.
+    #[test]
+    fn non_degenerate_deck_pair_gets_deck_consistent_on_the_primary_path() {
+        let (cylinder, pieces) = non_degenerate_band_pieces();
+        let lattice = unevidenced_lattice(&cylinder);
+        let boundary = PolyBoundary::new(pieces, &cylinder, 0.01, &lattice);
+        assert_eq!(
+            boundary.0.len(),
+            1,
+            "the primary path must join a certified deck pair (INV-W2-1 widened on first pass)",
         );
     }
 
