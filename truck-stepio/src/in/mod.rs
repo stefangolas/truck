@@ -4,7 +4,7 @@
 pub use ruststep;
 
 use ruststep::{
-    ast::{DataSection, EntityInstance, Name, Parameter, SubSuperRecord},
+    ast::{DataSection, EntityInstance, Name, Parameter, Record, SubSuperRecord},
     primitive::Logical,
     tables::{EntityTable, IntoOwned, PlaceHolder},
     Holder,
@@ -28,6 +28,9 @@ pub mod convert;
 /// Geometry parsed from STEP that can be handled by truck
 pub mod step_geometry;
 use step_geometry::*;
+
+/// Typed presentation entities (ISO 10303-46 subset the corpora use).
+pub mod presentation;
 
 /// the exchange structure corresponds to a graph in STEP file
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -116,6 +119,22 @@ pub struct Table {
         HashMap<u64, ShapeRepresentationRelationshipWithTransformationHolder>,
     pub next_assembly_usage_occurrence: HashMap<u64, NextAssemblyUsageOccurrenceHolder>,
     pub item_defined_transformation: HashMap<u64, ItemDefinedTransformationHolder>,
+
+    // presentation (ISO 10303-46)
+    //
+    // The typed surface/face colour chains. Each holder preserves the source
+    // entity's references as raw ids; nothing here interprets what they mean.
+    pub colour_rgb: HashMap<u64, presentation::ColourRgbHolder>,
+    pub draughting_pre_defined_colour: HashMap<u64, presentation::DraughtingPreDefinedColourHolder>,
+    pub styled_item: HashMap<u64, presentation::StyledItemHolder>,
+    pub over_riding_styled_item: HashMap<u64, presentation::OverRidingStyledItemHolder>,
+    pub presentation_style_assignment:
+        HashMap<u64, presentation::PresentationStyleAssignmentHolder>,
+    pub surface_style_usage: HashMap<u64, presentation::SurfaceStyleUsageHolder>,
+    pub surface_side_style: HashMap<u64, presentation::SurfaceSideStyleHolder>,
+    pub surface_style_fill_area: HashMap<u64, presentation::SurfaceStyleFillAreaHolder>,
+    pub fill_area_style: HashMap<u64, presentation::FillAreaStyleHolder>,
+    pub fill_area_style_colour: HashMap<u64, presentation::FillAreaStyleColourHolder>,
 
     // others
     pub definitional_representation: HashMap<u64, DefinitionalRepresentationHolder>,
@@ -232,350 +251,450 @@ pub fn convert_parameter_value(
 }
 
 impl Table {
+    /// Parse the presentation entities this reader knows, into their typed
+    /// tables.
+    ///
+    /// Returns `true` when `name` is one of the presentation entities and the
+    /// record has been consumed (into a typed holder, or into `dummy` when it
+    /// could not be parsed — the same destination unknown records reach, so a
+    /// file with a presentation shape this reader does not understand still
+    /// loads). Returns `false` for any other name so the caller falls through
+    /// to the regular geometry/topology dispatch.
+    pub fn push_presentation(&mut self, id: u64, record: &Record) -> bool {
+        let fallback = |this: &mut Self| {
+            this.dummy.insert(
+                id,
+                DummyHolder {
+                    record: format!("{record:?}"),
+                    is_simple: true,
+                },
+            );
+        };
+        match record.name.as_str() {
+            "COLOUR_RGB" => match presentation::colour_rgb(&record.parameter) {
+                Some(holder) => {
+                    self.colour_rgb.insert(id, holder);
+                }
+                None => fallback(self),
+            },
+            "DRAUGHTING_PRE_DEFINED_COLOUR" => {
+                match presentation::draughting_pre_defined_colour(&record.parameter) {
+                    Some(holder) => {
+                        self.draughting_pre_defined_colour.insert(id, holder);
+                    }
+                    None => fallback(self),
+                }
+            }
+            "STYLED_ITEM" => match presentation::styled_item(&record.parameter) {
+                Some(holder) => {
+                    self.styled_item.insert(id, holder);
+                }
+                None => fallback(self),
+            },
+            "OVER_RIDING_STYLED_ITEM" => {
+                match presentation::over_riding_styled_item(&record.parameter) {
+                    Some(holder) => {
+                        self.over_riding_styled_item.insert(id, holder);
+                    }
+                    None => fallback(self),
+                }
+            }
+            "PRESENTATION_STYLE_ASSIGNMENT" => {
+                match presentation::presentation_style_assignment(&record.parameter) {
+                    Some(holder) => {
+                        self.presentation_style_assignment.insert(id, holder);
+                    }
+                    None => fallback(self),
+                }
+            }
+            "SURFACE_STYLE_USAGE" => match presentation::surface_style_usage(&record.parameter) {
+                Some(holder) => {
+                    self.surface_style_usage.insert(id, holder);
+                }
+                None => fallback(self),
+            },
+            "SURFACE_SIDE_STYLE" => match presentation::surface_side_style(&record.parameter) {
+                Some(holder) => {
+                    self.surface_side_style.insert(id, holder);
+                }
+                None => fallback(self),
+            },
+            "SURFACE_STYLE_FILL_AREA" => {
+                match presentation::surface_style_fill_area(&record.parameter) {
+                    Some(holder) => {
+                        self.surface_style_fill_area.insert(id, holder);
+                    }
+                    None => fallback(self),
+                }
+            }
+            "FILL_AREA_STYLE" => match presentation::fill_area_style(&record.parameter) {
+                Some(holder) => {
+                    self.fill_area_style.insert(id, holder);
+                }
+                None => fallback(self),
+            },
+            "FILL_AREA_STYLE_COLOUR" => {
+                match presentation::fill_area_style_colour(&record.parameter) {
+                    Some(holder) => {
+                        self.fill_area_style_colour.insert(id, holder);
+                    }
+                    None => fallback(self),
+                }
+            }
+            _ => return false,
+        };
+        true
+    }
+
     pub fn push_instance(&mut self, instance: &EntityInstance) -> ruststep::error::Result<()> {
         match instance {
-            EntityInstance::Simple { id, record } => match record.name.as_str() {
-                "CARTESIAN_POINT" => {
-                    self.cartesian_point
-                        .insert(*id, Deserialize::deserialize(record)?);
+            EntityInstance::Simple { id, record } => {
+                if self.push_presentation(*id, record) {
+                    return Ok(());
                 }
-                "DIRECTION" => {
-                    self.direction
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "VECTOR" => {
-                    self.vector.insert(*id, Deserialize::deserialize(record)?);
-                }
-                "PLACEMENT" => {
-                    self.placement
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "AXIS1_PLACEMENT" => {
-                    self.axis1_placement
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "AXIS2_PLACEMENT_2D" => {
-                    self.axis2_placement_2d
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "AXIS2_PLACEMENT_3D" => {
-                    self.axis2_placement_3d
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "LINE" => {
-                    self.line
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "POLYLINE" => {
-                    self.polyline.insert(*id, Deserialize::deserialize(record)?);
-                }
-                "B_SPLINE_CURVE_WITH_KNOTS" => {
-                    self.b_spline_curve_with_knots
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "BEZIER_CURVE" => {
-                    self.bezier_curve
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "QUASI_UNIFORM_CURVE" => {
-                    self.quasi_uniform_curve
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "UNIFORM_CURVE" => {
-                    self.uniform_curve
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "CIRCLE" => {
-                    self.circle.insert(*id, Deserialize::deserialize(record)?);
-                }
-                "ELLIPSE" => {
-                    self.ellipse.insert(*id, Deserialize::deserialize(record)?);
-                }
-                "HYPERBOLA" => {
-                    self.hyperbola
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "PARABOLA" => {
-                    self.parabola.insert(*id, Deserialize::deserialize(record)?);
-                }
-                "PCURVE" => {
-                    self.pcurve.insert(*id, Deserialize::deserialize(record)?);
-                }
-                "SURFACE_CURVE" => {
-                    self.surface_curve
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "SEAM_CURVE" => {
-                    self.surface_curve
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "PLANE" => {
-                    self.plane.insert(*id, Deserialize::deserialize(record)?);
-                }
-                "OFFSET_SURFACE" => {
-                    self.offset_surface
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "SPHERICAL_SURFACE" => {
-                    self.spherical_surface
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "CYLINDRICAL_SURFACE" => {
-                    self.cylindrical_surface
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "TOROIDAL_SURFACE" => {
-                    self.toroidal_surface
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "CONICAL_SURFACE" => {
-                    self.conical_surface
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "B_SPLINE_SURFACE_WITH_KNOTS" => {
-                    self.b_spline_surface_with_knots
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "UNIFORM_SURFACE" => {
-                    self.uniform_surface
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "QUASI_UNIFORM_SURFACE" => {
-                    self.quasi_uniform_surface
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "BEZIER_SURFACE" => {
-                    self.bezier_surface
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "SURFACE_OF_LINEAR_EXTRUSION" => {
-                    self.surface_of_linear_extrusion
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "SURFACE_OF_REVOLUTION" => {
-                    self.surface_of_revolution
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
+                match record.name.as_str() {
+                    "CARTESIAN_POINT" => {
+                        self.cartesian_point
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "DIRECTION" => {
+                        self.direction
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "VECTOR" => {
+                        self.vector.insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "PLACEMENT" => {
+                        self.placement
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "AXIS1_PLACEMENT" => {
+                        self.axis1_placement
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "AXIS2_PLACEMENT_2D" => {
+                        self.axis2_placement_2d
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "AXIS2_PLACEMENT_3D" => {
+                        self.axis2_placement_3d
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "LINE" => {
+                        self.line
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "POLYLINE" => {
+                        self.polyline.insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "B_SPLINE_CURVE_WITH_KNOTS" => {
+                        self.b_spline_curve_with_knots
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "BEZIER_CURVE" => {
+                        self.bezier_curve
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "QUASI_UNIFORM_CURVE" => {
+                        self.quasi_uniform_curve
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "UNIFORM_CURVE" => {
+                        self.uniform_curve
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "CIRCLE" => {
+                        self.circle.insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "ELLIPSE" => {
+                        self.ellipse.insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "HYPERBOLA" => {
+                        self.hyperbola
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "PARABOLA" => {
+                        self.parabola.insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "PCURVE" => {
+                        self.pcurve.insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "SURFACE_CURVE" => {
+                        self.surface_curve
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "SEAM_CURVE" => {
+                        self.surface_curve
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "PLANE" => {
+                        self.plane.insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "OFFSET_SURFACE" => {
+                        self.offset_surface
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "SPHERICAL_SURFACE" => {
+                        self.spherical_surface
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "CYLINDRICAL_SURFACE" => {
+                        self.cylindrical_surface
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "TOROIDAL_SURFACE" => {
+                        self.toroidal_surface
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "CONICAL_SURFACE" => {
+                        self.conical_surface
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "B_SPLINE_SURFACE_WITH_KNOTS" => {
+                        self.b_spline_surface_with_knots
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "UNIFORM_SURFACE" => {
+                        self.uniform_surface
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "QUASI_UNIFORM_SURFACE" => {
+                        self.quasi_uniform_surface
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "BEZIER_SURFACE" => {
+                        self.bezier_surface
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "SURFACE_OF_LINEAR_EXTRUSION" => {
+                        self.surface_of_linear_extrusion
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "SURFACE_OF_REVOLUTION" => {
+                        self.surface_of_revolution
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
 
-                "VERTEX_POINT" => {
-                    self.vertex_point
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "EDGE_CURVE" => {
-                    self.edge_curve
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "ORIENTED_EDGE" => {
-                    if let Parameter::List(params) = &record.parameter {
-                        if params.len() == 5 {
-                            self.oriented_edge.insert(
-                                *id,
-                                OrientedEdgeHolder {
-                                    label: Deserialize::deserialize(&params[0])?,
-                                    edge_element: Deserialize::deserialize(&params[3])?,
-                                    orientation: Deserialize::deserialize(&params[4])?,
-                                },
-                            );
-                        }
+                    "VERTEX_POINT" => {
+                        self.vertex_point
+                            .insert(*id, Deserialize::deserialize(record)?);
                     }
-                }
-                "EDGE_LOOP" => {
-                    self.edge_loop
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "VERTEX_LOOP" => {
-                    self.vertex_loop
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "FACE_BOUND" => {
-                    self.face_bound
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "FACE_OUTER_BOUND" => {
-                    self.face_bound
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                    self.face_outer_bound_ids.insert(*id);
-                }
-                "FACE_SURFACE" => {
-                    self.face_surface
-                        .insert(*id, Deserialize::deserialize(record)?);
-                }
-                "ADVANCED_FACE" => {
-                    self.face_surface
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "ORIENTED_FACE" => {
-                    if let Parameter::List(params) = &record.parameter {
-                        if params.len() == 4 {
-                            self.oriented_face.insert(
-                                *id,
-                                OrientedFaceHolder {
-                                    label: Deserialize::deserialize(&params[0])?,
-                                    face_element: Deserialize::deserialize(&params[2])?,
-                                    orientation: Deserialize::deserialize(&params[3])?,
-                                },
-                            );
-                        }
+                    "EDGE_CURVE" => {
+                        self.edge_curve
+                            .insert(*id, Deserialize::deserialize(record)?);
                     }
-                }
-                "OPEN_SHELL" => {
-                    self.shell
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "CLOSED_SHELL" => {
-                    self.shell
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "ORIENTED_OPEN_SHELL" => {
-                    if let Parameter::List(params) = &record.parameter {
-                        if params.len() == 4 {
-                            self.oriented_shell.insert(
-                                *id,
-                                OrientedShellHolder {
-                                    label: Deserialize::deserialize(&params[0])?,
-                                    shell_element: Deserialize::deserialize(&params[2])?,
-                                    orientation: Deserialize::deserialize(&params[3])?,
-                                },
-                            );
-                        }
-                    }
-                }
-                "ORIENTED_CLOSED_SHELL" => {
-                    if let Parameter::List(params) = &record.parameter {
-                        if params.len() == 4 {
-                            self.oriented_shell.insert(
-                                *id,
-                                OrientedShellHolder {
-                                    label: Deserialize::deserialize(&params[0])?,
-                                    shell_element: Deserialize::deserialize(&params[2])?,
-                                    orientation: Deserialize::deserialize(&params[3])?,
-                                },
-                            );
-                        }
-                    }
-                }
-                "SHELL_BASED_SURFACE_MODEL" => {
-                    self.shell_based_surface_model
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "MANIFOLD_SOLID_BREP" => {
-                    if let Parameter::List(params) = &record.parameter {
-                        if params.len() == 2 {
-                            self.manifold_solid_brep.insert(
-                                *id,
-                                ManifoldSolidBrepHolder {
-                                    label: Deserialize::deserialize(&params[0])?,
-                                    outer: Deserialize::deserialize(&params[1])?,
-                                    voids: Vec::new(),
-                                },
-                            );
-                        }
-                    }
-                }
-                "BREP_WITH_VOIDS" => {
-                    self.manifold_solid_brep
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "DEFINITIONAL_REPRESENTATION" => {
-                    if let Parameter::List(params) = &record.parameter {
-                        if params.len() == 3 {
-                            self.definitional_representation.insert(
-                                *id,
-                                DefinitionalRepresentationHolder {
-                                    label: Deserialize::deserialize(&params[0])?,
-                                    representation_item: Deserialize::deserialize(&params[1])?,
-                                    context_of_items: match &params[2] {
-                                        Parameter::Ref(x) => PlaceHolder::Ref(x.clone()),
-                                        _ => PlaceHolder::Owned(DummyHolder {
-                                            record: format!("{:?}", params[2]),
-                                            is_simple: true,
-                                        }),
+                    "ORIENTED_EDGE" => {
+                        if let Parameter::List(params) = &record.parameter {
+                            if params.len() == 5 {
+                                self.oriented_edge.insert(
+                                    *id,
+                                    OrientedEdgeHolder {
+                                        label: Deserialize::deserialize(&params[0])?,
+                                        edge_element: Deserialize::deserialize(&params[3])?,
+                                        orientation: Deserialize::deserialize(&params[4])?,
                                     },
-                                },
-                            );
+                                );
+                            }
                         }
                     }
-                }
-                "APPLICATION_CONTEXT" => {
-                    self.application_context
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "PRODUCT_CONTEXT" => {
-                    self.product_context
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "PRODUCT" => {
-                    self.product
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "PRODUCT_DEFINITION_FORMATION" => {
-                    self.product_definition_formation
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE" => {
-                    if let Parameter::List(params) = &record.parameter {
-                        if params.len() >= 3 {
-                            self.product_definition_formation.insert(
-                                *id,
-                                ProductDefinitionFormationHolder {
-                                    id: Deserialize::deserialize(&params[0])?,
-                                    description: Deserialize::deserialize(&params[1])?,
-                                    of_product: Deserialize::deserialize(&params[2])?,
-                                },
-                            );
+                    "EDGE_LOOP" => {
+                        self.edge_loop
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "VERTEX_LOOP" => {
+                        self.vertex_loop
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "FACE_BOUND" => {
+                        self.face_bound
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "FACE_OUTER_BOUND" => {
+                        self.face_bound
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                        self.face_outer_bound_ids.insert(*id);
+                    }
+                    "FACE_SURFACE" => {
+                        self.face_surface
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "ADVANCED_FACE" => {
+                        self.face_surface
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "ORIENTED_FACE" => {
+                        if let Parameter::List(params) = &record.parameter {
+                            if params.len() == 4 {
+                                self.oriented_face.insert(
+                                    *id,
+                                    OrientedFaceHolder {
+                                        label: Deserialize::deserialize(&params[0])?,
+                                        face_element: Deserialize::deserialize(&params[2])?,
+                                        orientation: Deserialize::deserialize(&params[3])?,
+                                    },
+                                );
+                            }
                         }
                     }
+                    "OPEN_SHELL" => {
+                        self.shell
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "CLOSED_SHELL" => {
+                        self.shell
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "ORIENTED_OPEN_SHELL" => {
+                        if let Parameter::List(params) = &record.parameter {
+                            if params.len() == 4 {
+                                self.oriented_shell.insert(
+                                    *id,
+                                    OrientedShellHolder {
+                                        label: Deserialize::deserialize(&params[0])?,
+                                        shell_element: Deserialize::deserialize(&params[2])?,
+                                        orientation: Deserialize::deserialize(&params[3])?,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    "ORIENTED_CLOSED_SHELL" => {
+                        if let Parameter::List(params) = &record.parameter {
+                            if params.len() == 4 {
+                                self.oriented_shell.insert(
+                                    *id,
+                                    OrientedShellHolder {
+                                        label: Deserialize::deserialize(&params[0])?,
+                                        shell_element: Deserialize::deserialize(&params[2])?,
+                                        orientation: Deserialize::deserialize(&params[3])?,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    "SHELL_BASED_SURFACE_MODEL" => {
+                        self.shell_based_surface_model
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "MANIFOLD_SOLID_BREP" => {
+                        if let Parameter::List(params) = &record.parameter {
+                            if params.len() == 2 {
+                                self.manifold_solid_brep.insert(
+                                    *id,
+                                    ManifoldSolidBrepHolder {
+                                        label: Deserialize::deserialize(&params[0])?,
+                                        outer: Deserialize::deserialize(&params[1])?,
+                                        voids: Vec::new(),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    "BREP_WITH_VOIDS" => {
+                        self.manifold_solid_brep
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "DEFINITIONAL_REPRESENTATION" => {
+                        if let Parameter::List(params) = &record.parameter {
+                            if params.len() == 3 {
+                                self.definitional_representation.insert(
+                                    *id,
+                                    DefinitionalRepresentationHolder {
+                                        label: Deserialize::deserialize(&params[0])?,
+                                        representation_item: Deserialize::deserialize(&params[1])?,
+                                        context_of_items: match &params[2] {
+                                            Parameter::Ref(x) => PlaceHolder::Ref(x.clone()),
+                                            _ => PlaceHolder::Owned(DummyHolder {
+                                                record: format!("{:?}", params[2]),
+                                                is_simple: true,
+                                            }),
+                                        },
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    "APPLICATION_CONTEXT" => {
+                        self.application_context
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "PRODUCT_CONTEXT" => {
+                        self.product_context
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "PRODUCT" => {
+                        self.product
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "PRODUCT_DEFINITION_FORMATION" => {
+                        self.product_definition_formation
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE" => {
+                        if let Parameter::List(params) = &record.parameter {
+                            if params.len() >= 3 {
+                                self.product_definition_formation.insert(
+                                    *id,
+                                    ProductDefinitionFormationHolder {
+                                        id: Deserialize::deserialize(&params[0])?,
+                                        description: Deserialize::deserialize(&params[1])?,
+                                        of_product: Deserialize::deserialize(&params[2])?,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    "PRODUCT_DEFINITION_CONTEXT" => {
+                        self.product_definition_context
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "PRODUCT_DEFINITION" => {
+                        self.product_definition
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "PRODUCT_DEFINITION_SHAPE" => {
+                        self.product_definition_shape
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "SHAPE_DEFINITION_REPRESENTATION" => {
+                        self.shape_definition_representation
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "SHAPE_REPRESENTATION" => {
+                        self.shape_representation
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "ADVANCED_BREP_SHAPE_REPRESENTATION" => {
+                        self.shape_representation
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION" => {
+                        self.context_dependent_shape_representation
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "SHAPE_REPRESENTATION_RELATIONSHIP" => {
+                        self.shape_representation_relationship
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "NEXT_ASSEMBLY_USAGE_OCCURRENCE" => {
+                        self.next_assembly_usage_occurrence
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    "ITEM_DEFINED_TRANSFORMATION" => {
+                        self.item_defined_transformation
+                            .insert(*id, Deserialize::deserialize(&record.parameter)?);
+                    }
+                    _ => {
+                        self.dummy.insert(
+                            *id,
+                            DummyHolder {
+                                record: format!("{record:?}"),
+                                is_simple: true,
+                            },
+                        );
+                    }
                 }
-                "PRODUCT_DEFINITION_CONTEXT" => {
-                    self.product_definition_context
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "PRODUCT_DEFINITION" => {
-                    self.product_definition
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "PRODUCT_DEFINITION_SHAPE" => {
-                    self.product_definition_shape
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "SHAPE_DEFINITION_REPRESENTATION" => {
-                    self.shape_definition_representation
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "SHAPE_REPRESENTATION" => {
-                    self.shape_representation
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "ADVANCED_BREP_SHAPE_REPRESENTATION" => {
-                    self.shape_representation
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION" => {
-                    self.context_dependent_shape_representation
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "SHAPE_REPRESENTATION_RELATIONSHIP" => {
-                    self.shape_representation_relationship
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "NEXT_ASSEMBLY_USAGE_OCCURRENCE" => {
-                    self.next_assembly_usage_occurrence
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                "ITEM_DEFINED_TRANSFORMATION" => {
-                    self.item_defined_transformation
-                        .insert(*id, Deserialize::deserialize(&record.parameter)?);
-                }
-                _ => {
-                    self.dummy.insert(
-                        *id,
-                        DummyHolder {
-                            record: format!("{record:?}"),
-                            is_simple: true,
-                        },
-                    );
-                }
-            },
+            }
             EntityInstance::Complex {
                 id,
                 subsuper: SubSuperRecord(records),
