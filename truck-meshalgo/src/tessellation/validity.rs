@@ -64,6 +64,11 @@ pub enum DegenerateFaceReason {
     /// a one-dimensional curve in world space — the surface metric degenerates
     /// one direction.
     ZeroWidthBand,
+    /// Parity selected a real parameter-space region but every realized
+    /// triangle collapses in world space to at or below the world-area
+    /// validation floor (`1e-12`): a physically sub-resolution sliver at the
+    /// meshing resolution. Detector C, from the CDT result stage.
+    SubToleranceSliver,
 }
 
 impl DegenerateFaceReason {
@@ -74,6 +79,7 @@ impl DegenerateFaceReason {
             Self::LineLikeTrim => "LineLikeTrim",
             Self::PointLikeTrim => "PointLikeTrim",
             Self::ZeroWidthBand => "ZeroWidthBand",
+            Self::SubToleranceSliver => "SubToleranceSliver",
         }
     }
 }
@@ -118,7 +124,10 @@ pub enum FaceAdmissibility {
 ///
 /// The invariant that every automatically rejected face satisfies: the
 /// certificate's `world_rank` is 0 or 1, or the reason is
-/// [`DegenerateFaceReason::AllBoundsCollapsed`]. There is deliberately no bare
+/// [`DegenerateFaceReason::AllBoundsCollapsed`] (boundary rank never measured)
+/// or [`DegenerateFaceReason::SubToleranceSliver`] (the rank is measured from
+/// the realized triangles, not the boundary, and a sub-floor sliver may still
+/// carry two tiny world directions). There is deliberately no bare
 /// `is_bad_face()` boolean — a rejection is always accompanied by its
 /// certificate.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -155,6 +164,12 @@ pub struct FaceValidityCertificate {
     /// The support-surface local metric scale `(avg |Su|, avg |Sv|)`, when the
     /// pipeline could compute it. Diagnostic.
     pub metric_scale: Option<(f64, f64)>,
+    /// The number of triangles the material-parity selection produced, when the
+    /// certificate was made at the CDT result stage (Detector C). Diagnostic.
+    pub selected_triangle_count: Option<usize>,
+    /// The maximum world-space area of a realized (selected) triangle, when the
+    /// certificate was made at the CDT result stage (Detector C). Diagnostic.
+    pub max_realized_area: Option<f64>,
 }
 
 impl FaceValidityCertificate {
@@ -178,6 +193,43 @@ impl FaceValidityCertificate {
             uv_extents: None,
             world_extents: None,
             metric_scale: None,
+            selected_triangle_count: None,
+            max_realized_area: None,
+        }
+    }
+
+    /// A certificate for Detector C: the material-parity stage selected a
+    /// region, but every realized triangle collapsed to at or below the
+    /// world-area validation floor. The `world_rank` here is measured from the
+    /// realized triangle vertices, which may legitimately be 2 (two tiny world
+    /// directions); the reason records that the *region* is sub-resolution.
+    pub fn sub_tolerance_sliver(
+        bound_count: usize,
+        piece_count: usize,
+        world_rank: u8,
+        rank_span: f64,
+        rank_max_perp: f64,
+        rank_tolerance: f64,
+        uv_extents: (f64, f64),
+        world_extents: (f64, f64, f64),
+        selected_triangle_count: usize,
+        max_realized_area: f64,
+    ) -> Self {
+        Self {
+            reason: DegenerateFaceReason::SubToleranceSliver,
+            bound_count,
+            piece_count,
+            world_rank,
+            rank_span: Some(rank_span),
+            rank_max_perp: Some(rank_max_perp),
+            rank_tolerance: Some(rank_tolerance),
+            signed_area: None,
+            normalized_area: None,
+            uv_extents: Some(uv_extents),
+            world_extents: Some(world_extents),
+            metric_scale: None,
+            selected_triangle_count: Some(selected_triangle_count),
+            max_realized_area: Some(max_realized_area),
         }
     }
 }
@@ -264,7 +316,7 @@ pub const UV_AREA_FILL_RATIO: f64 = 0.02;
 /// line within floating-point error": the computed distance carries an error
 /// of order `EPSILON * coordinate_magnitude`, so the tolerance is derived from
 /// the coordinate magnitude, not from any meshing tolerance.
-fn world_rank_of(points: &[Point3]) -> (u8, f64, f64, f64) {
+pub fn world_rank_of(points: &[Point3]) -> (u8, f64, f64, f64) {
     let scale = points
         .iter()
         .fold(0.0_f64, |acc, p| acc.max(p.to_vec().magnitude()));
@@ -425,6 +477,8 @@ pub fn classify_trim_geometry(
         uv_extents: Some(measurement.uv_extents),
         world_extents: Some(measurement.world_extents),
         metric_scale: measurement.metric_scale,
+        selected_triangle_count: None,
+        max_realized_area: None,
     };
     match measurement.world_rank {
         0 => Some(certificate(DegenerateFaceReason::PointLikeTrim)),

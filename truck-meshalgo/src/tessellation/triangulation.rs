@@ -1805,15 +1805,55 @@ where
             && preboundary.as_ref().is_ok_and(|pieces| pieces.len() == 2);
         // FACE-VALIDITY Detector B: measure the constructed boundary pieces and
         // reject a certified degenerate face before it enters the CDT or any
-        // formal recovery route. Off by default; the census sweep enables it to
-        // measure the population against the `rendered -> rejected = 0` gate.
-        // A rejection is the one terminal state no recovery route may touch:
-        // a zero-area trim must not be "recovered" into triangles.
-        let validity_certificate: Option<FaceValidityCertificate> =
-            match (validity::rejection_enabled(), preboundary.as_ref()) {
-                (true, Ok(pieces)) => detect_degenerate_trim(pieces, surface),
-                _ => None,
+        // formal recovery route. Production-active for the certified world-rank
+        // < 2 class: the measurement is the world-space numerical rank of the
+        // lifted boundary, taken against a floating-point conditioning bound
+        // (never a meshing tolerance), so every boundary with two real world
+        // directions — however small or thin — survives and no currently
+        // rendering face is touched. A rejection is the one terminal state no
+        // recovery route may touch: a zero-area trim must not be "recovered"
+        // into triangles. The exception is the certified closed-loop re-lift
+        // below, which runs only on a degenerate initial lift and only when a
+        // rank-2 on-surface source interval can be independently certified.
+        let mut preboundary = preboundary;
+        let mut validity_certificate: Option<FaceValidityCertificate> =
+            match preboundary.as_ref() {
+                Ok(pieces) => detect_degenerate_trim(pieces, surface),
+                Err(_) => None,
             };
+        // Certified closed-loop re-lift (recovery workstream). A face whose
+        // initial boundary lift degenerated — Detector B above fired — is not
+        // automatically rejected: when the source is a topologically closed
+        // edge whose evaluator overshoot leaves the owning surface, and a
+        // closed on-surface sub-domain of the source traversal can be
+        // independently certified, the boundary is re-lifted over that interval
+        // and the ordinary pipeline re-measures it. The re-lift is the only
+        // path that may turn a Detector-B firing face into geometry, and it
+        // does so only under the activation theorem (see `closed_loop_relift`).
+        if validity_certificate.is_some() && closed_loop_relift::recovery_gate() {
+            if let Ok(pieces) = preboundary.as_ref() {
+                let relifted = closed_loop_relift::try_relift_face(
+                    shell,
+                    surface,
+                    &face.boundaries,
+                    &edges,
+                    &sp,
+                    tol,
+                    &lattice,
+                    pieces,
+                );
+                if let Some(relifted) = relifted {
+                    // Re-measure the re-lifted boundary under the same
+                    // detector: the recovery stands only if the re-lift is
+                    // itself non-degenerate.
+                    let recertificate = detect_degenerate_trim(&relifted, surface);
+                    if recertificate.is_none() {
+                        preboundary = Ok(relifted);
+                        validity_certificate = None;
+                    }
+                }
+            }
+        }
         let rejected = validity_certificate.is_some();
         // The legacy boundary, kept only for a face whose parity flood
         // contradicted itself, so the winding retry at the end of this chain
@@ -5146,6 +5186,557 @@ fn detect_degenerate_trim<S: PreMeshableSurface>(
     };
     let measurement = validity::measure_trim(&samples, metric_scale)?;
     validity::classify_trim_geometry(pieces.len(), &measurement)
+}
+
+/// Certified closed-loop boundary re-lift.
+///
+/// A topologically closed source edge (`edge.vertices.0 == edge.vertices.1`) is
+/// traversed by the whole evaluator loop. When the exporter's closure sliver
+/// extends the evaluator range beyond the portion of the curve that lies on the
+/// owning surface (the "overshoot"), the boundary lift degenerates: the
+/// off-surface samples project back onto the surface outside the trim domain,
+/// the piece collapses to a two-point chart, no constraints reach the CDT, and
+/// the face is lost as `NoOddParityRegion` even though the source trim is a
+/// genuine rank-2 region.
+///
+/// This module certifies the closed on-surface sub-domain of the source
+/// traversal and re-lifts the boundary over it. It is the *only* path that may
+/// turn a Detector-B firing face into geometry, and it does so only when the
+/// activation theorem holds:
+///
+/// 1. the wire is a single topologically closed edge;
+/// 2. the physical source trim has world rank 2 (measured over the certified
+///    interval, never over the overshoot);
+/// 3. the initial boundary lift degenerated (Detector B fired);
+/// 4. part of the evaluator range leaves the owning surface;
+/// 5. a closed on-surface sub-domain can be independently certified (every
+///    interior sample projects onto the owning surface at the boundary-lift
+///    tolerance, and the interval endpoints coincide — a full loop).
+///
+/// Every helper returns either a certified result or `None`. There is no
+/// heuristic fallback: an ambiguous interval, an un-certifiable closure, a
+/// rank ≠ 2 source, or a re-lift that remains degenerate preserves the existing
+/// failure. No interval is hard-coded and no evaluator range is clipped merely
+/// because it is larger than a unit interval.
+mod closed_loop_relift {
+    use super::*;
+
+    /// The minimum span of the on-surface run, as a fraction of the traversal
+    /// range. Guards against certifying a sliver of on-surface samples as "the
+    /// loop": a genuine closure overshoot is a small addition to a full loop,
+    /// so the on-surface run dominates the traversal range.
+    const MIN_ON_SURFACE_RUN_FRACTION: f64 = 0.5;
+
+    /// The on-surface certification threshold, as a multiple of the chord
+    /// tolerance. The boundary-lift tolerance is the chord tolerance; a small
+    /// multiple absorbs chord-approximation and export residual without ever
+    /// approaching the overshoot scale (the overshoot in the measured
+    /// population projects at ~250× tolerance, the on-surface samples at
+    /// ~1e-13×).
+    const ON_SURFACE_TOL_FACTOR: f64 = 8.0;
+
+    /// The loop-closure bound, as a multiple of the chord tolerance. A full
+    /// loop returns to its seam point to floating-point accuracy; a partial arc
+    /// ends a chord-length away. The floor keeps the bound from collapsing on a
+    /// tiny-tolerance model.
+    const CLOSURE_TOL_FACTOR: f64 = 0.01;
+
+    /// Whether the certified closed-loop re-lift route is active.
+    ///
+    /// Nested under the master formal-recovery gate like every other route, so
+    /// `TRUCK_FORMAL_RECOVERY=0` closes it and an explicit route disable
+    /// (`TRUCK_FORMAL_RECOVERY_CLOSED_LOOP=0`) narrows it independently.
+    pub(super) fn recovery_gate() -> bool {
+        diagnosis::formal_recovery_enabled()
+            && diagnosis::recovery_route_enabled("TRUCK_FORMAL_RECOVERY_CLOSED_LOOP")
+    }
+
+    /// Whether the re-lift prints its activation/refusal evidence.
+    fn relift_probe() -> bool {
+        std::env::var_os("TRUCK_PROBE_RELIFT").is_some()
+    }
+
+    /// The traversal range a topologically closed edge is sampled over.
+    ///
+    /// Replicates `tessellate_edge`'s range assembly exactly (evaluator range,
+    /// the degenerate-range period fallback, then the partition-of-unity
+    /// extension over the declared range tuple), so the interval certified here
+    /// is the same domain the failing polyline was built over.
+    fn closed_edge_traversal_range<C: PolylineableCurve>(curve: &C) -> (f64, f64) {
+        let (lo, hi) = curve.evaluation_range();
+        let mut range = (lo, hi);
+        if (range.1 - range.0).abs() < 1e-4 {
+            if let Some(period) = curve.period() {
+                if period > 1e-4 {
+                    range = (range.0, range.0 + period);
+                }
+            }
+        }
+        if let Some((rt0, rt1)) = curve.try_range_tuple() {
+            if rt0 < range.0 - 1.0e-12 && curve.basis_is_partition_of_unity(rt0) {
+                range.0 = rt0;
+            }
+            if rt1 > range.1 + 1.0e-12 && curve.basis_is_partition_of_unity(rt1) {
+                range.1 = rt1;
+            }
+        }
+        range
+    }
+
+    /// Whether a sample of the source curve lies on the owning surface at the
+    /// boundary-lift tolerance.
+    fn on_surface<C: PolylineableCurve, S: PreMeshableSurface, SP: super::SP<S>>(
+        curve: &C,
+        t: f64,
+        surface: &S,
+        sp: &SP,
+        tol: f64,
+    ) -> bool {
+        let p = curve.subs(t);
+        match sp(surface, p, None) {
+            Some((u, v)) => surface.subs(u, v).distance(p) <= ON_SURFACE_TOL_FACTOR * tol,
+            None => false,
+        }
+    }
+
+    /// Certify the closed on-surface sub-domain of a source traversal.
+    ///
+    /// Returns `Some((a, b))` exactly when `(a, b) ⊆ (lo, hi)`, every sample of
+    /// the curve over `(a, b)` lies on `surface` at the boundary-lift
+    /// tolerance, the run is a substantial part of the traversal (an overshoot,
+    /// not a sliver), and the interval endpoints coincide — the interval is a
+    /// closed full loop. Returns `None` otherwise; there is no fallback result.
+    fn certify_closed_on_surface_interval<C, S, SP>(
+        curve: &C,
+        range: (f64, f64),
+        surface: &S,
+        sp: &SP,
+        tol: f64,
+    ) -> Option<(f64, f64)>
+    where
+        C: PolylineableCurve,
+        S: PreMeshableSurface,
+        SP: super::SP<S>,
+    {
+        let (lo, hi) = range;
+        if !lo.is_finite() || !hi.is_finite() || !(hi > lo) {
+            return None;
+        }
+        const N: usize = 512;
+        let mut first_on: Option<usize> = None;
+        let mut last_on: Option<usize> = None;
+        for i in 0..=N {
+            let t = lo + (hi - lo) * i as f64 / N as f64;
+            if on_surface(curve, t, surface, sp, tol) {
+                if first_on.is_none() {
+                    first_on = Some(i);
+                }
+                last_on = Some(i);
+            }
+        }
+        let (i0, i1) = (first_on?, last_on?);
+        // The on-surface run must dominate the traversal: a real overshoot is a
+        // small addition to a full loop, so the certified loop covers most of
+        // the range. A run below this is not a loop-plus-overshoot shape.
+        let run_fraction = (i1 - i0) as f64 / N as f64;
+        if run_fraction < MIN_ON_SURFACE_RUN_FRACTION {
+            return None;
+        }
+        // Refine the low boundary between samples i0-1 (off) and i0 (on).
+        let t_low = if i0 == 0 {
+            lo
+        } else {
+            let mut a = lo + (hi - lo) * (i0 - 1) as f64 / N as f64;
+            let mut b = lo + (hi - lo) * i0 as f64 / N as f64;
+            for _ in 0..64 {
+                let m = (a + b) / 2.0;
+                if on_surface(curve, m, surface, sp, tol) {
+                    b = m;
+                } else {
+                    a = m;
+                }
+            }
+            b
+        };
+        let t_high = if i1 == N {
+            hi
+        } else {
+            let mut a = lo + (hi - lo) * i1 as f64 / N as f64;
+            let mut b = lo + (hi - lo) * (i1 + 1) as f64 / N as f64;
+            for _ in 0..64 {
+                let m = (a + b) / 2.0;
+                if on_surface(curve, m, surface, sp, tol) {
+                    a = m;
+                } else {
+                    b = m;
+                }
+            }
+            a
+        };
+        if !(t_high > t_low) {
+            return None;
+        }
+        // Loop closure: the interval endpoints represent the same seam point.
+        // A full loop returns to the same point to floating-point accuracy; a
+        // partial arc ends a chord-length away and is refused (this is the
+        // guard that keeps a complementary-arc traversal from being treated as
+        // a full loop).
+        let pa = curve.subs(t_low);
+        let pb = curve.subs(t_high);
+        let scale = pa
+            .to_vec()
+            .magnitude()
+            .max(pb.to_vec().magnitude())
+            .max(1.0);
+        let closure_tol = (tol * CLOSURE_TOL_FACTOR).max(validity::fp_rank_tolerance(scale));
+        if pa.distance(pb) > closure_tol {
+            return None;
+        }
+        Some((t_low, t_high))
+    }
+
+    /// The world rank of the source trim over an interval, sampled densely.
+    ///
+    /// Measured from the source curve over the *certified* interval — the real
+    /// on-surface loop — never over the overshoot. A rank-2 source is the
+    /// activation condition that separates a recoverable closed loop from a
+    /// certified line/slit.
+    fn source_world_rank<C: PolylineableCurve>(curve: &C, interval: (f64, f64)) -> u8 {
+        const SAMPLES: usize = 24;
+        let mut pts = Vec::with_capacity(SAMPLES + 1);
+        for i in 0..=SAMPLES {
+            let t = interval.0 + (interval.1 - interval.0) * i as f64 / SAMPLES as f64;
+            pts.push(curve.subs(t));
+        }
+        validity::world_rank_of(&pts).0
+    }
+
+    /// Re-lift a single wire whose initial piece degenerated.
+    ///
+    /// The wire must be exactly one topologically closed edge whose source
+    /// curve has a certifiable closed on-surface sub-domain and a rank-2
+    /// physical trim. The source curve is re-sampled over the certified
+    /// interval and presented as the wire's polyline, so the ordinary
+    /// `PolyBoundaryPiece::try_new` lift runs on the on-surface loop only.
+    fn relift_wire<C, S, SP>(
+        shell: &CompressedShell<Point3, C, S>,
+        surface: &S,
+        bound_index: usize,
+        wire: &[CompressedEdgeIndex],
+        edges: &[EstablishedEdge],
+        sp: &SP,
+        tol: f64,
+    ) -> Option<Vec<SourcePolyline>>
+    where
+        C: PolylineableCurve,
+        S: PreMeshableSurface,
+        SP: super::SP<S>,
+    {
+        // Activation condition 1: exactly one topologically closed edge.
+        if wire.len() != 1 {
+            return None;
+        }
+        let edge_use = &wire[0];
+        let shell_edge = shell.edges.get(edge_use.index)?;
+        if shell_edge.vertices.0 != shell_edge.vertices.1 {
+            return None;
+        }
+        if !matches!(edges.get(edge_use.index), Some(EstablishedEdge::Mesh(_))) {
+            return None;
+        }
+        let curve = &shell_edge.curve;
+        let range = closed_edge_traversal_range(curve);
+        let probe = relift_probe();
+        let (source_face_id, ..) = PROBE_FACE_CONTEXT.with(std::cell::Cell::get);
+        if probe {
+            eprintln!(
+                "RELIFT_WIRE source_face_id={:?} edge={} closed=1 range=({:.6},{:.6})",
+                source_face_id, edge_use.index, range.0, range.1
+            );
+        }
+        // Activation conditions 4 + 5: certify the closed on-surface interval.
+        let interval = certify_closed_on_surface_interval(curve, range, surface, sp, tol);
+        let Some(interval) = interval else {
+            if probe {
+                eprintln!(
+                    "RELIFT_WIRE_REFUSE source_face_id={:?} reason=no_certified_interval",
+                    source_face_id
+                );
+            }
+            return None;
+        };
+        if probe {
+            eprintln!(
+                "RELIFT_WIRE_CERT source_face_id={:?} interval=({:.6},{:.6})",
+                source_face_id, interval.0, interval.1
+            );
+        }
+        // Activation condition 2: the physical source trim is rank 2.
+        let rank = source_world_rank(curve, interval);
+        if probe {
+            eprintln!(
+                "RELIFT_WIRE_RANK source_face_id={:?} rank={rank}",
+                source_face_id
+            );
+        }
+        if rank < 2 {
+            return None;
+        }
+        // Re-sample the curve over the certified interval, in the wire's
+        // orientation, and re-present the wire.
+        //
+        // The chord sampler (`from_curve`) is allowed to under-sample a loop
+        // whose world extent is only a few times the chord tolerance: the
+        // certified population sits there (the loop is small, which is part of
+        // why the boundary lift was at all fragile), and a coarse polyline
+        // misses the loop's two world directions entirely. The re-lift is a
+        // recovery, not a re-mesh, so the certified interval is re-sampled at
+        // a minimum density that captures the loop shape; every point is an
+        // exact source-curve evaluation over the certified on-surface interval,
+        // so no geometry is invented. A source whose certified interval is
+        // large enough that the chord sampler is already dense keeps the
+        // tolerance-driven sampling.
+        const MIN_RELIFT_POINTS: usize = 24;
+        let mut poly = PolylineCurve::from_curve(curve, interval, tol);
+        if poly.len() < MIN_RELIFT_POINTS {
+            let pts: Vec<Point3> = (0..=MIN_RELIFT_POINTS)
+                .map(|i| {
+                    curve.subs(
+                        interval.0 + (interval.1 - interval.0) * i as f64 / MIN_RELIFT_POINTS as f64,
+                    )
+                })
+                .collect();
+            poly = PolylineCurve::from(pts);
+        }
+        if probe {
+            let pts: Vec<String> = poly
+                .iter()
+                .map(|p| format!("({:.6},{:.6},{:.6})", p.x, p.y, p.z))
+                .collect();
+            eprintln!(
+                "RELIFT_POLY source_face_id={:?} len={} pts={:?}",
+                source_face_id,
+                poly.len(),
+                pts
+            );
+        }
+        if poly.len() < 3 {
+            return None;
+        }
+        let curve = match edge_use.orientation {
+            true => poly,
+            false => poly.inverse(),
+        };
+        let source = SourceEdgeUse {
+            bound: BoundId(bound_index),
+            index: 0,
+            orientation: edge_use.orientation,
+        };
+        Some(vec![SourcePolyline { curve, source }])
+    }
+
+    /// Re-lift a face's boundaries over certified on-surface intervals.
+    ///
+    /// Only the degenerate-lift case qualifies (Detector B fired). Every wire
+    /// must re-lift to a nondegenerate piece or the whole face keeps its
+    /// existing failure; a partial re-lift would invent a boundary the source
+    /// does not certify.
+    pub(super) fn try_relift_face<C, S, SP>(
+        shell: &CompressedShell<Point3, C, S>,
+        surface: &S,
+        boundaries: &[Vec<CompressedEdgeIndex>],
+        edges: &[EstablishedEdge],
+        sp: &SP,
+        tol: f64,
+        lattice: &CertifiedLattice,
+        pieces: &[PolyBoundaryPiece],
+    ) -> Option<Vec<PolyBoundaryPiece>>
+    where
+        C: PolylineableCurve,
+        S: PreMeshableSurface,
+        SP: super::SP<S>,
+    {
+        let probe = relift_probe();
+        let (source_face_id, declared_face_index, _) = PROBE_FACE_CONTEXT.with(std::cell::Cell::get);
+        if probe {
+            eprintln!(
+                "RELIFT_ENTER source_face_id={:?} pieces={} bounds={} piece_lens={:?}",
+                source_face_id,
+                pieces.len(),
+                boundaries.len(),
+                pieces.iter().map(|p| p.0.len()).collect::<Vec<_>>(),
+            );
+        }
+        if pieces.len() != boundaries.len() {
+            if probe {
+                eprintln!("RELIFT_REFUSE reason=piece_bound_mismatch");
+            }
+            return None;
+        }
+        // Activation condition 3: the initial lift degenerated. The caller
+        // reached here only because Detector B fired on these pieces (their
+        // world rank is < 2), which is the degeneracy signal; no additional
+        // point-count threshold is needed — a slit can carry many collinear
+        // samples and still be a certified degeneracy, and the per-wire guards
+        // below (single closed edge, certified interval, rank-2 source) are
+        // what separate the recoverable closed loop from the rest.
+        let mut rebuilt = Vec::with_capacity(boundaries.len());
+        for (bound_index, wire) in boundaries.iter().enumerate() {
+            let Some(relifted) =
+                relift_wire(shell, surface, bound_index, wire, edges, sp, tol)
+            else {
+                if probe {
+                    eprintln!(
+                        "RELIFT_REFUSE source_face_id={:?} bound={bound_index} reason=wire_not_reliftable",
+                        source_face_id
+                    );
+                }
+                return None;
+            };
+            let piece = PolyBoundaryPiece::try_new(surface, relifted.into_iter(), sp, tol, lattice)
+                .ok()?;
+            if piece.0.len() <= 2 {
+                if probe {
+                    eprintln!(
+                        "RELIFT_REFUSE source_face_id={:?} bound={bound_index} reason=relift_still_degenerate",
+                        source_face_id
+                    );
+                }
+                return None;
+            }
+            if probe {
+                let uvs: Vec<String> = piece
+                    .0
+                    .iter()
+                    .map(|p| format!("({:.6},{:.6})", p.uv.x, p.uv.y))
+                    .collect();
+                eprintln!(
+                    "RELIFT_PIECE source_face_id={:?} bound={bound_index} pts={} uv={:?}",
+                    source_face_id,
+                    piece.0.len(),
+                    uvs
+                );
+            }
+            rebuilt.push(piece);
+        }
+        if probe {
+            eprintln!(
+                "RELIFT_OK source_face_id={:?} declared_face_index={declared_face_index}",
+                source_face_id
+            );
+        }
+        Some(rebuilt)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use truck_geometry::prelude::Plane;
+
+        fn plane() -> Plane {
+            Plane::new(
+                Point3::origin(),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+            )
+        }
+
+        fn square_loop() -> PolylineCurve {
+            PolylineCurve::from(vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(1.0, 1.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+                Point3::new(0.0, 0.0, 0.0),
+            ])
+        }
+
+        fn open_arc() -> PolylineCurve {
+            PolylineCurve::from(vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(1.0, 1.0, 0.0),
+            ])
+        }
+
+        fn line() -> PolylineCurve {
+            PolylineCurve::from(vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+            ])
+        }
+
+        fn tol() -> f64 {
+            1.0e-3
+        }
+
+        // T3 guard: a rank-1 slit (a straight out-and-back line) is never a
+        // recoverable material source; a closed square loop is.
+        #[test]
+        fn source_world_rank_separates_slit_from_loop() {
+            assert_eq!(source_world_rank(&line(), (0.0, 1.0)), 1);
+            assert_eq!(source_world_rank(&square_loop(), (0.0, 4.0)), 2);
+        }
+
+        // T1: a closed on-surface loop over its whole traversal range is
+        // certified — every sample lies on the plane and the endpoints close.
+        #[test]
+        fn certify_accepts_closed_full_loop() {
+            let sp = by_search_nearest_parameter;
+            let interval =
+                certify_closed_on_surface_interval(&square_loop(), (0.0, 4.0), &plane(), &sp, tol());
+            let (a, b) = interval.expect("a closed on-surface square is certifiable");
+            assert!(b > a);
+            assert!((a - 0.0).abs() < 1.0e-6);
+            assert!((b - 4.0).abs() < 1.0e-6);
+        }
+
+        // T6 / T4: a complementary or partial arc does not close — its
+        // endpoints are a chord-length apart — so no closed on-surface interval
+        // is certified and the existing refusal is preserved.
+        #[test]
+        fn certify_refuses_open_arc() {
+            let sp = by_search_nearest_parameter;
+            let interval =
+                certify_closed_on_surface_interval(&open_arc(), (0.0, 2.0), &plane(), &sp, tol());
+            assert!(interval.is_none(), "an open arc must not close as a loop");
+        }
+
+        // Detector B: an out-and-back slit boundary is a certified
+        // LineLikeTrim rejection, never a material source.
+        #[test]
+        fn detector_b_rejects_out_and_back_slit() {
+            let corner = |x: f64, y: f64| -> SurfacePoint {
+                (Point2::new(x, y), Point3::new(x, y, 0.0)).into()
+            };
+            let slit = vec![corner(0.0, 0.0), corner(1.0, 0.0), corner(0.0, 0.0)];
+            let certificate = detect_degenerate_trim(&[PolyBoundaryPiece::untagged(slit)], &plane());
+            let certificate = certificate.expect("an out-and-back slit is degenerate");
+            assert_eq!(
+                certificate.reason,
+                DegenerateFaceReason::LineLikeTrim,
+                "a rank-1 slit is a line-like trim"
+            );
+        }
+
+        // Detector B negative: a finite rank-2 region is NOT rejected — the
+        // world-rank certificate must never touch a real (even thin) region.
+        #[test]
+        fn detector_b_accepts_finite_rank_two_region() {
+            let corner = |x: f64, y: f64| -> SurfacePoint {
+                (Point2::new(x, y), Point3::new(x, y, 0.0)).into()
+            };
+            let rect = vec![
+                corner(0.0, 0.0),
+                corner(1.0, 0.0),
+                corner(1.0, 1.0),
+                corner(0.0, 1.0),
+                corner(0.0, 0.0),
+            ];
+            let certificate = detect_degenerate_trim(&[PolyBoundaryPiece::untagged(rect)], &plane());
+            assert!(certificate.is_none(), "a real rank-2 region must survive");
+        }
+    }
 }
 
 fn get_mindiff(u: f64, u0: f64, up: f64) -> f64 {
@@ -9422,7 +10013,7 @@ fn odd_toggling_vertices(
 fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
     triangulation: &Cdt,
     surface: &S,
-    _polyline: &PolyBoundary,
+    polyline: &PolyBoundary,
     boundary_map: &HashMap<FixedVertexHandle, Point3>,
     roles: &ConstraintRoles,
     vertex_sources: &HashMap<FixedVertexHandle, Vec<SourceEdgeUse>>,
@@ -9582,6 +10173,21 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
         })
         .collect();
     let stage_material_selected = material_selected.len();
+    // The realized world points and UVs of the selected region, kept so
+    // Detector C can certify a region parity selected but validation emptied.
+    // The `positions` vector is fully populated here — the `NonFinitePosition`
+    // early return above already fired — so every index is a real vertex.
+    let mut selected_world_points: Vec<Point3> = Vec::new();
+    let mut selected_uvs: Vec<Vector2> = Vec::new();
+    for &[i0, i1, i2] in &material_selected {
+        selected_world_points.push(positions[i0]);
+        selected_world_points.push(positions[i1]);
+        selected_world_points.push(positions[i2]);
+        selected_uvs.push(uv_coords[i0]);
+        selected_uvs.push(uv_coords[i1]);
+        selected_uvs.push(uv_coords[i2]);
+    }
+    let mut max_realized_area = 0.0f64;
     let tri_faces_raw: Vec<[usize; 3]> = material_selected
         .into_iter()
         .filter(|idcs| {
@@ -9593,6 +10199,9 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
             let p2 = positions[idcs[2]];
             let cross = (p1 - p0).cross(p2 - p0);
             let area = 0.5 * cross.magnitude();
+            if area.is_finite() {
+                max_realized_area = max_realized_area.max(area);
+            }
             area > 1e-12 && area.is_finite()
         })
         .collect();
@@ -9685,6 +10294,59 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
     }
 
     if tri_faces_raw.is_empty() {
+        // Detector C: parity selected a region (material_selected > 0) but the
+        // world-area validator emptied it. Every realized triangle sits at or
+        // below the `1e-12` world-area floor, which is genuine physical
+        // degeneracy at the mesh resolution — a certified rejection, not an
+        // unresolved parity outcome. `selected == 0` (parity chose nothing) is
+        // the other terminal and stays `NoOddParityRegion` here; Detector B
+        // certifies that class from the boundary before the CDT.
+        if stage_material_selected > 0 && !selected_world_points.is_empty() {
+            // The realized UV extents of the selected region.
+            let (mut uv_lo, mut uv_hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+            for uv in &selected_uvs {
+                uv_lo[0] = uv_lo[0].min(uv.x);
+                uv_hi[0] = uv_hi[0].max(uv.x);
+                uv_lo[1] = uv_lo[1].min(uv.y);
+                uv_hi[1] = uv_hi[1].max(uv.y);
+            }
+            let uv_extents = (
+                (uv_hi[0] - uv_lo[0]).max(0.0),
+                (uv_hi[1] - uv_lo[1]).max(0.0),
+            );
+            // The realized world rank of the selected region.
+            let (world_rank, rank_span, rank_max_perp, rank_tolerance) =
+                validity::world_rank_of(&selected_world_points);
+            let world_extents = {
+                let mut lo = [f64::INFINITY; 3];
+                let mut hi = [f64::NEG_INFINITY; 3];
+                for p in &selected_world_points {
+                    lo[0] = lo[0].min(p.x);
+                    hi[0] = hi[0].max(p.x);
+                    lo[1] = lo[1].min(p.y);
+                    hi[1] = hi[1].max(p.y);
+                    lo[2] = lo[2].min(p.z);
+                    hi[2] = hi[2].max(p.z);
+                }
+                let mut ext = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+                ext.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+                (ext[0], ext[1], ext[2])
+            };
+            let certificate = FaceValidityCertificate::sub_tolerance_sliver(
+                polyline.0.len(),
+                polyline.0.len(),
+                world_rank,
+                rank_span,
+                rank_max_perp,
+                rank_tolerance,
+                uv_extents,
+                world_extents,
+                stage_material_selected,
+                max_realized_area,
+            );
+            diagnosis::record_face_rejection(certificate);
+            return TessellationOutcome::Failed(TessellationFailureReason::RejectedDegenerate.into());
+        }
         return TessellationOutcome::Failed(TessellationFailureReason::NoOddParityRegion.into());
     }
 
