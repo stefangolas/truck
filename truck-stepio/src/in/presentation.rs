@@ -184,6 +184,9 @@ fn surface_side(param: &Parameter) -> Option<SurfaceSide> {
 fn real(param: &Parameter) -> Option<f64> {
     match param {
         Parameter::Real(value) => Some(*value),
+        // Exporters write whole-number colours as `1` rather than `1.0`; both
+        // are the same source fact.
+        Parameter::Integer(value) => Some(*value as f64),
         _ => None,
     }
 }
