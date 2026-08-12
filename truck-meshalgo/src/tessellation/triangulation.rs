@@ -1552,6 +1552,7 @@ where
             end_pos,
             edge.vertices.0 == edge.vertices.1,
             source_tolerance,
+            tol,
         );
         range = match traversal_verdict {
             source_edge::SourceEdgeTraversal::CanonicalByEvalRange { range } => range,

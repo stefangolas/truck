@@ -12,7 +12,7 @@
 //! whose source vertices sit at interior parameters it does not. This module
 //! decides which of three claims the evidence supports:
 //!
-//! - [`SourceEdgeTraversal::CanonicalByEvalRange`] — the edge's traversal is
+//! - [`SourceEdgeTraversal::CanonicalByEvalRange`] â€” the edge's traversal is
 //!   the whole evaluator domain. For the ordinary population the evaluator
 //!   endpoints realize the distinct source vertices. For a topologically
 //!   closed edge (`edge.vertices.0 == edge.vertices.1`) the full-loop legacy
@@ -22,7 +22,7 @@
 //!   vertex. The caller samples `evaluation_range()` exactly as it did before,
 //!   including its existing closed-edge period and partition-of-unity
 //!   extensions.
-//! - [`SourceEdgeTraversal::CanonicalBySourceInterval`] — the evaluator
+//! - [`SourceEdgeTraversal::CanonicalBySourceInterval`] â€” the evaluator
 //!   endpoints do not realize the source vertices, but both vertices can be
 //!   located at unique interior parameters of the evaluator domain, with
 //!   source-consistent residuals. The traversal follows the curve's natural
@@ -34,7 +34,7 @@
 //!   seam wrap is used only when the start root lies after the end root, which
 //!   is geometric only on a carrier established closed (`C(lo) ~= C(hi)`); an
 //!   open carrier that would need a wrap has no certified traversal.
-//! - [`SourceEdgeTraversal::Unresolved`] — no traversal could be established.
+//! - [`SourceEdgeTraversal::Unresolved`] â€” no traversal could be established.
 //!   This is **not** a licence to sample the evaluator domain: sampling the
 //!   full loop of a closed source crescent would re-emit the malformed
 //!   boundary. The caller must propagate a no-renderable-traversal outcome
@@ -72,7 +72,7 @@
 //! The incidence tolerance is **acceptance only**. It never participates in
 //! localizing a root (the sample-dip scan and golden-section refinement are
 //! tolerance-free), never merges distinct candidates, and never widens the
-//! class of closed carriers. The lo≈hi evaluator-seam equivalence is restricted
+//! class of closed carriers. The loâ‰ˆhi evaluator-seam equivalence is restricted
 //! to carriers that are closed to the fixed numerical tolerance; a large
 //! declared source uncertainty must not turn an open fitted curve into a
 //! wrappable loop. Separating these is what keeps a tolerance as large as a
@@ -84,9 +84,9 @@
 //! bounded, deterministic isolation: a fine sample-dip scan whose candidate set
 //! is verified stable when the grid resolution is doubled, then golden-section
 //! refinement of every surviving candidate, then exactly one distinct
-//! candidate modulo the closed-domain seam. Any observed ambiguity — zero
+//! candidate modulo the closed-domain seam. Any observed ambiguity â€” zero
 //! candidates, several candidates, or a candidate set that changes between the
-//! two resolutions — yields [`SourceEdgeTraversal::Unresolved`]. Failure to
+//! two resolutions â€” yields [`SourceEdgeTraversal::Unresolved`]. Failure to
 //! prove uniqueness is not source invalidity, and it is also not permission to
 //! render a full loop that was never certified.
 
@@ -107,14 +107,14 @@ use super::*;
 ///
 /// Regardless of which value is in force, it is **acceptance-only**. It never
 /// participates in root localization, candidate merging, or the carrier-closure
-/// (lo≈hi seam) decision, which stay at numerically sharp thresholds.
+/// (loâ‰ˆhi seam) decision, which stay at numerically sharp thresholds.
 pub const SOURCE_INCIDENCE_TOLERANCE: f64 = TOLERANCE;
 
 /// The parameter interval of the underlying curve that a source edge denotes.
 ///
 /// `Simple` is an ordinary arc; `Wrapped` crosses the closed evaluator-domain
-/// seam and is represented as two adjacent pieces `[start → domain_end]` and
-/// `[domain_start → end]`.
+/// seam and is represented as two adjacent pieces `[start â†’ domain_end]` and
+/// `[domain_start â†’ end]`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ParamTraversal {
     /// A single increasing-parameter interval within the evaluator domain.
@@ -128,9 +128,9 @@ pub enum ParamTraversal {
     Wrapped {
         /// The start parameter.
         start: f64,
-        /// The evaluator domain's high end (`start → domain_end`).
+        /// The evaluator domain's high end (`start â†’ domain_end`).
         domain_end: f64,
-        /// The evaluator domain's low end (`domain_start → end`).
+        /// The evaluator domain's low end (`domain_start â†’ end`).
         domain_start: f64,
         /// The end parameter.
         end: f64,
@@ -206,12 +206,33 @@ pub enum SourceEdgeTraversal {
 /// context, or [`SOURCE_INCIDENCE_TOLERANCE`] when the source declares none.
 /// It is acceptance-only: it does not localize roots, merge candidates, or
 /// decide carrier closure.
+///
+/// `caller_tol` is the tessellation chord tolerance the caller is about to
+/// sample the edge at. It is **acceptance-only for the endpoint incidence STEP
+/// already declares**: a source vertex realized within the caller's own mesh
+/// error bound is incident for the topology the source already claims. It is
+/// never used to discover new topology, judge carrier closure, decide wrap
+/// classification, or snap a vertex to nearby unrelated geometry.
+///
+/// The two widenings compose as:
+///
+/// ```text
+/// effective_source_tol = max(valid_declared_source_uncertainty, SOURCE_INCIDENCE_TOLERANCE)
+/// incidence_tol        = max(effective_source_tol, caller_tol)
+/// ```
+///
+/// `incidence_tol` verifies the *already source-declared edge endpoint
+/// incidence* (the `CanonicalByEvalRange` check). `effective_source_tol`
+/// bounds the interior root isolation and its residual acceptance. Carrier
+/// closure and wrap classification stay on the fixed
+/// [`SOURCE_INCIDENCE_TOLERANCE`], never the widened values.
 pub fn establish_source_edge_traversal<C>(
     curve: &C,
     start_pos: Point3,
     end_pos: Point3,
     topologically_closed: bool,
     source_tolerance: f64,
+    caller_tol: f64,
 ) -> SourceEdgeTraversal
 where
     C: PolylineableCurve,
@@ -222,6 +243,17 @@ where
             reason: "non_positive_source_tolerance",
         };
     }
+    // A source may declare a *looser* connectivity accuracy than the fixed
+    // numerical tolerance, but never demand *tighter* incidence than the
+    // engine's own floor. A declared `1e-17` (a CAD-export artifact seen in
+    // ABC `00000730`/`00000414`) is not evidence that a residual `~1e-11` is
+    // non-incidence; it is a numerically meaningless precision claim and must
+    // not reject edges the source itself connects.
+    let effective_source_tol = source_tolerance.max(SOURCE_INCIDENCE_TOLERANCE);
+    // Endpoint incidence additionally admits the caller's mesh error bound:
+    // STEP already declares these endpoints are the edge; a vertex realized
+    // within the tolerance the caller is about to mesh at is incident.
+    let incidence_tol = effective_source_tol.max(caller_tol);
 
     // A topologically closed edge (`edge.vertices.0 == edge.vertices.1`) is a
     // full-loop edge: its traversal is the whole evaluator loop, and the
@@ -245,10 +277,13 @@ where
 
     // The evaluator endpoints realize the distinct source vertices: the
     // ordinary P1 population. `CanonicalByEvalRange` preserves its sampling
-    // exactly.
-    if subs_lo.distance(start_pos) <= source_tolerance
-        && subs_hi.distance(end_pos) <= source_tolerance
-    {
+    // exactly. The incidence tolerance is the composed `incidence_tol`: the
+    // source-declared connectivity accuracy (floored) admits approximate
+    // incidence, and the caller's own chord tolerance admits a source vertex
+    // that STEP already declares to be the endpoint, realized within the
+    // error bound the caller is about to mesh at. A CAD shared-vertex that
+    // sits a few `1e-6` off its edge-curve carrier is that population.
+    if subs_lo.distance(start_pos) <= incidence_tol && subs_hi.distance(end_pos) <= incidence_tol {
         return SourceEdgeTraversal::CanonicalByEvalRange { range: (lo, hi) };
     }
 
@@ -264,7 +299,7 @@ where
     // source-interval recovery is attempted at all.
     //
     // Carrier closure is judged against the fixed numerical tolerance, never
-    // against `source_tolerance`. The lo≈hi seam equivalence is a
+    // against `source_tolerance`. The loâ‰ˆhi seam equivalence is a
     // *parameterization* fact -- the curve returns to the same point -- and it
     // is what licenses a wrap through the evaluator seam and the cyclic
     // candidate handling. The STEP source uncertainty is an *incidence* fact:
@@ -278,21 +313,29 @@ where
     // Locate each source vertex at a unique parameter root of the evaluator
     // domain. Each is required to be uniquely established and to hold a
     // source-consistent residual; any ambiguity or failure is `Unresolved`.
-    let Some((t_start, r_start, n_start)) =
-        isolate_vertex_root(curve, start_pos, lo, hi, source_tolerance, carrier_closed)
-    else {
+    // The isolation and residual acceptance run at `effective_source_tol`:
+    // the widened `incidence_tol` is endpoint-incidence acceptance only and
+    // must not license new topology discovery or generic near-curve snapping.
+    let Some((t_start, r_start, n_start)) = isolate_vertex_root(
+        curve,
+        start_pos,
+        lo,
+        hi,
+        effective_source_tol,
+        carrier_closed,
+    ) else {
         return SourceEdgeTraversal::Unresolved {
             reason: "start_vertex_root_not_uniquely_established",
         };
     };
     let Some((t_end, r_end, n_end)) =
-        isolate_vertex_root(curve, end_pos, lo, hi, source_tolerance, carrier_closed)
+        isolate_vertex_root(curve, end_pos, lo, hi, effective_source_tol, carrier_closed)
     else {
         return SourceEdgeTraversal::Unresolved {
             reason: "end_vertex_root_not_uniquely_established",
         };
     };
-    if r_start > source_tolerance || r_end > source_tolerance {
+    if r_start > effective_source_tol || r_end > effective_source_tol {
         return SourceEdgeTraversal::Unresolved {
             reason: "root_residual_exceeds_source_tolerance",
         };
@@ -344,7 +387,9 @@ where
 /// Sample a traversal into a polyline, joining a wrapped interval's two pieces
 /// across the evaluator seam without duplicating the closure sample.
 pub fn sample_traversal<C>(curve: &C, traversal: &ParamTraversal, tol: f64) -> PolylineCurve
-where C: PolylineableCurve {
+where
+    C: PolylineableCurve,
+{
     match traversal {
         ParamTraversal::Simple { start, end } => {
             PolylineCurve::from_curve(curve, (*start, *end), tol)
@@ -385,10 +430,10 @@ const ROOT_SCAN_N: usize = 1 << 16;
 const STABILITY_EPS: f64 = 1.0e-5;
 
 /// Deterministically isolate every source-consistent candidate root of
-/// `d(t) = |C(t) - vertex|²` on `[lo, hi]` at one grid resolution.
+/// `d(t) = |C(t) - vertex|Â²` on `[lo, hi]` at one grid resolution.
 ///
-/// A uniform grid is scanned for *sample dips* — vertices whose squared
-/// distance is no greater than both neighbours' — and each dip is refined to a
+/// A uniform grid is scanned for *sample dips* â€” vertices whose squared
+/// distance is no greater than both neighbours' â€” and each dip is refined to a
 /// local minimum by golden-section search. Every root of `d` at or below
 /// `source_tolerance` produces such a dip (at the grid vertex nearest to it),
 /// and every refined dip whose residual exceeds the tolerance is discarded, so
@@ -481,7 +526,7 @@ fn deduplicate_candidates(
 /// found and that result is *stable* across the two-resolution certificate:
 /// the same single candidate must appear, refined to the same parameter, at
 /// both the base and double resolutions. `None` when there are no candidates,
-/// several, or the two resolutions disagree — all of which are "not uniquely
+/// several, or the two resolutions disagree â€” all of which are "not uniquely
 /// established" and must not certify a traversal.
 fn isolate_vertex_root<C>(
     curve: &C,
@@ -535,9 +580,11 @@ where
     Some((t, res, base.len()))
 }
 
-/// Golden-section minimum of `|C(t) - vertex|²` on `[a, b]`.
+/// Golden-section minimum of `|C(t) - vertex|Â²` on `[a, b]`.
 fn golden_section_min<C>(curve: &C, vertex: Point3, a: f64, b: f64) -> (f64, f64)
-where C: PolylineableCurve {
+where
+    C: PolylineableCurve,
+{
     const PHI: f64 = 1.618033988749895;
     let mut lo = a;
     let mut hi = b;
@@ -608,8 +655,14 @@ mod tests {
         let end = curve.subs(hi);
         // Distinct source vertices realized by the evaluator endpoints.
         assert!(start.distance(end) > SOURCE_INCIDENCE_TOLERANCE);
-        let traversal =
-            establish_source_edge_traversal(&curve, start, end, false, SOURCE_INCIDENCE_TOLERANCE);
+        let traversal = establish_source_edge_traversal(
+            &curve,
+            start,
+            end,
+            false,
+            SOURCE_INCIDENCE_TOLERANCE,
+            SOURCE_INCIDENCE_TOLERANCE,
+        );
         match traversal {
             SourceEdgeTraversal::CanonicalByEvalRange { range } => {
                 assert_eq!(range, (lo, hi));
@@ -635,6 +688,7 @@ mod tests {
                 shared,
                 true,
                 SOURCE_INCIDENCE_TOLERANCE,
+                SOURCE_INCIDENCE_TOLERANCE,
             );
             match traversal {
                 SourceEdgeTraversal::CanonicalByEvalRange { range } => {
@@ -659,6 +713,7 @@ mod tests {
             interior,
             interior,
             false,
+            SOURCE_INCIDENCE_TOLERANCE,
             SOURCE_INCIDENCE_TOLERANCE,
         );
         match traversal {
@@ -689,6 +744,7 @@ mod tests {
             start_pos,
             end_pos,
             false,
+            SOURCE_INCIDENCE_TOLERANCE,
             SOURCE_INCIDENCE_TOLERANCE,
         );
         match traversal {
@@ -743,6 +799,7 @@ mod tests {
             start_pos,
             end_pos,
             false,
+            SOURCE_INCIDENCE_TOLERANCE,
             SOURCE_INCIDENCE_TOLERANCE,
         );
         match traversal {
@@ -817,14 +874,21 @@ mod tests {
             end_pos,
             false,
             SOURCE_INCIDENCE_TOLERANCE,
+            SOURCE_INCIDENCE_TOLERANCE,
         );
         assert!(
             matches!(tight, SourceEdgeTraversal::Unresolved { .. }),
             "the 1e-6 gate must reject a 2e-5 off-carrier vertex, got {tight:?}"
         );
 
-        let admitted =
-            establish_source_edge_traversal(&curve, start_pos, end_pos, false, source_tolerance);
+        let admitted = establish_source_edge_traversal(
+            &curve,
+            start_pos,
+            end_pos,
+            false,
+            source_tolerance,
+            SOURCE_INCIDENCE_TOLERANCE,
+        );
         match admitted {
             SourceEdgeTraversal::CanonicalBySourceInterval { traversal, witness } => {
                 let ParamTraversal::Simple { start, end } = traversal else {
@@ -859,7 +923,14 @@ mod tests {
         let t_end = 1.0;
         let start_pos = curve.subs(t_start) + Vector3::new(0.0, 0.0, 2.0e-4);
         let end_pos = curve.subs(t_end);
-        let traversal = establish_source_edge_traversal(&curve, start_pos, end_pos, false, 1.0e-4);
+        let traversal = establish_source_edge_traversal(
+            &curve,
+            start_pos,
+            end_pos,
+            false,
+            1.0e-4,
+            SOURCE_INCIDENCE_TOLERANCE,
+        );
         match traversal {
             SourceEdgeTraversal::Unresolved { .. } => {}
             other => panic!("expected Unresolved, got {other:?}"),
@@ -888,7 +959,14 @@ mod tests {
         // A tolerance large enough that the crossing AND the seam are both
         // within it. Each side is a genuinely distinct parameter location; the
         // source interval cannot be certified.
-        let traversal = establish_source_edge_traversal(&curve, start_pos, end_pos, false, 0.05);
+        let traversal = establish_source_edge_traversal(
+            &curve,
+            start_pos,
+            end_pos,
+            false,
+            0.05,
+            SOURCE_INCIDENCE_TOLERANCE,
+        );
         assert!(
             matches!(traversal, SourceEdgeTraversal::Unresolved { .. }),
             "two distinct realizations inside the tolerance must be Unresolved, got {traversal:?}"
@@ -917,39 +995,144 @@ mod tests {
         let start_pos = curve.subs(t_start);
         let end_pos = curve.subs(t_end);
         assert!(start_pos.distance(end_pos) > SOURCE_INCIDENCE_TOLERANCE);
-        let traversal = establish_source_edge_traversal(&curve, start_pos, end_pos, false, 0.5);
+        let traversal = establish_source_edge_traversal(
+            &curve,
+            start_pos,
+            end_pos,
+            false,
+            0.5,
+            SOURCE_INCIDENCE_TOLERANCE,
+        );
         assert!(
             matches!(traversal, SourceEdgeTraversal::Unresolved { .. }),
             "an open carrier that would wrap must stay Unresolved, got {traversal:?}"
         );
     }
 
-    /// T6: the topological self-loop semantics are unchanged by the source
-    /// tolerance.
-    ///
-    /// A genuinely topologically-closed edge (one vertex entity) keeps the full
-    /// evaluator loop even under a large source tolerance, and two distinct
-    /// coincident vertex entities are still not a closed edge.
+    /// T7: a numerically meaningless declared source uncertainty (a CAD-export
+    /// artifact like ABC `00000730`/`00000414`'s `1e-17`) must not reject an
+    /// edge whose source vertices are realized on the curve at ordinary
+    /// numerical residuals (~1e-11). The declared value is floored at
+    /// [`SOURCE_INCIDENCE_TOLERANCE`]: the source may declare *looser*
+    /// incidence than the fixed tolerance, never *tighter* than the engine's
+    /// own floor.
     #[test]
-    fn topological_self_loop_semantics_are_unchanged_by_source_tolerance() {
-        let curve = closed_cubic();
+    fn meaningless_declared_uncertainty_is_floored_at_the_numerical_tolerance() {
+        let curve = open_cubic();
         let (lo, hi) = curve.evaluation_range();
-        // Topologically closed: the whole loop, whatever the tolerance.
-        let seam = curve.subs(lo);
-        let traversal = establish_source_edge_traversal(&curve, seam, seam, true, 0.5);
+        let start_pos = curve.subs(lo);
+        let end_pos = curve.subs(hi);
+        assert!(start_pos.distance(end_pos) > SOURCE_INCIDENCE_TOLERANCE);
+        // The source declares a `1e-17` uncertainty. The residual of a vertex
+        // realized exactly on the curve is ~1e-15, which the raw declared value
+        // would reject; the floored `effective_source_tol = 1e-6` admits it.
+        let traversal = establish_source_edge_traversal(
+            &curve,
+            start_pos,
+            end_pos,
+            false,
+            1.0e-17,
+            SOURCE_INCIDENCE_TOLERANCE,
+        );
         match traversal {
             SourceEdgeTraversal::CanonicalByEvalRange { range } => {
                 assert_eq!(range, (lo, hi));
             }
-            other => panic!("expected CanonicalByEvalRange, got {other:?}"),
+            other => panic!("a 1e-17 declared uncertainty must be floored, got {other:?}"),
         }
-        // Distinct entities at the same interior position: not topologically
-        // closed, and a degenerate traversal under any tolerance.
-        let interior = curve.subs(0.6);
-        let traversal = establish_source_edge_traversal(&curve, interior, interior, false, 0.5);
+    }
+
+    /// T8: a source-declared endpoint that sits several `1e-6` off its
+    /// edge-curve carrier resolves when the caller's own chord tolerance admits
+    /// the incidence. The ABC CAD-connectivity population (`#81283`/`#111730`)
+    /// shares a vertex between two distinct B-spline curves whose carriers
+    /// meet only to ~5e-6; the source declares the endpoint, so the caller's
+    /// mesh-error bound is acceptance for it. The widened tolerance is
+    /// endpoint-incidence only: the interior isolation and the residual
+    /// acceptance stay at `effective_source_tol`.
+    #[test]
+    fn caller_tolerance_admits_a_source_declared_endpoint_slightly_off_carrier() {
+        let curve = open_cubic();
+        let (lo, hi) = curve.evaluation_range();
+        let start_pos = curve.subs(lo);
+        // End vertex lifted a few `1e-6` off the carrier, perpendicular to the
+        // planar fixture, so the minimum distance is exactly that at t=hi.
+        let end_pos = curve.subs(hi) + Vector3::new(0.0, 0.0, 5.0e-6);
+        assert!(end_pos.distance(curve.subs(hi)) > SOURCE_INCIDENCE_TOLERANCE);
+        // No declared source uncertainty: the effective tolerance is the fixed
+        // 1e-6 floor, which the 5e-6 offset exceeds. The caller's chord
+        // tolerance 1e-4 admits it.
+        let tight = establish_source_edge_traversal(
+            &curve,
+            start_pos,
+            end_pos,
+            false,
+            SOURCE_INCIDENCE_TOLERANCE,
+            SOURCE_INCIDENCE_TOLERANCE,
+        );
+        assert!(
+            matches!(tight, SourceEdgeTraversal::Unresolved { .. }),
+            "without the caller tolerance a 5e-6 off-carrier endpoint stays Unresolved, got {tight:?}"
+        );
+        let admitted = establish_source_edge_traversal(
+            &curve,
+            start_pos,
+            end_pos,
+            false,
+            SOURCE_INCIDENCE_TOLERANCE,
+            1.0e-4,
+        );
+        match admitted {
+            SourceEdgeTraversal::CanonicalByEvalRange { range } => {
+                assert_eq!(range, (lo, hi));
+            }
+            other => {
+                panic!("the caller chord tolerance must admit the declared endpoint, got {other:?}")
+            }
+        }
+    }
+
+    /// T9: a vertex near *unrelated* geometry at an interior parameter does
+    /// not acquire source incidence from the widened tolerance. The endpoint
+    /// acceptance is a check on the source-declared endpoints only; the
+    /// interior isolation stays at `effective_source_tol`, so a vertex that is
+    /// merely near the curve somewhere in the middle (but not declared to be
+    /// either endpoint) is not snapped onto it.
+    #[test]
+    fn unrelated_nearby_geometry_does_not_acquire_source_incidence() {
+        let curve = open_cubic();
+        let (lo, hi) = curve.evaluation_range();
+        let start_pos = curve.subs(lo);
+        let end_pos = curve.subs(hi);
+        // An unrelated vertex: near the curve at an interior parameter, but
+        // declared as neither endpoint. With a generous caller tolerance it
+        // must not be treated as incident.
+        let unrelated = curve.subs(0.3) + Vector3::new(0.0, 0.0, 5.0e-6);
+        let traversal = establish_source_edge_traversal(
+            &curve,
+            start_pos,
+            unrelated,
+            false,
+            SOURCE_INCIDENCE_TOLERANCE,
+            1.0e-4,
+        );
         assert!(
             matches!(traversal, SourceEdgeTraversal::Unresolved { .. }),
-            "distinct coincident vertices must not license the full loop, got {traversal:?}"
+            "unrelated nearby geometry must not acquire source incidence, got {traversal:?}"
+        );
+        // The reverse orientation, where the unrelated vertex is the start and
+        // the source endpoint is the end, must likewise stay Unresolved.
+        let traversal = establish_source_edge_traversal(
+            &curve,
+            unrelated,
+            end_pos,
+            false,
+            SOURCE_INCIDENCE_TOLERANCE,
+            1.0e-4,
+        );
+        assert!(
+            matches!(traversal, SourceEdgeTraversal::Unresolved { .. }),
+            "unrelated nearby geometry must not acquire source incidence (reversed), got {traversal:?}"
         );
     }
 }
