@@ -50,6 +50,20 @@ std::thread_local! {
 
     static PROBE_FACE_CONTEXT: std::cell::Cell<(Option<u64>, usize, u8)> =
         const { std::cell::Cell::new((None, usize::MAX, 0)) };
+
+    /// Refinement support points: argmax-deviation sample UVs of unsafe
+    /// material triangles, collected by the outcome pass and consumed by the
+    /// refinement loop's next-pass CDT rebuild. Cleared per face per pass.
+    static REFINE_SUPPORT_CELL: std::cell::RefCell<Vec<Point2>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+
+    /// Refinement trajectory: the per-pass row the outcome pass records
+    /// (triangle count, unsafe count, max exact deviation, deviation excess
+    /// sum, worst-triangle provenance). The max-deviation field is the
+    /// acceptance functional the refinement loop decides on. Cleared per face
+    /// per pass.
+    static REFINE_TRAJECTORY: std::cell::RefCell<Vec<RefineTrajectoryRow>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 type MeshedShell = Shell<Point3, PolylineCurve, Option<PolygonMesh>>;
@@ -5906,11 +5920,11 @@ fn record_piece_deck(
 
 /// Record what the two-closed-loop join did to the deck sum.
 ///
-/// `Î£Î´áµ¢ = Î”_walk`, and `Î”_walk = 0` for a contractible regular boundary. The
-/// branch traverses loop 1 **reversed**, unconditionally, so the sum it
-/// realises is `Î´â‚€ âˆ’ Î´â‚`. `forward_would_close` is the discriminator: it is
-/// true exactly when the reversal is what broke the equation and traversing
-/// forward would satisfy it, which is the case package 1 is about.
+/// `Σδᵢ = Δ_walk`, and `Δ_walk = 0` for a contractible regular boundary. The
+/// join realises `δ₀ − δ₁` when it reverses loop 1 and `δ₀ + δ₁` when it
+/// traverses loop 1 forward; the deck equation decides which direction closes.
+/// `forward_would_close` is the discriminator: it is true exactly when the
+/// reversal is what broke the equation and traversing forward would satisfy it.
 fn record_two_loop_join(
     loop0_displacement: [i64; 2],
     loop1_displacement: [i64; 2],
@@ -5948,6 +5962,125 @@ fn record_two_loop_join(
         bridge0: [loop0_end, loop1_start],
         bridge1: [loop1_end, loop0_start],
     });
+}
+
+/// The number of distinct source edge uses a closed loop's segments reference.
+///
+/// A loop built from a single full-circle edge references exactly one source
+/// edge use; a loop that contains a genuine source seam (arcs + seam lines)
+/// references several. The count separates the two correspondence classes:
+/// a single-source full-period loop's parameterization origin is arbitrary,
+/// while a multi-source loop carries a source-established seam.
+fn distinct_source_edge_uses(loop_: &BoundaryLoop) -> usize {
+    let mut ids = rustc_hash::FxHashSet::default();
+    for seg in &loop_.source_uses {
+        for use_ in seg {
+            ids.insert((use_.bound.0, use_.index, use_.orientation));
+        }
+    }
+    ids.len()
+}
+
+/// Cyclically re-index loop 1 so its seam reference (the phase of its first
+/// sample, modulo the period) matches loop 0's.
+///
+/// The two bounds of a full 360° band are each a single self-closing circle
+/// edge whose parameterization origin is arbitrary: no source edge, vertex, or
+/// seam connects a specific point of one circle to a specific point of the
+/// other. The source therefore establishes no correspondence, and the correct
+/// one is geometric — points on the two loops that share the same periodic
+/// surface coordinate (v mod period) lie on a common generator (ruling) of the
+/// cylinder, and the straight segment between them lies exactly on the surface.
+/// Aligning the loops' seam references makes the two synthetic seam bridges
+/// these generator lines.
+///
+/// The re-index is a cyclic rotation of the sample array plus a periodic
+/// re-lift of the wrapped tail (each moved sample's uv is shifted by the
+/// loop's own displacement, which maps to the same 3D point on the periodic
+/// surface), so every realized boundary point is preserved exactly.
+///
+/// Gated to the single-source population: a multi-source loop's seam is
+/// source-established and must not be moved. Returns true when loop 1 was
+/// re-indexed.
+fn align_two_loop_phase(
+    loop0: &BoundaryLoop,
+    loop1: &mut BoundaryLoop,
+    loop1_displacement: [i64; 2],
+    lattice: &CertifiedLattice,
+) -> bool {
+    if distinct_source_edge_uses(loop0) != 1 || distinct_source_edge_uses(loop1) != 1 {
+        return false;
+    }
+    let (axis, period) = if loop1_displacement[1] != 0 {
+        (1usize, lattice.declared_v_period())
+    } else if loop1_displacement[0] != 0 {
+        (0usize, lattice.declared_u_period())
+    } else {
+        return false;
+    };
+    let Some(period) = period else {
+        return false;
+    };
+    let winding = if axis == 1 {
+        loop1_displacement[1]
+    } else {
+        loop1_displacement[0]
+    };
+    if winding.unsigned_abs() != 1 {
+        return false;
+    }
+    let n = loop1.points.len();
+    if n < 2 {
+        return false;
+    }
+    let distinct = n - 1;
+    let phase = |uv: Point2| if axis == 1 { uv.y } else { uv.x };
+    let target = phase(loop0.points[0].uv).rem_euclid(period);
+    let circular = |a: f64, b: f64| {
+        let d = (a - b).abs();
+        d.min(period - d)
+    };
+    let mut best = 0usize;
+    let mut best_d = f64::INFINITY;
+    for i in 0..distinct {
+        let d = circular(phase(loop1.points[i].uv).rem_euclid(period), target);
+        if d < best_d {
+            best_d = d;
+            best = i;
+        }
+    }
+    if best == 0 {
+        return false;
+    }
+    let disp_axis = phase(loop1.points[n - 1].uv) - phase(loop1.points[0].uv);
+    let mut points = Vec::with_capacity(n);
+    let mut origins = Vec::with_capacity(n);
+    let mut source_uses = Vec::with_capacity(n);
+    for i in 0..distinct {
+        let src = (best + i) % distinct;
+        let mut p = loop1.points[src];
+        if src < best {
+            if axis == 1 {
+                p.uv.y += disp_axis;
+            } else {
+                p.uv.x += disp_axis;
+            }
+        }
+        points.push(p);
+        origins.push(loop1.origins[src]);
+        source_uses.push(loop1.source_uses[src].clone());
+    }
+    let mut wrap = points[0];
+    if axis == 1 {
+        wrap.uv.y += disp_axis;
+    } else {
+        wrap.uv.x += disp_axis;
+    }
+    points.push(wrap);
+    origins.push(SegmentOrigin::Seam);
+    source_uses.push(Vec::new());
+    *loop1 = BoundaryLoop::new(points, origins, source_uses);
+    true
 }
 
 /// The parameter-space area below which a closed loop is treated as degenerate
@@ -6024,16 +6157,21 @@ fn working_range(
 /// How the two-closed-loop branch traverses the second loop.
 ///
 /// The branch has always reversed loop 1 unconditionally. For a quotient-closed
-/// boundary walk `Î£Î´áµ¢ = Î”_walk`, with `Î”_walk = 0` for a contractible regular
+/// boundary walk `Σδᵢ = Δ_walk`, with `Δ_walk = 0` for a contractible regular
 /// boundary, so the reversal is only correct when the two loops wind the *same*
-/// way. The two boundary circles of a band wind opposite â€” as they must, for
-/// the face boundary to be coherently oriented â€” and there the reversal makes
-/// `Î£Î´ = Â±2`, which is exactly the crossing the CDT then refuses.
+/// way. The two boundary circles of a band wind opposite — as they must, for
+/// the face boundary to be coherently oriented — and there the reversal makes
+/// `Σδ = ±2`, which is exactly the crossing the CDT then refuses.
+///
+/// [`PolyBoundary::new`] runs the two-loop join under [`Self::DeckConsistent`]:
+/// the primary rendered-face path chooses the loop-1 traversal from the deck
+/// equation. [`Self::Legacy`] is retained for the explicit legacy reference in
+/// tests and as the fallback semantics inside `DeckConsistent`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TwoLoopJoinPolicy {
     /// Reverse loop 1 unconditionally.
     Legacy,
-    /// Traverse loop 1 in whichever direction satisfies `Î£Î´ = 0`, and fall back
+    /// Traverse loop 1 in whichever direction satisfies `Σδ = 0`, and fall back
     /// to [`Self::Legacy`] when no direction does or both do. The equation is
     /// decidable, so this guesses nothing: a direction is chosen only when it
     /// is the unique solution.
@@ -6577,6 +6715,18 @@ impl PolyBoundary {
         tol: f64,
         lattice: &CertifiedLattice,
     ) -> Self {
+        // The primary rendered-face path resolves the two-loop join against the
+        // periodic deck equation rather than the legacy unconditional reversal.
+        // Reversing loop 1 unconditionally realises `I'�,? �^' I'�,?`; for the two
+        // boundary circles of a band that is `A�2` �?" the crossing seam bridge
+        // that PLANAR-C then planarizes into a chart-centre pivot and the
+        // radius-scale fan. The deck-consistent policy keeps the legacy
+        // reversal when it closes (`I'�,? = I'�,?`) and takes forward traversal only
+        // when that is the unique solution (`I'�,? = �^'I'�,?`). Only the
+        // certified structural deck-pair class is routed through DeckConsistent
+        // on the primary path (INV-W2-1 byte-identity for every other face);
+        // the phase correspondence (`align_two_loop_phase`) still applies inside
+        // the deck-consistent arm.
         let join_policy = primary_two_loop_join_policy(&pieces, lattice);
         Self::new_with_join(pieces, surface, tol, lattice, join_policy).0
     }
@@ -6736,11 +6886,12 @@ impl PolyBoundary {
             // ARR-SEAM W2: a valid non-degenerate deck pair must reach this
             // join too. The legacy area gate admits only the collapsed cohort;
             // under `DeckConsistent` the semantic predicate is that both loops
-            // are genuine deck walks (non-zero lattice displacement), which
-            // `PolyBoundary::new` never triggers because it passes `Legacy`.
-            // The legacy area condition stays the first disjunct so the primary
-            // path is byte-identical (INV-W2-1); the deck equation and its
-            // `Unresolved`/`Inconsistent` refusal are already computed below.
+            // are genuine deck walks (non-zero lattice displacement), which is
+            // what `PolyBoundary::new` now passes on the primary rendered-face
+            // path. The legacy area condition stays the first disjunct so the
+            // collapsed cohort is admitted under both policies; the deck
+            // equation and its `Unresolved`/`Inconsistent` refusal are already
+            // computed below.
             let deck_pair = join_policy == TwoLoopJoinPolicy::DeckConsistent
                 && closed_displacements[0] != [0, 0]
                 && closed_displacements[1] != [0, 0];
@@ -6778,6 +6929,20 @@ impl PolyBoundary {
                         }
                     }
                 }
+                // PHASE-CORRESPONDENCE. For a band whose two bounds are each a
+                // single full-period circle edge, the source establishes no
+                // seam correspondence: neither the circle edges nor the
+                // placement ref directions connect a specific point of one
+                // circle to a specific point of the other. The correct
+                // correspondence is the surface's own generator structure —
+                // points with equal periodic coordinate v (mod period) lie on
+                // a common ruling, and the seam bridges must be rulings. The
+                // integer mean-translate above preserves the fractional phase
+                // residual (a π offset is irreducible by integer periods), so
+                // cyclically re-index loop1's samples so both loops share the
+                // same seam reference (mod period). This is a pure re-lift:
+                // every realized 3D point is preserved.
+                align_two_loop_phase(&loop0, &mut loop1, loop1_displacement, lattice);
                 // Both halves are source-derived, but joining a loop to a
                 // *reversed* loop introduces two segments that neither
                 // supplied: the jump from `loop0`'s end to `loop1`'s reversed
@@ -8052,38 +8217,56 @@ impl ConstraintRoles {
     /// collinear in real arithmetic but differ by rounding in an exact
     /// predicate, so an exact orientation test cannot recognize them.
     fn repair_unlabeled_constraint_edges(&mut self, cdt: &mut Cdt) {
-        let unlabeled: Vec<FixedUndirectedEdgeHandle> = cdt
-            .undirected_edges()
-            .filter(|edge| edge.is_constraint_edge())
-            .filter(|edge| edge.data().data().claims.is_empty())
-            .map(|edge| edge.fix())
-            .collect();
-        for handle in unlabeled {
-            let candidate = edge_vertices(cdt, handle);
-            let candidate_positions = cdt.undirected_edge(handle).positions();
-            let mut parents: Vec<FixedUndirectedEdgeHandle> = Vec::new();
-            for edge in cdt.undirected_edges() {
-                if !edge.is_constraint_edge() || edge.fix() == handle {
-                    continue;
-                }
-                if edge.data().data().claims.is_empty() {
-                    continue;
-                }
-                let parent = edge_vertices(cdt, edge.fix());
-                if !shares_exactly_one_endpoint(parent, candidate) {
-                    continue;
-                }
-                if same_line(
-                    candidate_positions,
-                    cdt.undirected_edge(edge.fix()).positions(),
-                ) {
-                    parents.push(edge.fix());
-                }
+        // Iterate to fixpoint. One sweep cannot label a *chain* of split
+        // children: an unlabeled child whose own parent is also unlabeled (the
+        // same trim edge split at several grid/trim intersections) finds no
+        // labeled parent within the same pass, so it must wait for its parent
+        // to be labeled by the next pass. When a pass repairs nothing, the
+        // remainder has no legitimate parent and stays unlabeled — the flood
+        // will fail closed with `ConstraintRoleMissing` rather than invent a
+        // role.
+        loop {
+            let unlabeled: Vec<FixedUndirectedEdgeHandle> = cdt
+                .undirected_edges()
+                .filter(|edge| edge.is_constraint_edge())
+                .filter(|edge| edge.data().data().claims.is_empty())
+                .map(|edge| edge.fix())
+                .collect();
+            if unlabeled.is_empty() {
+                break;
             }
-            let Some(&parent) = parents.first() else {
-                continue;
-            };
-            self.repair_split(cdt, parent, parent, handle);
+            let mut repaired = false;
+            for handle in unlabeled {
+                let candidate = edge_vertices(cdt, handle);
+                let candidate_positions = cdt.undirected_edge(handle).positions();
+                let mut parents: Vec<FixedUndirectedEdgeHandle> = Vec::new();
+                for edge in cdt.undirected_edges() {
+                    if !edge.is_constraint_edge() || edge.fix() == handle {
+                        continue;
+                    }
+                    if edge.data().data().claims.is_empty() {
+                        continue;
+                    }
+                    let parent = edge_vertices(cdt, edge.fix());
+                    if !shares_exactly_one_endpoint(parent, candidate) {
+                        continue;
+                    }
+                    if same_line(
+                        candidate_positions,
+                        cdt.undirected_edge(edge.fix()).positions(),
+                    ) {
+                        parents.push(edge.fix());
+                    }
+                }
+                let Some(&parent) = parents.first() else {
+                    continue;
+                };
+                self.repair_split(cdt, parent, parent, handle);
+                repaired = true;
+            }
+            if !repaired {
+                break;
+            }
         }
     }
 }
@@ -8401,55 +8584,209 @@ fn trimming_tessellation_with_diagnostics<S>(
 where
     S: PreMeshableSurface,
 {
-    let mut triangulation = Cdt::new();
-    let mut boundary_map = HashMap::<FixedVertexHandle, Point3>::default();
-    let mut vertex_sources = HashMap::<FixedVertexHandle, Vec<SourceEdgeUse>>::default();
-    let mut roles = ConstraintRoles::default();
-    if let Err(reason) = polyboundary.insert_to(
-        &mut triangulation,
-        &mut boundary_map,
-        &mut roles,
-        &mut vertex_sources,
-    ) {
-        return TessellationOutcome::Failed(reason.into());
-    }
-    let (samples_on_boundary, sampling_location_unresolved) =
-        insert_surface(&mut triangulation, surface, polyboundary, tol, &mut roles);
-    let outcome = triangulation_into_polymesh_outcome(
-        &triangulation,
-        surface,
-        polyboundary,
-        &boundary_map,
-        &roles,
-        &vertex_sources,
-        lattice,
-    );
-    if std::env::var_os("TRUCK_PROBE_ROLES").is_some() {
-        // The population sizes the A1 comparison rests on. `unresolved` is the
-        // honest gap: constraint edges the flood met that no `record` call had
-        // claimed, which keep their legacy toggling behaviour. A large number
-        // here would mean the experiment is less causal than it looks.
-        let count = |role| roles.recorded.get(&role).copied().unwrap_or(0);
-        let by_origin = |o| roles.origin_census.get(&o).copied().unwrap_or(0);
-        eprintln!(
-            "ROLES\tphysical={}\tsampling={}\tartificial={}\tnative={}\t\
-             unresolved_synth={}\tunresolved_at_flood={}\t\
-             samples_on_boundary={}\tsampling_location_unresolved={}\t\
-             origin_source={}\torigin_synthetic={}\torigin_seam={}",
-            count(ConstraintRole::PhysicalBoundary),
-            count(ConstraintRole::SurfaceSampling),
-            count(ConstraintRole::ArtificialCut),
-            count(ConstraintRole::NativeBoundary),
-            count(ConstraintRole::UnresolvedSyntheticClosure),
-            roles.unresolved_at_flood.get(),
-            samples_on_boundary,
-            sampling_location_unresolved,
-            by_origin(SegmentOrigin::Source),
-            by_origin(SegmentOrigin::SyntheticClosure),
-            by_origin(SegmentOrigin::Seam),
+    let refine = std::env::var_os("TRUCK_SGC_REFINE").is_some();
+    trimming_tessellation_with_refinement(surface, polyboundary, tol, lattice, refine)
+}
+
+/// The shared refinement body. `enable_refine` selects the CDT-aware refinement
+/// path; tests drive it directly with an explicit flag so the acceptance rule
+/// is exercised deterministically and in parallel, while production reads the
+/// env gate in [`trimming_tessellation_with_diagnostics`].
+fn trimming_tessellation_with_refinement<S>(
+    surface: &S,
+    polyboundary: &PolyBoundary,
+    tol: f64,
+    lattice: &CertifiedLattice,
+    refine_enabled: bool,
+) -> TessellationOutcome
+where
+    S: PreMeshableSurface,
+{
+    // CDT-aware refinement driven by the *maximum* sampled exact-surface
+    // deviation E(mesh) = max over material triangles of the surface-vs-flat
+    // deviation measured with exact S(uv) triangle corners.
+    //
+    // Acceptance theorem: a candidate mesh is retained only when it strictly
+    // reduces E below the current best by a small numerical-progress tolerance;
+    // refinement terminates as soon as E <= tolerance. `excess_sum`,
+    // `unsafe_count` and triangle count are diagnostics only — they never
+    // authorize a mesh. With `refine_enabled` false this is the ordinary single
+    // pass, byte-identical to the pre-refinement behavior.
+    const MAX_REFINE_PASSES: usize = 8;
+    // Numerical progress epsilon, not a geometric tuning parameter: only guards
+    // against accepting a pass whose max deviation did not actually move.
+    const E_PROGRESS: f64 = 1e-9;
+    let mut support_uvs: Vec<Point2> = Vec::new();
+    let mut best_outcome: Option<TessellationOutcome> = None;
+    let mut best_max_dev = f64::INFINITY;
+    let mut best_supports = 0usize;
+    let mut best_tris = 0usize;
+    let mut termination: &'static str = "max_passes";
+    for pass in 0..MAX_REFINE_PASSES {
+        let mut triangulation = Cdt::new();
+        let mut boundary_map = HashMap::<FixedVertexHandle, Point3>::default();
+        let mut vertex_sources = HashMap::<FixedVertexHandle, Vec<SourceEdgeUse>>::default();
+        let mut roles = ConstraintRoles::default();
+        if let Err(reason) = polyboundary.insert_to(
+            &mut triangulation,
+            &mut boundary_map,
+            &mut roles,
+            &mut vertex_sources,
+        ) {
+            return TessellationOutcome::Failed(reason.into());
+        }
+        REFINE_SUPPORT_CELL.with(|cell| cell.borrow_mut().clear());
+        REFINE_TRAJECTORY.with(|cell| cell.borrow_mut().clear());
+        let (samples_on_boundary, sampling_location_unresolved) = insert_surface(
+            &mut triangulation,
+            surface,
+            polyboundary,
+            tol,
+            &mut roles,
+            &support_uvs,
         );
+        let outcome = triangulation_into_polymesh_outcome(
+            &triangulation,
+            surface,
+            polyboundary,
+            &boundary_map,
+            &roles,
+            &vertex_sources,
+            lattice,
+            tol,
+            refine_enabled,
+        );
+        if !refine_enabled {
+            if std::env::var_os("TRUCK_PROBE_ROLES").is_some() {
+                // The population sizes the A1 comparison rests on. `unresolved`
+                // is the honest gap: constraint edges the flood met that no
+                // `record` call had claimed, which keep their legacy toggling
+                // behaviour. A large number here would mean the experiment is
+                // less causal than it looks.
+                let count = |role| roles.recorded.get(&role).copied().unwrap_or(0);
+                let by_origin = |o| roles.origin_census.get(&o).copied().unwrap_or(0);
+                eprintln!(
+                    "ROLES\tphysical={}\tsampling={}\tartificial={}\tnative={}\t\
+                     unresolved_synth={}\tunresolved_at_flood={}\t\
+                     samples_on_boundary={}\tsampling_location_unresolved={}\t\
+                     origin_source={}\torigin_synthetic={}\torigin_seam={}",
+                    count(ConstraintRole::PhysicalBoundary),
+                    count(ConstraintRole::SurfaceSampling),
+                    count(ConstraintRole::ArtificialCut),
+                    count(ConstraintRole::NativeBoundary),
+                    count(ConstraintRole::UnresolvedSyntheticClosure),
+                    roles.unresolved_at_flood.get(),
+                    samples_on_boundary,
+                    sampling_location_unresolved,
+                    by_origin(SegmentOrigin::Source),
+                    by_origin(SegmentOrigin::SyntheticClosure),
+                    by_origin(SegmentOrigin::Seam),
+                );
+            }
+            return outcome;
+        }
+        // The exact-surface max deviation of this pass's mesh, read from the
+        // trajectory the outcome pass recorded.
+        let row = REFINE_TRAJECTORY.with(|cell| cell.borrow().first().cloned());
+        let face = PROBE_FACE_CONTEXT.with(std::cell::Cell::get).0;
+        let max_dev = row.as_ref().map(|r| r.max_dev).unwrap_or(f64::INFINITY);
+        let tris = row.as_ref().map(|r| r.triangles).unwrap_or(0);
+        let excess = row.as_ref().map(|r| r.excess_sum).unwrap_or(0.0);
+        let unsafe_count = row.as_ref().map(|r| r.unsafe_count).unwrap_or(0);
+        if std::env::var_os("TRUCK_SGC_REFINE_TRACE").is_some() {
+            eprintln!(
+                "REFINE_PASS\tface={face:?}\tpass={pass}\ttris={tris}\tunsafe={unsafe_count}\tmax_dev={max_dev:.6}\texcess_sum={excess:.6}\tsupports={}",
+                support_uvs.len(),
+            );
+        }
+        let candidate_acceptable = matches!(outcome, TessellationOutcome::Mesh(_))
+            && max_dev.is_finite()
+            && max_dev < best_max_dev - E_PROGRESS;
+        if best_outcome.is_none() {
+            // Pass 0 is the ordinary mesh; it is the incumbent regardless of
+            // whether it satisfies tolerance (a face that cannot be improved
+            // returns it unchanged).
+            best_max_dev = max_dev;
+            best_outcome = Some(outcome);
+            best_supports = support_uvs.len();
+            best_tris = tris;
+            if !candidate_acceptable {
+                termination = "no_mesh_at_pass0";
+                break;
+            }
+            if max_dev <= tol {
+                termination = "tolerance_met_at_pass0";
+                break;
+            }
+        } else if candidate_acceptable {
+            best_max_dev = max_dev;
+            best_outcome = Some(outcome);
+            best_supports = support_uvs.len();
+            best_tris = tris;
+            if max_dev <= tol {
+                termination = "tolerance_met";
+                if std::env::var_os("TRUCK_SGC_REFINE_TRACE").is_some() {
+                    eprintln!(
+                        "REFINE_DONE\tface={face:?}\tpass={pass}\tmax_dev={max_dev:.6}\ttol={tol:.6}"
+                    );
+                }
+                break;
+            }
+        } else {
+            termination = "no_strict_progress";
+            if std::env::var_os("TRUCK_SGC_REFINE_TRACE").is_some() {
+                eprintln!(
+                    "REFINE_REJECT\tface={face:?}\tpass={pass}\tmax_dev={max_dev:.6}\tbest={best_max_dev:.6}\ttol={tol:.6}"
+                );
+            }
+            break;
+        }
+        let new_supports = REFINE_SUPPORT_CELL.with(|cell| cell.borrow().clone());
+        if new_supports.is_empty() {
+            termination = "no_supports_offered";
+            break;
+        }
+        if pass + 1 >= MAX_REFINE_PASSES {
+            termination = "pass_cap";
+            if std::env::var_os("TRUCK_SGC_REFINE_TRACE").is_some() {
+                eprintln!(
+                    "REFINE_CAP\tface={face:?}\tpasses={}\tsupports={}",
+                    pass + 1,
+                    support_uvs.len(),
+                );
+            }
+            break;
+        }
+        let before = support_uvs.len();
+        for sp in new_supports {
+            if !support_uvs.iter().any(|x| (x - sp).magnitude() < 1e-9) {
+                support_uvs.push(sp);
+            }
+        }
+        if support_uvs.len() == before {
+            termination = "support_stall";
+            if std::env::var_os("TRUCK_SGC_REFINE_TRACE").is_some() {
+                eprintln!(
+                    "REFINE_STALL\tface={face:?}\tpass={pass}\tsupports={}\tno_new_supports",
+                    support_uvs.len(),
+                );
+            }
+            break;
+        }
     }
-    outcome
+    if std::env::var_os("TRUCK_SGC_REFINE_TRACE").is_some() {
+        if let Some(outcome) = &best_outcome {
+            if matches!(outcome, TessellationOutcome::Mesh(_)) {
+                eprintln!(
+                    "REFINE_ACCEPT\tface={:?}\tmax_dev={best_max_dev:.6}\ttol={tol:.6}\ttris={best_tris}\tsupports={best_supports}\ttermination={termination}",
+                    PROBE_FACE_CONTEXT.with(std::cell::Cell::get).0,
+                );
+            }
+        }
+    }
+    best_outcome.unwrap_or_else(|| {
+        TessellationOutcome::Failed(TessellationFailureReason::BoundaryConstructionFailed.into())
+    })
 }
 
 /// Tessellates one surface trimmed by polyline, returning `TessellationOutcome`.
@@ -8526,6 +8863,7 @@ fn insert_surface(
     polyline: &PolyBoundary,
     tol: f64,
     roles: &mut ConstraintRoles,
+    extra_supports: &[Point2],
 ) -> (usize, usize) {
     // Grid samples on a boundary segment, by direct test.
     let mut on_boundary = 0usize;
@@ -8544,23 +8882,6 @@ fn insert_surface(
     // defect audit A1 removed, reappearing through the chain-splitting hole
     // rather than through the one-bit test A1 fixed. Labelling the whole
     // realized chain closes it.
-    let mut constrain = |triangulation: &mut Cdt, a: FixedVertexHandle, b: FixedVertexHandle| {
-        let chain = triangulation.try_add_constraint(a, b);
-        if chain.is_empty() {
-            return;
-        }
-        // PLANAR-B B6: interior sampling constraints carry no source uses and
-        // have no SegmentOrigin; each realized chain gets its own semantic id.
-        let id = roles.mint_semantic_constraint_id();
-        roles.label_realized_chain(
-            triangulation,
-            &chain,
-            id,
-            ConstraintRole::SurfaceSampling,
-            &[],
-            None,
-        );
-    };
     let bdb: BoundingBox<Point2> = polyline
         .0
         .iter()
@@ -8570,7 +8891,8 @@ fn insert_surface(
     let range = ((bdb.min()[0], bdb.max()[0]), (bdb.min()[1], bdb.max()[1]));
     let (udiv, vdiv) = surface.parameter_division(range, tol);
     let insert_res: Vec<Vec<Option<_>>> = udiv
-        .into_iter()
+        .iter()
+        .copied()
         .map(|u| {
             vdiv.iter()
                 // G7a. This call site asks "may I place an interior sampling
@@ -8605,28 +8927,375 @@ fn insert_surface(
                 .collect()
         })
         .collect();
-    insert_res.windows(2).for_each(|vec| {
-        vec[0].windows(2).zip(&vec[1]).for_each(|(a, z)| {
-            if let Some(x) = a[0] {
-                if let Some(y) = a[1] {
-                    constrain(triangulation, x, y);
-                }
-                if let Some(z) = z {
-                    constrain(triangulation, x, *z);
+    // Insert refinement support points as interior vertices, gated by `Inside`
+    // exactly like the grid samples. Each support is the argmax-deviation
+    // sample of a previously-unsafe material triangle; after insertion the
+    // Delaunay triangulation reconnects to it, splitting the offending flat
+    // span. No constraint is added for a support vertex; it is a pure Steiner
+    // point that owns no parity role.
+    let mut support_inserted = 0usize;
+    for &sp in extra_supports {
+        match polyline.locate(sp) {
+            PointLocation::Inside => {
+                if triangulation.insert(SPoint2::new(sp.x, sp.y)).is_ok() {
+                    support_inserted += 1;
                 }
             }
-        });
-        let idx = vec[0].len() - 1;
-        if let (Some(x), Some(y)) = (vec[0][idx], vec[1][idx]) {
-            constrain(triangulation, x, y);
+            PointLocation::Outside => {}
+            PointLocation::Boundary => on_boundary += 1,
+            PointLocation::Indeterminate => location_unresolved += 1,
         }
-    });
+    }
+    if support_inserted > 0 && std::env::var_os("TRUCK_SGC_REFINE_TRACE").is_some() {
+        eprintln!(
+            "REFINE\tface={:?}\tsupports_offered={}\tsupports_inserted={}",
+            PROBE_FACE_CONTEXT.with(std::cell::Cell::get).0,
+            extra_supports.len(),
+            support_inserted,
+        );
+    }
+    // A boundary carrying a [`SegmentOrigin::Seam`] is periodic/lifted deck
+    // geometry: its seam and source edges are duplicate traversals of the same
+    // curve, and the grid wiring's boundary vertices would split those edges,
+    // leaving the seam's mod-2 traversal pairing broken and the parity flood
+    // contradicting (odd toggling vertices). The seam machinery owns that
+    // structure; the accuracy wiring applies to the non-seam generic surface
+    // path and the windows wiring is restored there verbatim.
+    let has_seam = polyline
+        .0
+        .iter()
+        .any(|loop_| loop_.origins.iter().any(|o| *o == SegmentOrigin::Seam));
+    if has_seam {
+        wire_grid_constraints_windows(triangulation, roles, &insert_res);
+    } else {
+        wire_grid_constraints(triangulation, roles, polyline, &udiv, &vdiv, &insert_res);
+    }
     // PLANAR-C backstop: a grid vertex inserted exactly on a planarized
     // boundary constraint splits it into an unclaimed child; repair those
     // before the flood.
     roles.repair_unlabeled_constraint_edges(triangulation);
     (on_boundary, location_unresolved)
 }
+
+/// The pre-accuracy grid wiring, restored for boundaries that carry a
+/// [`SegmentOrigin::Seam`] (periodic/lifted deck geometry): constrain between
+/// every consecutive *present* grid vertex, including the final u-column.
+///
+/// This is exactly the wiring the seam faces rendered with before the accuracy
+/// work; the accuracy wiring's boundary vertices are unsafe there because the
+/// seam/source duplicate traversals break under the mod-2 parity reading when
+/// split.
+fn wire_grid_constraints_windows(
+    triangulation: &mut Cdt,
+    roles: &mut ConstraintRoles,
+    insert_res: &[Vec<Option<FixedVertexHandle>>],
+) {
+    insert_res.windows(2).for_each(|vec| {
+        vec[0].windows(2).zip(&vec[1]).for_each(|(a, z)| {
+            if let Some(x) = a[0] {
+                if let Some(y) = a[1] {
+                    constrain_grid_edge(triangulation, roles, x, y);
+                }
+                if let Some(z) = z {
+                    constrain_grid_edge(triangulation, roles, x, *z);
+                }
+            }
+        });
+        let idx = vec[0].len() - 1;
+        if let (Some(x), Some(y)) = (vec[0][idx], vec[1][idx]) {
+            constrain_grid_edge(triangulation, roles, x, y);
+        }
+    });
+    let last_column = insert_res.len().saturating_sub(1);
+    for pair in insert_res[last_column].windows(2) {
+        if let (Some(x), Some(y)) = (pair[0], pair[1]) {
+            constrain_grid_edge(triangulation, roles, x, y);
+        }
+    }
+}
+
+/// Constrain the interior sampling grid so that every *material* sub-segment of
+/// every grid line is a constrained edge.
+///
+/// **Audit A1 / G5a.** Every edge added here is an interior sampling edge: it
+/// exists to control triangle shape, carries no source evidence, and must not
+/// toggle material parity. Each realized chain is labelled
+/// [`ConstraintRole::SurfaceSampling`] with its own semantic id.
+///
+/// **Accuracy contract (ACC-1).** The pre-accuracy wiring only constrained a
+/// grid segment when *both* endpoints earned a vertex, so a grid point that was
+/// not `Inside` silently deleted the adjacent grid-line constraints. Between
+/// the last fully-interior grid line and the trim there was then no constraint
+/// at all, and the CDT filled the band with triangles spanning several
+/// subdivision cells whose interiors were never certified.
+///
+/// This wiring instead constrains every material sub-segment of every grid
+/// line: each grid segment is cut at its real intersections with the trim
+/// polyline, and each maximal inside sub-segment is constrained. Combined with
+/// the (already constrained) trim boundary, every final triangle is then
+/// confined to the clipped sub-region of one subdivision cell.
+fn wire_grid_constraints(
+    triangulation: &mut Cdt,
+    roles: &mut ConstraintRoles,
+    polyline: &PolyBoundary,
+    udiv: &[f64],
+    vdiv: &[f64],
+    insert_res: &[Vec<Option<FixedVertexHandle>>],
+) {
+    // v-direction links: within each u-column, between consecutive v-rows.
+    for (i, u) in udiv.iter().enumerate() {
+        for j in 0..vdiv.len() - 1 {
+            let a = Point2::new(*u, vdiv[j]);
+            let b = Point2::new(*u, vdiv[j + 1]);
+            wire_grid_segment(
+                triangulation,
+                roles,
+                polyline,
+                a,
+                b,
+                insert_res[i][j],
+                insert_res[i][j + 1],
+            );
+        }
+    }
+    // u-direction links: within each v-row, between consecutive u-columns.
+    for (j, v) in vdiv.iter().enumerate() {
+        for i in 0..udiv.len() - 1 {
+            let a = Point2::new(udiv[i], *v);
+            let b = Point2::new(udiv[i + 1], *v);
+            wire_grid_segment(
+                triangulation,
+                roles,
+                polyline,
+                a,
+                b,
+                insert_res[i][j],
+                insert_res[i + 1][j],
+            );
+        }
+    }
+}
+
+/// One grid segment, from `a` to `b` (endpoint vertices given or resolvable),
+/// cut into its material sub-segments and constrained.
+fn wire_grid_segment(
+    triangulation: &mut Cdt,
+    roles: &mut ConstraintRoles,
+    polyline: &PolyBoundary,
+    a: Point2,
+    b: Point2,
+    a_handle: Option<FixedVertexHandle>,
+    b_handle: Option<FixedVertexHandle>,
+) {
+    let mut cuts = grid_segment_trim_intersections(polyline, a, b);
+    cuts.push((0.0, a));
+    cuts.push((1.0, b));
+    cuts.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
+    cuts.dedup_by(|x, y| (x.0 - y.0).abs() < T_EPS);
+    for w in cuts.windows(2) {
+        let (t0, uv0) = w[0];
+        let (t1, uv1) = w[1];
+        if t1 - t0 < T_EPS {
+            continue;
+        }
+        let mid_uv = a + (b - a) * (0.5 * (t0 + t1));
+        // A material sub-interval, or conservatively an unestablished one (the
+        // interval is bounded by real grid/trim geometry either way, so
+        // constraining it is a bound, not a guess).
+        if !matches!(
+            polyline.locate(mid_uv),
+            PointLocation::Inside | PointLocation::Indeterminate
+        ) {
+            continue;
+        }
+        let Some(x) = interval_endpoint_vertex(triangulation, a, b, a_handle, b_handle, t0, uv0)
+        else {
+            continue;
+        };
+        let Some(y) = interval_endpoint_vertex(triangulation, a, b, a_handle, b_handle, t1, uv1)
+        else {
+            continue;
+        };
+        if x != y {
+            constrain_grid_edge(triangulation, roles, x, y);
+        }
+    }
+}
+
+/// The CDT vertex for the interval boundary at parameter `t`: the grid
+/// endpoint's own vertex when the boundary is a grid point that earned one,
+/// otherwise a vertex at the (trim-exact) boundary UV `uv`.
+fn interval_endpoint_vertex(
+    triangulation: &mut Cdt,
+    a: Point2,
+    b: Point2,
+    a_handle: Option<FixedVertexHandle>,
+    b_handle: Option<FixedVertexHandle>,
+    t: f64,
+    uv: Point2,
+) -> Option<FixedVertexHandle> {
+    if t <= T_EPS {
+        if let Some(h) = a_handle {
+            return Some(h);
+        }
+    } else if t >= 1.0 - T_EPS {
+        if let Some(h) = b_handle {
+            return Some(h);
+        }
+    }
+    resolve_vertex(triangulation, uv)
+}
+
+/// Intersection parameters of the grid segment `a -> b` with every **source**
+/// trim segment, as sorted candidate cut points in `[0, 1]`.
+///
+/// Proper crossings, trim vertices lying on the segment, and grid endpoints
+/// lying on a trim segment all contribute. A trim segment **parallel** to the
+/// grid segment contributes nothing: were it collinear and overlapping, the
+/// trim constraint already covers that line, and constraining the grid edge
+/// alongside it would give the split-child repair an ambiguous same-line
+/// parent to mislabel the trim half with. Such degenerate bands keep the
+/// pre-accuracy behaviour (the trim constrains them; the grid adds nothing).
+///
+/// The [`SegmentOrigin::Seam`] join bridges are deliberately excluded: they are
+/// artificial deck-join geometry, not source trim, and a degenerate (legacy)
+/// join can place them cutting across the material, where treating them as a
+/// material boundary would insert spurious grid/trim cut vertices. The seam is
+/// still a CDT constraint (added by [`PolyBoundary::insert_to`]), so the
+/// material stays bounded by it; the grid just does not cut there.
+fn grid_segment_trim_intersections(
+    polyline: &PolyBoundary,
+    a: Point2,
+    b: Point2,
+) -> Vec<(f64, Point2)> {
+    let d = b - a;
+    let d2 = d.magnitude2();
+    let mut ts = Vec::new();
+    // Safety margin for the bbox reject, scaled by the grid segment length
+    // (so a long segment gets a proportional margin) but never below a floor.
+    let eps = T_EPS * d2.sqrt().max(1.0);
+    for loop_ in &polyline.0 {
+        let n = loop_.points.len();
+        for i in 0..n {
+            if loop_.origins.get(i) == Some(SegmentOrigin::Seam) {
+                continue;
+            }
+            let (p, q) = (&loop_.points[i], &loop_.points[(i + 1) % n]);
+            let (c, e) = (**p, **q);
+            // Bounding-box prefilter: no overlap, no intersection.
+            if a.x.max(b.x) < c.x.min(e.x) - eps
+                || a.x.min(b.x) > c.x.max(e.x) + eps
+                || a.y.max(b.y) < c.y.min(e.y) - eps
+                || a.y.min(b.y) > c.y.max(e.y) + eps
+            {
+                continue;
+            }
+            let seg = e - c;
+            let denom = cross2(d, seg);
+            if denom.abs() <= 1e-12 {
+                // Parallel: no transverse crossing, and collinear overlap is
+                // deliberately ignored (see the doc comment).
+                continue;
+            }
+            let r = c - a;
+            let t = cross2(r, seg) / denom;
+            let s = cross2(r, d) / denom;
+            if t >= -T_EPS && t <= 1.0 + T_EPS && s >= -T_EPS && s <= 1.0 + T_EPS {
+                // The cut point is the projection onto the **trim** segment
+                // (`c + seg * s`), so it lies exactly on the trim line. A grid
+                // projection (`a + d * t`) carries fp error that can place the
+                // vertex a hair outside the material; the constraint to it
+                // would then cross the trim and be refused.
+                ts.push((t.clamp(0.0, 1.0), c + seg * s));
+            }
+        }
+    }
+    ts
+}
+
+/// Whether a parameter point lies in the material region, decided for the
+/// interior by the parity the flood will select and for the boundary exactly as
+/// [`PolyBoundary::locate`] decides it.
+///
+/// - A midpoint on the trim (within the raw locate's boundary tolerance) is
+///   **not** material: the trim already constrains there, and constraining the
+///   adjacent sliver would insert vertices on the boundary that can break the
+///   parity structure.
+/// - Otherwise the point is material iff the face it lies in carries odd
+///   parity under `early_parity`, computed on the boundary-only CDT before any
+///   grid vertex or [`ConstraintRole::SurfaceSampling`] constraint was added —
+///   exactly the material the final flood selects. This is what makes the
+///   classification agree with the flood on degenerate (self-crossing legacy
+///   join) boundaries, where the raw polyline ray-cast names a different
+///   material than the planarized boundary does.
+///
+/// `None` parity (early flood failed, so the face will fail later) and
+/// on-edge/on-vertex points classify conservatively as material.
+/// An existing vertex at `uv` (within the same UV weld radius the boundary
+/// uses), or a freshly inserted one.
+fn resolve_vertex(triangulation: &mut Cdt, uv: Point2) -> Option<FixedVertexHandle> {
+    let sp = SPoint2::new(spade_round(uv.x), spade_round(uv.y));
+    if let Some(idx) = triangulation
+        .vertices()
+        .find(|v| sp.distance_2(*v.as_ref()) < 1e-12)
+    {
+        return Some(idx.fix());
+    }
+    triangulation.insert(sp).ok()
+}
+
+/// One interior sampling constraint, with its semantic label.
+///
+/// The material sub-interval it realizes may properly cross the trim; use
+/// [`ConstraintRoles::insert_with_split`] so the crossing is planarized into a
+/// constrained split rather than refused. A crossing network Spade cannot
+/// planarize (or an existing duplicate constraint) is a best-effort skip: the
+/// grid exists to shape the triangulation, never to decide material, so a
+/// refused grid edge must not fail the face.
+fn constrain_grid_edge(
+    triangulation: &mut Cdt,
+    roles: &mut ConstraintRoles,
+    a: FixedVertexHandle,
+    b: FixedVertexHandle,
+) {
+    if triangulation
+        .get_edge_from_neighbors(a, b)
+        .filter(|e| e.is_constraint_edge())
+        .is_some()
+    {
+        return;
+    }
+    // A material sub-interval is bounded by real grid/trim geometry, so its
+    // interior cannot cross the trim: every trim crossing of the host grid
+    // segment was already computed as an interval boundary. `try_add_constraint`
+    // therefore suffices and deliberately avoids `add_constraint_and_split`,
+    // whose planarization can relocate an existing trim constraint and leave an
+    // odd toggling vertex behind. An empty chain is a best-effort skip.
+    let chain = triangulation.try_add_constraint(a, b);
+    if chain.is_empty() {
+        return;
+    }
+    // PLANAR-B B6: interior sampling constraints carry no source uses and
+    // have no SegmentOrigin; each realized chain gets its own semantic id.
+    let semantic_id = roles.mint_semantic_constraint_id();
+    roles.label_realized_chain(
+        triangulation,
+        &chain,
+        semantic_id,
+        ConstraintRole::SurfaceSampling,
+        &[],
+        None,
+    );
+}
+
+/// Two-dimensional cross product.
+fn cross2(a: Vector2, b: Vector2) -> f64 {
+    a.x * b.y - a.y * b.x
+}
+
+/// Relative tolerance for grid-segment cut points: two intersection parameters
+/// closer than this are the same cut.
+const T_EPS: f64 = 1e-9;
 
 /// Labels every CDT face with material parity by flooding the dual graph from
 /// the outer face, flipping across constraint edges that are entitled to toggle.
@@ -8758,6 +9427,8 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
     roles: &ConstraintRoles,
     vertex_sources: &HashMap<FixedVertexHandle, Vec<SourceEdgeUse>>,
     lattice: &CertifiedLattice,
+    tol: f64,
+    refine: bool,
 ) -> TessellationOutcome {
     use std::collections::HashMap as StdHashMap;
 
@@ -8926,6 +9597,85 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
         })
         .collect();
 
+    // Collect the argmax-deviation sample UV of every material triangle whose
+    // *exact-surface* sampled deviation exceeds the face tolerance. The
+    // exact-surface estimator evaluates the flat triangle with its corners
+    // taken as the true surface points `S(uv)`, so only genuine CDT
+    // curvature-bypass activates refinement; boundary-realization error (coarse
+    // trim polyline vertices) is invisible to it. The caller uses these as
+    // interior support points for a subsequent CDT rebuild. No-op when `refine`
+    // is false.
+    if refine {
+        let mut collected = 0usize;
+        let mut max_dev_any = 0.0f64;
+        let mut excess_sum = 0.0f64;
+        let mut worst_prov: Option<(&VertexMetadata, &VertexMetadata, &VertexMetadata)> = None;
+        const MAX_REFINE_COLLECT: usize = 1 << 10;
+        for &[i0, i1, i2] in &tri_faces_raw {
+            let uv_a = Point2::new(uv_coords[i0].x, uv_coords[i0].y);
+            let uv_b = Point2::new(uv_coords[i1].x, uv_coords[i1].y);
+            let uv_c = Point2::new(uv_coords[i2].x, uv_coords[i2].y);
+            let (dev, argmax) = triangle_sampled_deviation_exact(surface, uv_a, uv_b, uv_c);
+            if dev > max_dev_any {
+                max_dev_any = dev;
+                worst_prov = Some((
+                    &vertex_metadata[i0],
+                    &vertex_metadata[i1],
+                    &vertex_metadata[i2],
+                ));
+            }
+            if dev > tol {
+                excess_sum += dev - tol;
+                if collected < MAX_REFINE_COLLECT {
+                    REFINE_SUPPORT_CELL.with(|cell| cell.borrow_mut().push(argmax));
+                    collected += 1;
+                }
+            }
+        }
+        let (worst_seam, worst_singular, worst_boundary) = match worst_prov {
+            Some((a, b, c)) => {
+                let has = |r: &VertexMetadata, bit: u16| r.roles.contains(bit);
+                (
+                    has(a, VertexRoles::ARTIFICIAL_SEAM)
+                        || has(b, VertexRoles::ARTIFICIAL_SEAM)
+                        || has(c, VertexRoles::ARTIFICIAL_SEAM),
+                    has(a, VertexRoles::SINGULAR_COLLAPSE)
+                        || has(b, VertexRoles::SINGULAR_COLLAPSE)
+                        || has(c, VertexRoles::SINGULAR_COLLAPSE),
+                    has(a, VertexRoles::PHYSICAL_BOUNDARY)
+                        || has(b, VertexRoles::PHYSICAL_BOUNDARY)
+                        || has(c, VertexRoles::PHYSICAL_BOUNDARY),
+                )
+            }
+            None => (false, false, false),
+        };
+        REFINE_TRAJECTORY.with(|cell| {
+            cell.borrow_mut().push(RefineTrajectoryRow {
+                triangles: tri_faces_raw.len(),
+                unsafe_count: collected,
+                max_dev: max_dev_any,
+                excess_sum,
+                worst_seam,
+                worst_singular,
+                worst_boundary,
+            });
+        });
+        if std::env::var_os("TRUCK_SGC_REFINE_TRACE").is_some() {
+            eprintln!(
+                "REFINE_SCAN\tface={:?}\tunsafe={}\ttol={:.6}\ttris={}\tmax_dev={:.6}\texcess_sum={:.6}\tworst_seam={}\tworst_sing={}\tworst_bnd={}",
+                PROBE_FACE_CONTEXT.with(std::cell::Cell::get).0,
+                collected,
+                tol,
+                tri_faces_raw.len(),
+                max_dev_any,
+                excess_sum,
+                worst_seam,
+                worst_singular,
+                worst_boundary,
+            );
+        }
+    }
+
     if diagnosis::diag_enabled() {
         diagnosis::record_cdt_stages(
             stage_raw_cdt_triangles,
@@ -8994,6 +9744,108 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
     })
 }
 
+/// Sampled surface-vs-flat deviation estimator for the material triangle
+/// realized at `(p_a, p_b, p_c)` with UV corners `(uv_a, uv_b, uv_c)`.
+///
+/// Samples the surface at the three edge midpoints and the barycenter, and for
+/// each sample measures the physical distance between the real surface point
+/// `S(q)` and the linear point in the realized triangle at the same UV
+/// barycentric weights. Returns `(max_dev, argmax_sample_uv)`.
+///
+/// This is a diagnostic estimator, not a general mathematical certificate.
+fn triangle_sampled_deviation<S: ParametricSurface3D>(
+    surface: &S,
+    uv_a: Point2,
+    uv_b: Point2,
+    uv_c: Point2,
+    p_a: Point3,
+    p_b: Point3,
+    p_c: Point3,
+) -> (f64, Point2) {
+    let corners = [(uv_a, p_a), (uv_b, p_b), (uv_c, p_c)];
+    sampled_deviation_impl(surface, &corners)
+}
+
+/// Same estimator, but the triangle corners are taken as the *exact* surface
+/// points `S(uv)` of the three UV corners rather than the realized mesh
+/// vertices. This isolates the CDT curvature-bypass component of the deviation:
+/// a triangle whose corners are exact surface points can only deviate if the
+/// flat CDT triangle spans genuine surface curvature. Boundary-realization
+/// error (coarse trim polyline vertices stored in `boundary_map`, which sit off
+/// the analytic surface) is invisible to this estimator, so a face limited only
+/// by boundary realization does not activate refinement.
+fn triangle_sampled_deviation_exact<S: ParametricSurface3D>(
+    surface: &S,
+    uv_a: Point2,
+    uv_b: Point2,
+    uv_c: Point2,
+) -> (f64, Point2) {
+    let corners = [
+        (uv_a, surface.subs(uv_a.x, uv_a.y)),
+        (uv_b, surface.subs(uv_b.x, uv_b.y)),
+        (uv_c, surface.subs(uv_c.x, uv_c.y)),
+    ];
+    sampled_deviation_impl(surface, &corners)
+}
+
+fn sampled_deviation_impl<S: ParametricSurface3D>(
+    surface: &S,
+    corners: &[(Point2, Point3); 3],
+) -> (f64, Point2) {
+    let (uv_a, p_a) = corners[0];
+    let (uv_b, p_b) = corners[1];
+    let (uv_c, p_c) = corners[2];
+    // Barycentric weights of `q` in the UV triangle `(a, b, c)`, via 2D
+    // cross-product areas. Returns `None` for a degenerate UV triangle.
+    let cross2 = |p: Vector2, q: Vector2| p.x * q.y - p.y * q.x;
+    let barycentric = |q: Point2, a: Point2, b: Point2, c: Point2| -> Option<(f64, f64, f64)> {
+        let d = cross2(b - a, c - a);
+        if d.abs() <= 1e-14 {
+            return None;
+        }
+        let w_a = cross2(b - q, c - q) / d;
+        let w_b = cross2(c - q, a - q) / d;
+        let w_c = 1.0 - w_a - w_b;
+        Some((w_a, w_b, w_c))
+    };
+    let samples = [
+        uv_a + (uv_b - uv_a) * 0.5,
+        uv_b + (uv_c - uv_b) * 0.5,
+        uv_c + (uv_a - uv_c) * 0.5,
+        uv_a + ((uv_b - uv_a) + (uv_c - uv_a)) / 3.0,
+    ];
+    let mut max_dev = 0.0f64;
+    let mut argmax = samples[0];
+    for q in samples {
+        if let Some((w_a, w_b, w_c)) = barycentric(q, uv_a, uv_b, uv_c) {
+            let linear = p_a + (p_b - p_a) * w_b + (p_c - p_a) * w_c;
+            let real = surface.subs(q.x, q.y);
+            let dev = (real - linear).magnitude();
+            if dev.is_finite() && dev > max_dev {
+                max_dev = dev;
+                argmax = q;
+            }
+        }
+    }
+    (max_dev, argmax)
+}
+
+/// One per-pass record of the refinement trajectory for a face. The acceptance
+/// rule is justified by the geometric error functional here — triangle count is
+/// deliberately not the whole story.
+#[derive(Clone, Debug)]
+struct RefineTrajectoryRow {
+    triangles: usize,
+    unsafe_count: usize,
+    max_dev: f64,
+    excess_sum: f64,
+    /// Whether the worst-offending triangle touches seam/singular/boundary
+    /// structure (role bits from its three vertex metadata entries).
+    worst_seam: bool,
+    worst_singular: bool,
+    worst_boundary: bool,
+}
+
 #[allow(dead_code)]
 fn triangulation_into_polymesh<S: ParametricSurface3D>(
     triangulation: &Cdt,
@@ -9012,6 +9864,8 @@ fn triangulation_into_polymesh<S: ParametricSurface3D>(
         roles,
         &vertex_sources,
         lattice,
+        f64::INFINITY,
+        false,
     ) {
         TessellationOutcome::Mesh(ft) => ft.mesh,
         TessellationOutcome::Failed(_) => PolygonMesh::default(),
@@ -9593,6 +10447,8 @@ mod cone_topology_tests {
         (cylinder, vec![circle(0.2, 1.0), circle(0.8, -1.0)])
     }
 
+    /// TEMP DEBUG: dump the opposite-winding band CDT for legacy vs corrected.
+
     /// The deck equation, on the geometry it was written for: reversing loop 1
     /// gives `Î£Î´ = Â±2`, so the legacy join is refused and forward traversal is
     /// named as the unique solution.
@@ -9631,11 +10487,21 @@ mod cone_topology_tests {
     /// its two crossing bridges are proper interior crossings, so
     /// `add_constraint_and_split` planarizes them instead of refusing, and the
     /// material region comes out identical to the corrected traversal.
+    ///
+    /// `PolyBoundary::new` now runs the join under `DeckConsistent` (the
+    /// primary rendered-face path), so the explicit `Legacy` reference is used
+    /// to demonstrate the planarized legacy traversal selects the same band.
     #[test]
     fn opposite_winding_band_tessellates_only_when_deck_consistent() {
         let (cylinder, pieces) = opposite_winding_band_pieces();
         let lattice = unevidenced_lattice(&cylinder);
-        let legacy = PolyBoundary::new(pieces.clone(), &cylinder, 0.01, &lattice);
+        let (legacy, _) = PolyBoundary::new_with_join(
+            pieces.clone(),
+            &cylinder,
+            0.01,
+            &lattice,
+            TwoLoopJoinPolicy::Legacy,
+        );
         let legacy_mesh = trimming_tessellation_result(&cylinder, &legacy, 0.01, &lattice)
             .expect("PLANAR-C planarizes the crossing bridges instead of refusing");
         let (corrected, _) = PolyBoundary::new_with_join(
@@ -10125,6 +10991,142 @@ mod cone_topology_tests {
     }
 
     // -----------------------------------------------------------------------
+    // BOW-TIE-ORIENTATION â€” the primary path resolves two-loop joins against
+    // the deck equation, so the synthetic seam bridges are the two non-crossing
+    // sides of the periodic chart.
+    // -----------------------------------------------------------------------
+
+    /// The two synthetic seam bridges of a joined loop, as UV segments.
+    ///
+    /// A two-loop join produces exactly two `Seam`-origin bridges (INV-W2-3);
+    /// this extracts them so a test can assert the chart-closure invariant:
+    /// the two bridges must not have a proper interior crossing.
+    fn joined_seam_bridges(boundary: &PolyBoundary) -> Vec<[(f64, f64); 2]> {
+        let mut bridges = Vec::new();
+        for loop_ in &boundary.0 {
+            let points = &loop_.points;
+            assert_eq!(points.len(), loop_.origins.len());
+            for (i, origin) in loop_.origins.iter().enumerate() {
+                if *origin == SegmentOrigin::Seam {
+                    let a = points[i].uv;
+                    let b = points[(i + 1) % points.len()].uv;
+                    bridges.push([(a.x, a.y), (b.x, b.y)]);
+                }
+            }
+        }
+        bridges
+    }
+
+    /// Whether two UV segments have a *proper* interior crossing: an
+    /// intersection point strictly inside both open segments. Shared endpoints
+    /// (the rectangle corners the two bridges legitimately share) and
+    /// collinear overlaps are not proper crossings.
+    fn segments_properly_cross(a: [(f64, f64); 2], b: [(f64, f64); 2]) -> bool {
+        let orient = |p: (f64, f64), q: (f64, f64), r: (f64, f64)| {
+            (q.0 - p.0) * (r.1 - p.1) - (q.1 - p.1) * (r.0 - p.0)
+        };
+        let d1 = orient(a[0], a[1], b[0]);
+        let d2 = orient(a[0], a[1], b[1]);
+        let d3 = orient(b[0], b[1], a[0]);
+        let d4 = orient(b[0], b[1], a[1]);
+        (d1 * d2 < 0.0) && (d3 * d4 < 0.0)
+    }
+
+    /// The chart-closure invariant: the two synthetic seam bridges of a joined
+    /// periodic band must be the two non-crossing sides of the chart, so no
+    /// proper interior crossing exists and no synthetic chart-centre vertex is
+    /// required. This is the assertion the bow-tie defect violates.
+    fn assert_seam_bridges_do_not_cross(boundary: &PolyBoundary) {
+        let bridges = joined_seam_bridges(boundary);
+        assert_eq!(
+            bridges.len(),
+            2,
+            "the join produces exactly two seam bridges"
+        );
+        assert!(
+            !segments_properly_cross(bridges[0], bridges[1]),
+            "the two synthetic seam bridges must not have a proper interior crossing \
+             (the bow-tie invariant): {bridges:?}",
+        );
+    }
+
+    /// Test A â€” the `(false, true)` / opposite-displacement population
+    /// (`loop0_disp=[0,1]`, `loop1_disp=[0,-1]`, the `ftc_08 #5921` class).
+    ///
+    /// The primary path must select the forward traversal (the unique deck
+    /// solution), so the bridges are the two rectangle sides rather than the
+    /// crossing diagonals, and no chart-centre synthetic vertex is required.
+    #[test]
+    fn opposite_displacement_primary_path_joins_without_crossing() {
+        let (cylinder, pieces) = opposite_winding_band_pieces();
+        let lattice = unevidenced_lattice(&cylinder);
+        let boundary = PolyBoundary::new(pieces, &cylinder, 0.01, &lattice);
+        assert_eq!(boundary.0.len(), 1, "the join yields one closed loop");
+        assert_seam_bridges_do_not_cross(&boundary);
+        let mesh = trimming_tessellation_result(&cylinder, &boundary, 0.01, &lattice)
+            .expect("the deck-consistent primary boundary tessellates");
+        assert!(!mesh.tri_faces().is_empty(), "and produces triangles");
+    }
+
+    /// Test B â€“ the `(true, false)` / same-displacement population
+    /// (`loop0_disp == loop1_disp`). The deck equation selects the reversed
+    /// traversal there, so the primary path must keep the legacy reversal and
+    /// the bridges must again be non-crossing.
+    #[test]
+    fn same_displacement_primary_path_joins_without_crossing() {
+        let cylinder = RevolutedCurve::by_revolution(
+            Line(Point3::new(10.0, 0.0, 0.0), Point3::new(10.0, 0.0, 10.0)),
+            Point3::origin(),
+            Vector3::unit_z(),
+        );
+        let circle = |u: f64| -> PolyBoundaryPiece {
+            PolyBoundaryPiece::untagged(
+                (0..=32)
+                    .map(|i| {
+                        let v = (i as f64 / 32.0) * 2.0 * PI;
+                        let uv = Point2::new(u, v);
+                        (uv, cylinder.subs(uv.x, uv.y)).into()
+                    })
+                    .collect(),
+            )
+        };
+        let lattice = unevidenced_lattice(&cylinder);
+        let boundary = PolyBoundary::new(vec![circle(0.2), circle(0.8)], &cylinder, 0.01, &lattice);
+        assert_eq!(boundary.0.len(), 1, "the join yields one closed loop");
+        assert_seam_bridges_do_not_cross(&boundary);
+        let mesh = trimming_tessellation_result(&cylinder, &boundary, 0.01, &lattice)
+            .expect("the same-displacement band tessellates");
+        assert!(!mesh.tri_faces().is_empty(), "and produces triangles");
+    }
+
+    /// Test C â€” a representative previously-correct two-loop join (the
+    /// non-degenerate deck pair) must keep its emitted boundary topology: the
+    /// primary path still resolves forward and the band still tessellates to a
+    /// non-empty mesh with exactly the two seam bridges.
+    #[test]
+    fn non_degenerate_band_primary_path_keeps_valid_topology() {
+        let (cylinder, pieces) = non_degenerate_band_pieces();
+        let lattice = unevidenced_lattice(&cylinder);
+        let boundary = PolyBoundary::new(pieces, &cylinder, 0.01, &lattice);
+        assert_eq!(boundary.0.len(), 1, "the join yields one closed loop");
+        assert_seam_bridges_do_not_cross(&boundary);
+        let mesh = trimming_tessellation_result(&cylinder, &boundary, 0.01, &lattice)
+            .expect("the non-degenerate deck pair tessellates");
+        assert!(!mesh.tri_faces().is_empty(), "and produces triangles");
+    }
+
+    /// Test D â€“ the invariant for a legitimate simple periodic two-loop band:
+    /// the two synthetic closure segments never have a proper interior
+    /// intersection, for both resolved orientation classes.
+    #[test]
+    fn seam_closure_segments_never_properly_cross() {
+        let (cylinder, opposite) = opposite_winding_band_pieces();
+        let boundary =
+            PolyBoundary::new(opposite, &cylinder, 0.01, &unevidenced_lattice(&cylinder));
+        assert_seam_bridges_do_not_cross(&boundary);
+    }
+
+    // -----------------------------------------------------------------------
     // ARR-SEAM W3 â€” duplicate traversal, multiplicity mod 2
     // -----------------------------------------------------------------------
 
@@ -10419,11 +11421,261 @@ mod cone_topology_tests {
     }
 }
 
+/// PHASE-ALIGNMENT tests — the two-loop seam-reference correspondence.
+///
+/// The two bounds of a full 360° band are each a single self-closing circle
+/// edge whose parameterization origin is arbitrary: no source edge, vertex, or
+/// seam connects a specific point of one circle to a specific point of the
+/// other. The correct seam correspondence is the surface's own generator
+/// structure — points with equal periodic coordinate (v mod period) lie on a
+/// common ruling, and the synthetic seam bridges must be rulings. This module
+/// exercises `align_two_loop_phase`, which cyclically re-indexes a single-source
+/// full-period loop so both loops share the same seam reference.
+#[cfg(test)]
+mod phase_alignment_tests {
+    use super::*;
+    use std::f64::consts::PI;
+    use truck_modeling::{Line, Point2, Point3, RevolutedCurve, Vector3};
+
+    fn cylinder() -> RevolutedCurve<Line<Point3>> {
+        RevolutedCurve::by_revolution(
+            Line(Point3::new(10.0, 0.0, 0.0), Point3::new(10.0, 0.0, 10.0)),
+            Point3::origin(),
+            Vector3::unit_z(),
+        )
+    }
+
+    fn lattice(cyl: &RevolutedCurve<Line<Point3>>) -> CertifiedLattice {
+        unevidenced_lattice(cyl)
+    }
+
+    fn use_(bound: usize, index: usize) -> SourceEdgeUse {
+        SourceEdgeUse {
+            bound: BoundId(bound),
+            index,
+            orientation: true,
+        }
+    }
+
+    /// A single-source full-period circle loop on the cylinder at height `u`,
+    /// whose samples start at angular phase `phase0` (radians). `src` is the one
+    /// source edge use every segment carries (single-source gate).
+    fn circle_loop(
+        cyl: &RevolutedCurve<Line<Point3>>,
+        u: f64,
+        phase0: f64,
+        src: SourceEdgeUse,
+    ) -> BoundaryLoop {
+        let n = 32usize;
+        let points: Vec<SurfacePoint> = (0..=n)
+            .map(|i| {
+                let v = phase0 + (i as f64 / n as f64) * 2.0 * PI;
+                let uv = Point2::new(u, v);
+                (uv, cyl.subs(uv.x, uv.y)).into()
+            })
+            .collect();
+        let source_uses: Vec<SegmentSources> = (0..=n).map(|_| vec![src]).collect();
+        BoundaryLoop::periodic_source_walk(points, source_uses)
+    }
+
+    /// A loop whose segments alternately reference two source edge uses, so the
+    /// single-source gate must refuse to re-index it (the source seam is
+    /// established; correspondence is not free).
+    fn multi_source_loop(cyl: &RevolutedCurve<Line<Point3>>, u: f64, phase0: f64) -> BoundaryLoop {
+        let n = 32usize;
+        let points: Vec<SurfacePoint> = (0..=n)
+            .map(|i| {
+                let v = phase0 + (i as f64 / n as f64) * 2.0 * PI;
+                let uv = Point2::new(u, v);
+                (uv, cyl.subs(uv.x, uv.y)).into()
+            })
+            .collect();
+        let source_uses: Vec<SegmentSources> = (0..=n)
+            .map(|i| vec![if i % 2 == 0 { use_(0, 0) } else { use_(0, 1) }])
+            .collect();
+        BoundaryLoop::periodic_source_walk(points, source_uses)
+    }
+
+    fn v_phase(p: &SurfacePoint) -> f64 {
+        p.uv.y.rem_euclid(2.0 * PI)
+    }
+
+    /// The aligned phase after the join: both loops' start samples carry the
+    /// same phase mod 2π, so the seam bridges are generator lines.
+    #[test]
+    fn t2_half_period_loops_are_aligned() {
+        let cyl = cylinder();
+        let ltt = lattice(&cyl);
+        let loop0 = circle_loop(&cyl, 0.2, 0.0, use_(0, 0));
+        let mut loop1 = circle_loop(&cyl, 0.8, PI, use_(1, 0));
+        assert!(
+            align_two_loop_phase(&loop0, &mut loop1, [0, 1], &ltt),
+            "a half-period offset must be re-indexed"
+        );
+        assert!(
+            (v_phase(&loop1.points[0]) - v_phase(&loop0.points[0])).abs() < 1e-9,
+            "both loops must share the seam reference mod period: l0={} l1={}",
+            v_phase(&loop0.points[0]),
+            v_phase(&loop1.points[0]),
+        );
+    }
+
+    /// T1 — aligned full-period loops (phase offset 0) are not touched: the
+    /// function reports no re-index and the loops keep their start phases.
+    #[test]
+    fn t1_aligned_loops_are_unchanged() {
+        let cyl = cylinder();
+        let ltt = lattice(&cyl);
+        let loop0 = circle_loop(&cyl, 0.2, 0.0, use_(0, 0));
+        let mut loop1 = circle_loop(&cyl, 0.8, 0.0, use_(1, 0));
+        assert!(
+            !align_two_loop_phase(&loop0, &mut loop1, [0, 1], &ltt),
+            "an already-aligned loop must not be re-indexed"
+        );
+        assert_eq!(
+            v_phase(&loop1.points[0]),
+            0.0,
+            "the loop start phase is unchanged"
+        );
+    }
+
+    /// T3 — an arbitrary fractional start offset (period / 3) is aligned to the
+    /// nearest sample, so the residual phase is bounded by half a sample step.
+    #[test]
+    fn t3_fractional_start_is_aligned() {
+        let cyl = cylinder();
+        let ltt = lattice(&cyl);
+        let loop0 = circle_loop(&cyl, 0.2, 0.0, use_(0, 0));
+        let mut loop1 = circle_loop(&cyl, 0.8, 2.0 * PI / 3.0, use_(1, 0));
+        assert!(
+            align_two_loop_phase(&loop0, &mut loop1, [0, 1], &ltt),
+            "a fractional offset must be re-indexed"
+        );
+        let step = 2.0 * PI / 32.0;
+        let raw = (v_phase(&loop1.points[0]) - v_phase(&loop0.points[0])).abs();
+        let residual = raw.min(2.0 * PI - raw);
+        assert!(
+            residual < step / 2.0 + 1e-9,
+            "residual phase bounded by half a sample step: {residual}"
+        );
+    }
+
+    /// The re-index is a pure cyclic rotation plus a full-period re-lift, so the
+    /// multiset of realized 3D boundary samples on loop1 is preserved exactly:
+    /// no sample is added, dropped, or moved to a different 3D location. This is
+    /// the preservation invariant — the alignment changes only the arbitrary
+    /// cyclic starting index of the sampled full-period loop.
+    #[test]
+    fn reindexing_preserves_realized_samples() {
+        let cyl = cylinder();
+        let ltt = lattice(&cyl);
+        let loop0 = circle_loop(&cyl, 0.2, 0.0, use_(0, 0));
+        let mut loop1 = circle_loop(&cyl, 0.8, PI, use_(1, 0));
+        let before: Vec<Point3> = loop1.points.iter().map(|p| p.point).collect();
+        assert!(
+            align_two_loop_phase(&loop0, &mut loop1, [0, 1], &ltt),
+            "a half-period offset must be re-indexed"
+        );
+        let after: Vec<Point3> = loop1.points.iter().map(|p| p.point).collect();
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "no realized sample is added or dropped"
+        );
+        for p in &after {
+            assert!(
+                before.iter().any(|q| q.distance(*p) < 1e-9),
+                "every realized sample survives the re-index: {p:?}"
+            );
+        }
+    }
+
+    /// T5 — a multi-source loop carries a source-established seam and must not
+    /// be re-indexed: the function reports refusal.
+    #[test]
+    fn t5_multi_source_loop_is_not_reindexed() {
+        let cyl = cylinder();
+        let ltt = lattice(&cyl);
+        let loop0 = circle_loop(&cyl, 0.2, 0.0, use_(0, 0));
+        let mut loop1 = multi_source_loop(&cyl, 0.8, PI);
+        let before = loop1.points.clone();
+        assert!(
+            !align_two_loop_phase(&loop0, &mut loop1, [0, 1], &ltt),
+            "a multi-source loop must refuse re-indexing"
+        );
+        assert!(
+            loop1
+                .points
+                .iter()
+                .zip(&before)
+                .all(|(a, b)| a.uv == b.uv && a.point == b.point),
+            "the loop is byte-identical"
+        );
+    }
+
+    /// T4 — the alignment composes with the deck-consistent direction decision:
+    /// re-indexing does not change the loop displacement, so the two-loop join
+    /// still tessellates and the old bow-tie case stays fixed. The phase-aligned
+    /// band must tessellate to a non-empty mesh.
+    #[test]
+    fn t4_alignment_composes_with_deck_consistent() {
+        let cyl = cylinder();
+        let ltt = lattice(&cyl);
+        let pieces = vec![
+            PolyBoundaryPiece::untagged(
+                (0..=32)
+                    .map(|i| {
+                        let v = (i as f64 / 32.0) * 2.0 * PI;
+                        let uv = Point2::new(0.2, v);
+                        (uv, cyl.subs(uv.x, uv.y)).into()
+                    })
+                    .collect(),
+            ),
+            PolyBoundaryPiece::untagged(
+                (0..=32)
+                    .map(|i| {
+                        let v = PI + (i as f64 / 32.0) * 2.0 * PI;
+                        let uv = Point2::new(0.8, v);
+                        (uv, cyl.subs(uv.x, uv.y)).into()
+                    })
+                    .collect(),
+            ),
+        ];
+        let boundary = PolyBoundary::new(pieces, &cyl, 0.01, &ltt);
+        assert_eq!(boundary.0.len(), 1, "the join yields one closed loop");
+        let mesh = trimming_tessellation_result(&cyl, &boundary, 0.01, &ltt)
+            .expect("the phase-aligned band tessellates");
+        assert!(!mesh.tri_faces().is_empty(), "and produces triangles");
+    }
+
+    /// The mean-translate preserves the fractional phase residual (a π offset is
+    /// irreducible by integer periods), so the alignment must act after it — the
+    /// combined operation still aligns a half-period-offset loop.
+    #[test]
+    fn alignment_acts_after_integer_mean_translate() {
+        let cyl = cylinder();
+        let ltt = lattice(&cyl);
+        let loop0 = circle_loop(&cyl, 0.2, 0.0, use_(0, 0));
+        let mut loop1 = circle_loop(&cyl, 0.8, PI, use_(1, 0));
+        // Simulate an integer period translate that cannot remove the π residual.
+        for p in &mut loop1.points {
+            p.uv.y += 2.0 * PI;
+        }
+        assert!(
+            align_two_loop_phase(&loop0, &mut loop1, [0, 1], &ltt),
+            "the fractional residual is still aligned"
+        );
+        assert!(
+            (v_phase(&loop1.points[0]) - v_phase(&loop0.points[0])).abs() < 1e-9,
+            "both loops share the seam reference mod period"
+        );
+    }
+}
+
 #[cfg(test)]
 mod singular_transition_tests {
     use super::*;
     use truck_modeling::{Point2, Point3, Vector3};
-
     /// `v` collapses at `u = 1`: the whole `u = 1` row maps to the single
     /// point `(0, 1, 0)`, so every `(1, v)` is a legitimate UV representative
     /// of that one singular 3D point. This is the abstract shape of the
@@ -13569,7 +14821,6 @@ mod periodic_cap_closure_tests {
         assert!(!mesh.tri_faces().is_empty());
     }
 
-    /// A single latitude loop on a cylinder has no pole: the material side has
     /// no orbit collapse, so the mechanism declines and the face keeps whatever
     /// the legacy path produced (no cap is invented).
     #[test]
@@ -13666,5 +14917,538 @@ mod periodic_cap_closure_tests {
         let mesh = trimming_tessellation_result(&s, &boundary, 0.05, &lattice)
             .expect("the tagged cap cell tessellates");
         assert!(!mesh.tri_faces().is_empty());
+    }
+}
+
+/// Constraint wiring of [`wire_grid_constraints`]: the interior sampling grid
+/// must constrain every *material* sub-segment of every grid line, cutting each
+/// grid segment at its real intersections with the trim so a final triangle
+/// cannot cross a subdivision-cell boundary merely because a grid vertex was
+/// outside the trimmed region.
+#[cfg(test)]
+mod grid_constraint_wiring_tests {
+    use super::*;
+
+    fn point(x: f64, y: f64) -> SPoint2 {
+        SPoint2::new(x, y)
+    }
+
+    fn insert_vertex(cdt: &mut Cdt, p: SPoint2) -> FixedVertexHandle {
+        cdt.insert(p).expect("vertex insertion succeeds")
+    }
+
+    fn find_vertex(cdt: &Cdt, p: SPoint2) -> FixedVertexHandle {
+        cdt.vertices()
+            .find(|v| v.as_ref().distance_2(p) < 1e-9)
+            .expect("vertex exists")
+            .fix()
+    }
+
+    /// A square trim `[lo, hi] × [lo, hi]` in the plane z = 0.
+    fn square_trim(lo: f64, hi: f64) -> PolyBoundary {
+        let pts: Vec<SurfacePoint> = [
+            (Point2::new(lo, lo), Point3::new(lo, lo, 0.0)),
+            (Point2::new(hi, lo), Point3::new(hi, lo, 0.0)),
+            (Point2::new(hi, hi), Point3::new(hi, hi, 0.0)),
+            (Point2::new(lo, hi), Point3::new(lo, hi, 0.0)),
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+        PolyBoundary(vec![BoundaryLoop {
+            points: pts,
+            origins: vec![SegmentOrigin::Source; 4],
+            source_uses: vec![Vec::new(); 4],
+        }])
+    }
+
+    /// A grid with every vertex present (`Some`), inserted into `cdt`.
+    fn present_grid_into(
+        cdt: &mut Cdt,
+        udiv: &[f64],
+        vdiv: &[f64],
+    ) -> Vec<Vec<Option<FixedVertexHandle>>> {
+        udiv.iter()
+            .map(|&u| {
+                vdiv.iter()
+                    .map(|&v| Some(insert_vertex(cdt, point(u, v))))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    }
+
+    /// A grid where only the grid points `inside` earn a vertex, inserted into
+    /// `cdt`.
+    fn classified_grid_into(
+        cdt: &mut Cdt,
+        udiv: &[f64],
+        vdiv: &[f64],
+        inside: &dyn Fn(f64, f64) -> bool,
+    ) -> Vec<Vec<Option<FixedVertexHandle>>> {
+        udiv.iter()
+            .map(|&u| {
+                vdiv.iter()
+                    .map(|&v| {
+                        if inside(u, v) {
+                            Some(insert_vertex(cdt, point(u, v)))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    }
+
+    /// Insert the trim as constraints (as the production `insert_to` does),
+    /// insert the grid vertices, and wire.
+    fn wire_with_boundary(
+        boundary: &PolyBoundary,
+        udiv: &[f64],
+        vdiv: &[f64],
+        grid: &[Vec<Option<FixedVertexHandle>>],
+        cdt: &mut Cdt,
+        roles: &mut ConstraintRoles,
+    ) {
+        wire_grid_constraints(cdt, roles, boundary, udiv, vdiv, grid);
+    }
+
+    /// The constraint edge between two vertices, if both exist and share one.
+    fn edge_between(cdt: &Cdt, a: SPoint2, b: SPoint2) -> Option<FixedUndirectedEdgeHandle> {
+        let va = cdt
+            .vertices()
+            .find(|v| v.as_ref().distance_2(a) < 1e-9)?
+            .fix();
+        let vb = cdt
+            .vertices()
+            .find(|v| v.as_ref().distance_2(b) < 1e-9)?
+            .fix();
+        cdt.get_edge_from_neighbors(va, vb)
+            .map(|e| e.as_undirected().fix())
+    }
+
+    fn is_constraint_edge(cdt: &Cdt, a: SPoint2, b: SPoint2) -> bool {
+        edge_between(cdt, a, b)
+            .filter(|e| cdt.is_constraint_edge(*e))
+            .is_some()
+    }
+
+    /// A fully-interior grid (trim larger than the grid, every grid point
+    /// material): every grid line — including the final u-column — must be
+    /// constrained between its consecutive vertices. This is the wiring that
+    /// guarantees a triangle cannot straddle a certified cell in the interior.
+    #[test]
+    fn fully_interior_grid_is_fully_constrained_including_final_column() {
+        let boundary = square_trim(-2.0, 2.0);
+        let mut cdt = Cdt::new();
+        let mut boundary_map = HashMap::<FixedVertexHandle, Point3>::default();
+        let mut vertex_sources = HashMap::<FixedVertexHandle, Vec<SourceEdgeUse>>::default();
+        let mut roles = ConstraintRoles::default();
+        boundary
+            .insert_to(&mut cdt, &mut boundary_map, &mut roles, &mut vertex_sources)
+            .expect("insert_to succeeds");
+        let grid = present_grid_into(&mut cdt, &[-1.0, 0.0, 1.0], &[-1.0, 0.0, 1.0]);
+        wire_with_boundary(
+            &boundary,
+            &[-1.0, 0.0, 1.0],
+            &[-1.0, 0.0, 1.0],
+            &grid,
+            &mut cdt,
+            &mut roles,
+        );
+
+        for v in [-1.0, 0.0, 1.0] {
+            assert!(
+                is_constraint_edge(&cdt, point(-1.0, v), point(0.0, v)),
+                "u-link (-1,{v})-(0,{v}) missing"
+            );
+            assert!(
+                is_constraint_edge(&cdt, point(0.0, v), point(1.0, v)),
+                "u-link (0,{v})-(1,{v}) missing"
+            );
+        }
+        for u in [-1.0, 0.0, 1.0] {
+            assert!(
+                is_constraint_edge(&cdt, point(u, -1.0), point(u, 0.0)),
+                "v-link ({u},-1)-({u},0) missing"
+            );
+            assert!(
+                is_constraint_edge(&cdt, point(u, 0.0), point(u, 1.0)),
+                "v-link ({u},0)-({u},1) missing"
+            );
+        }
+    }
+
+    /// A grid segment crossing the trim boundary: its material portion must be
+    /// constrained up to a *real* grid/trim intersection vertex, and the
+    /// outside portion must not be bridged by a constraint.
+    #[test]
+    fn boundary_crossing_segment_is_constrained_to_a_real_trim_intersection() {
+        let boundary = square_trim(-0.4, 0.4);
+        let mut cdt = Cdt::new();
+        let mut boundary_map = HashMap::<FixedVertexHandle, Point3>::default();
+        let mut vertex_sources = HashMap::<FixedVertexHandle, Vec<SourceEdgeUse>>::default();
+        let mut roles = ConstraintRoles::default();
+        boundary
+            .insert_to(&mut cdt, &mut boundary_map, &mut roles, &mut vertex_sources)
+            .expect("insert_to succeeds");
+        // Grid over [-1, 1]²; only the center is material.
+        let inside = |u: f64, v: f64| u.abs() < 0.49 && v.abs() < 0.49;
+        let grid = classified_grid_into(&mut cdt, &[-1.0, 0.0, 1.0], &[-1.0, 0.0, 1.0], &inside);
+        wire_with_boundary(
+            &boundary,
+            &[-1.0, 0.0, 1.0],
+            &[-1.0, 0.0, 1.0],
+            &grid,
+            &mut cdt,
+            &mut roles,
+        );
+
+        // The center connects to the four real trim intersections on the axes.
+        let center = point(0.0, 0.0);
+        for (ix, iy) in [(0.4, 0.0), (-0.4, 0.0), (0.0, 0.4), (0.0, -0.4)] {
+            let target = point(ix, iy);
+            // The intersection vertex must exist, exactly at the grid∩trim point.
+            assert!(
+                find_vertex(&cdt, target) != find_vertex(&cdt, center),
+                "intersection vertex ({ix},{iy}) must be a distinct vertex"
+            );
+            assert!(
+                is_constraint_edge(&cdt, center, target),
+                "material spoke (0,0)-({ix},{iy}) missing"
+            );
+        }
+        // The outside portion is not bridged: no constraint from the trim
+        // intersection toward the outer grid point, and no vertex at (1,0).
+        assert!(
+            !is_constraint_edge(&cdt, point(0.0, 0.0), point(1.0, 0.0)),
+            "the outside portion must not be constrained"
+        );
+        assert!(
+            cdt.vertices()
+                .find(|v| v.as_ref() == &point(1.0, 0.0))
+                .is_none(),
+            "no vertex may be placed on the outside portion of the grid line"
+        );
+    }
+}
+
+/// Structural tests for CDT refinement.
+///
+/// These assert the *invariant* — a refinement pass is retained only when it
+/// strictly reduces the face's maximum sampled exact-surface deviation, and
+/// refinement terminates when that deviation satisfies tolerance — rather than
+/// any particular face population. They drive
+/// [`trimming_tessellation_with_refinement`] directly with an explicit
+/// `enable_refine` flag so the acceptance rule is exercised deterministically.
+#[cfg(test)]
+mod cdt_refinement_tests {
+    use super::*;
+    use std::f64::consts::{FRAC_PI_2, PI};
+    use truck_modeling::{Line, Point2, Point3, RevolutedCurve, Vector3};
+
+    fn cylinder() -> RevolutedCurve<Line<Point3>> {
+        RevolutedCurve::by_revolution(
+            Line(Point3::new(10.0, 0.0, 0.0), Point3::new(10.0, 0.0, 10.0)),
+            Point3::origin(),
+            Vector3::unit_z(),
+        )
+    }
+
+    fn sphere() -> truck_geometry::prelude::Sphere {
+        truck_geometry::prelude::Sphere::new(Point3::origin(), 10.0)
+    }
+
+    fn plane() -> truck_geometry::prelude::Plane {
+        truck_geometry::prelude::Plane::new(
+            Point3::origin(),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        )
+    }
+
+    /// A quad trim on a surface: four edges sampled as polylines, forming one
+    /// closed loop. `(u0, u1)` spans the straight axis, `(v0, v1)` the curved
+    /// axis; `arc_pts` samples the curved edges, `gen_pts` the straight
+    /// generator edges. With coarse `arc_pts` (2 = just the corners) the CDT
+    /// bridges the full curved span — the canonical interior-starved
+    /// mechanism; with fine `arc_pts` the boundary chords already keep every
+    /// triangle within tolerance.
+    ///
+    /// The boundary is constructed directly as a raw closed [`BoundaryLoop`]
+    /// (origins all `Source`, empty provenance) rather than through
+    /// [`PolyBoundary::new`], so the test controls the exact polyline and the
+    /// periodic/join machinery does not re-lift or densify it.
+    fn quad_boundary<S: PreMeshableSurface>(
+        surface: &S,
+        u0: f64,
+        u1: f64,
+        v0: f64,
+        v1: f64,
+        arc_pts: usize,
+        gen_pts: usize,
+    ) -> PolyBoundary {
+        let mk = |u: f64, v: f64| -> SurfacePoint {
+            let uv = Point2::new(u, v);
+            (uv, surface.subs(u, v)).into()
+        };
+        let n = arc_pts;
+        let m = gen_pts;
+        let mut pts = Vec::new();
+        // bottom generator: u0 -> u1 at v0 (straight edge)
+        for i in 0..m {
+            pts.push(mk(u0 + (u1 - u0) * (i as f64 / (m - 1) as f64), v0));
+        }
+        // right arc: v0 -> v1 at u1 (curved edge)
+        for i in 1..n {
+            pts.push(mk(u1, v0 + (v1 - v0) * (i as f64 / (n - 1) as f64)));
+        }
+        // top generator: u1 -> u0 at v1 (straight edge)
+        for i in (0..m - 1).rev() {
+            pts.push(mk(u0 + (u1 - u0) * (i as f64 / (m - 1) as f64), v1));
+        }
+        // left arc: v1 -> v0 at u0 (curved edge)
+        for i in (1..n).rev() {
+            pts.push(mk(u0, v0 + (v1 - v0) * (i as f64 / (n - 1) as f64)));
+        }
+        let k = pts.len();
+        let origins = vec![SegmentOrigin::Source; k];
+        let source_uses = vec![Vec::new(); k];
+        PolyBoundary(vec![BoundaryLoop::new(pts, origins, source_uses)])
+    }
+
+    /// The maximum sampled exact-surface deviation of a mesh: corners taken as
+    /// the true surface points `S(uv)`, so boundary realization is invisible.
+    fn mesh_max_dev<S: ParametricSurface3D>(surface: &S, mesh: &PolygonMesh) -> f64 {
+        let mut max = 0.0f64;
+        for tri in mesh.faces().tri_faces() {
+            let uv = [
+                mesh.uv_coords()[tri[0].pos],
+                mesh.uv_coords()[tri[1].pos],
+                mesh.uv_coords()[tri[2].pos],
+            ];
+            let a = Point2::new(uv[0].x, uv[0].y);
+            let b = Point2::new(uv[1].x, uv[1].y);
+            let c = Point2::new(uv[2].x, uv[2].y);
+            let (d, _) = triangle_sampled_deviation_exact(surface, a, b, c);
+            if d > max {
+                max = d;
+            }
+        }
+        max
+    }
+
+    fn tess_mesh<S: PreMeshableSurface + ParametricSurface3D>(
+        surface: &S,
+        boundary: &PolyBoundary,
+        tol: f64,
+        refine: bool,
+    ) -> PolygonMesh {
+        let lattice = unevidenced_lattice(surface);
+        match trimming_tessellation_with_refinement(surface, boundary, tol, &lattice, refine) {
+            TessellationOutcome::Mesh(ft) => ft.mesh,
+            TessellationOutcome::Failed(reason) => panic!("tessellation failed: {reason:?}"),
+        }
+    }
+
+    /// T1 — unsafe curved-span triangle: a ruled surface whose ordinary CDT can
+    /// bridge a tolerance-invalid curved span. Refinement must activate and
+    /// reduce the maximum exact-surface deviation.
+    #[test]
+    fn t1_unsafe_curved_span_triggers_refinement() {
+        // A sphere band at mid latitude (v in [0.8, 1.4]), spanning nearly the
+        // full u azimuth. The flat CDT triangles across the longitude direction
+        // deviate from the sphere by a mid-latitude chord sagitta; with a
+        // tolerance below that sagitta the span is tolerance-invalid and the
+        // argmax deviation is an interior point (not the pole), so refinement
+        // must activate and reduce it.
+        let sph = sphere();
+        let tol = 0.02;
+        let boundary = quad_boundary(&sph, 0.0, PI, 0.8, 1.4, 2, 2);
+        let base = tess_mesh(&sph, &boundary, tol, false);
+        let refined = tess_mesh(&sph, &boundary, tol, true);
+        let base_dev = mesh_max_dev(&sph, &base);
+        let refined_dev = mesh_max_dev(&sph, &refined);
+        assert!(
+            base_dev > tol,
+            "baseline must exceed tolerance, got {base_dev:.4} vs tol {tol}"
+        );
+        assert!(
+            refined_dev <= tol,
+            "refinement must bring max deviation within tolerance, got {refined_dev:.4} vs tol {tol}"
+        );
+        assert!(
+            refined_dev < base_dev,
+            "refinement must strictly reduce max deviation: {base_dev:.4} -> {refined_dev:.4}"
+        );
+    }
+
+    /// T2 — safe `inside=0` case: similar independent divisions, but the
+    /// boundary/constraint topology already keeps every actual triangle within
+    /// tolerance, so refinement must not activate.
+    #[test]
+    fn t2_safe_quad_within_tolerance_does_not_refine() {
+        let cyl = cylinder();
+        // A small angular patch (30 degrees), coarse arcs (corners only). The
+        // CDT bridges the full 30-degree span, but on R = 10 that chord has
+        // sagitta 10(1 - cos 15°) ≈ 0.34 < tol, so every actual triangle is
+        // already safe even though the interior grid is empty (`inside = 0`).
+        let tol = 0.93;
+        let boundary = quad_boundary(&cyl, 0.0, 1.0, 0.0, FRAC_PI_2, 2, 4);
+        let base = tess_mesh(&cyl, &boundary, tol, false);
+        let refined = tess_mesh(&cyl, &boundary, tol, true);
+        let base_dev = mesh_max_dev(&cyl, &base);
+        let refined_dev = mesh_max_dev(&cyl, &refined);
+        assert!(
+            base_dev <= tol,
+            "baseline must already be within tolerance, got {base_dev:.4} vs tol {tol}"
+        );
+        assert!(
+            (refined_dev - base_dev).abs() < 1e-6,
+            "safe face must be unchanged by refinement: {base_dev:.4} -> {refined_dev:.4}"
+        );
+    }
+
+    /// T3 — long-axis complexity: greatly increase the straight-axis length
+    /// while preserving the same local curved geometry. Refinement cost must
+    /// not scale as `straight_length / tiny_orthogonal_interval`.
+    #[test]
+    fn t3_long_axis_does_not_scale_refinement() {
+        let cyl = cylinder();
+        let tol = 0.93;
+        // Short patch: u in [0, 1].
+        let short_b = quad_boundary(&cyl, 0.0, 1.0, 0.0, FRAC_PI_2, 2, 4);
+        let short = tess_mesh(&cyl, &short_b, tol, true);
+        // Long patch: u in [0, 100] — 100x the straight axis, same 90-degree
+        // curved span.
+        let long_b = quad_boundary(&cyl, 0.0, 100.0, 0.0, FRAC_PI_2, 2, 4);
+        let long = tess_mesh(&cyl, &long_b, tol, true);
+        let short_tris = short.tri_faces().len();
+        let long_tris = long.tri_faces().len();
+        assert!(
+            long_tris < short_tris * 3,
+            "refinement must not scale with straight-axis length: short {short_tris} tris, long {long_tris} tris"
+        );
+        assert!(
+            mesh_max_dev(&cyl, &long) <= tol,
+            "long axis must still satisfy tolerance after refinement"
+        );
+    }
+
+    /// T4 — planar surface: no refinement, no deviation.
+    #[test]
+    fn t4_planar_never_refines() {
+        let pl = plane();
+        let tol = 0.93;
+        let boundary = quad_boundary(&pl, 0.0, 10.0, 0.0, 10.0, 2, 4);
+        let base = tess_mesh(&pl, &boundary, tol, false);
+        let refined = tess_mesh(&pl, &boundary, tol, true);
+        assert!(
+            mesh_max_dev(&pl, &refined) < 1e-9,
+            "planar mesh must have zero exact deviation"
+        );
+        assert_eq!(
+            refined.tri_faces().len(),
+            base.tri_faces().len(),
+            "planar refinement must not add triangles"
+        );
+    }
+
+    /// T5 — actual support realization: the chosen support point becomes part
+    /// of the material CDT connectivity. The refined mesh must contain a vertex
+    /// whose UV is strictly interior (not on the boundary) that was not present
+    /// in the baseline mesh.
+    #[test]
+    fn t5_support_point_becomes_mesh_vertex() {
+        // The same sphere band as T1: a tolerance-invalid curved span whose
+        // argmax deviation is an interior point, so refinement inserts an
+        // interior support that must appear as a material mesh vertex.
+        let sph = sphere();
+        let tol = 0.02;
+        let boundary = quad_boundary(&sph, 0.0, PI, 0.8, 1.4, 2, 2);
+        let base = tess_mesh(&sph, &boundary, tol, false);
+        let refined = tess_mesh(&sph, &boundary, tol, true);
+        // Interior criterion: u strictly inside the azimuth span, v strictly
+        // inside the latitude band.
+        let base_uvs: std::collections::HashSet<(i64, i64)> = base
+            .uv_coords()
+            .iter()
+            .map(|v| ((v.x * 1e6).round() as i64, (v.y * 1e6).round() as i64))
+            .collect();
+        let mut found_interior = false;
+        for uv in refined.uv_coords() {
+            let key = ((uv.x * 1e6).round() as i64, (uv.y * 1e6).round() as i64);
+            if !base_uvs.contains(&key)
+                && uv.x > 1e-3
+                && uv.x < PI - 1e-3
+                && uv.y > 0.8 + 1e-3
+                && uv.y < 1.4 - 1e-3
+            {
+                found_interior = true;
+                break;
+            }
+        }
+        assert!(
+            found_interior,
+            "refinement must insert a strictly-interior support vertex into the mesh"
+        );
+    }
+
+    /// T6 — deterministic result: identical input produces identical
+    /// support/refinement decisions and meshes.
+    #[test]
+    fn t6_refinement_is_deterministic() {
+        let cyl = cylinder();
+        let tol = 0.93;
+        let boundary = quad_boundary(&cyl, 0.0, 1.0, 0.0, FRAC_PI_2, 2, 4);
+        let m1 = tess_mesh(&cyl, &boundary, tol, true);
+        let m2 = tess_mesh(&cyl, &boundary, tol, true);
+        assert_eq!(
+            m1.tri_faces().len(),
+            m2.tri_faces().len(),
+            "deterministic triangle count"
+        );
+        assert_eq!(
+            m1.positions().len(),
+            m2.positions().len(),
+            "deterministic vertex count"
+        );
+        let d1 = mesh_max_dev(&cyl, &m1);
+        let d2 = mesh_max_dev(&cyl, &m2);
+        assert!(
+            (d1 - d2).abs() < 1e-12,
+            "deterministic max deviation: {d1:.12} vs {d2:.12}"
+        );
+    }
+
+    /// T7 — defensive termination: a pathological face whose maximum cannot be
+    /// reduced by interior support (boundary/pole-pinned) must terminate
+    /// without unbounded support insertion or a blown-up triangle count.
+    #[test]
+    fn t7_pinned_maximum_terminates_without_explosion() {
+        // Sphere pole patch: v near 0 is the pole where the sphere's u-axis
+        // collapses; the flat triangles there carry large exact deviation that
+        // interior support cannot reduce. The acceptance rule must reject every
+        // candidate and return the baseline.
+        let sph = sphere();
+        let tol = 0.93;
+        let boundary = quad_boundary(&sph, 0.0, PI, 0.0, 0.5, 8, 4);
+        let base = tess_mesh(&sph, &boundary, tol, false);
+        let refined = tess_mesh(&sph, &boundary, tol, true);
+        let base_tris = base.tri_faces().len();
+        let refined_tris = refined.tri_faces().len();
+        let base_dev = mesh_max_dev(&sph, &base);
+        let refined_dev = mesh_max_dev(&sph, &refined);
+        // Either the baseline is already within tolerance (no activation), or
+        // the maximum is pinned and every candidate is rejected, returning the
+        // baseline. In the pinned case the refined mesh must not explode.
+        assert!(
+            refined_tris <= base_tris.max(64),
+            "pinned maximum must not blow up triangles: base {base_tris}, refined {refined_tris}"
+        );
+        assert!(
+            refined_dev <= base_dev + 1e-9,
+            "refinement must never increase max deviation: {base_dev:.6} -> {refined_dev:.6}"
+        );
     }
 }

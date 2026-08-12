@@ -581,14 +581,16 @@ pub struct BoundaryPieceDeck {
 /// What the two-closed-loop branch of `PolyBoundary::new` did, and whether the
 /// deck equation it implies is satisfiable.
 ///
-/// The branch cuts both loops open, **reverses one unconditionally**, and
-/// bridges them with a pair of seam segments. For a quotient-closed boundary
-/// walk `Σδᵢ = Δ_walk`, and `Δ_walk = 0` for a contractible regular boundary.
-/// Traversing loop1 reversed contributes `−δ₁`, so the sum the branch actually
-/// realises is `δ₀ − δ₁`. When the two loops carry **opposite** winding — as
-/// the two boundary circles of a band must, for the face boundary to be
-/// coherently oriented — that sum is `±2`, not `0`, and the two bridges become
-/// crossing diagonals rather than the vertical cut edges of a rectangle.
+/// The branch cuts both loops open, **reverses one when the deck equation
+/// requires it**, and bridges them with a pair of seam segments. For a
+/// quotient-closed boundary walk `Σδᵢ = Δ_walk`, and `Δ_walk = 0` for a
+/// contractible regular boundary. Traversing loop1 reversed contributes `−δ₁`,
+/// so the sum the branch actually realises is `δ₀ − δ₁`; traversing it forward
+/// realises `δ₀ + δ₁`. When the two loops carry **opposite** winding — as the
+/// two boundary circles of a band must, for the face boundary to be coherently
+/// oriented — the legacy unconditional reversal makes that sum `±2`, not `0`,
+/// and the two bridges become crossing diagonals rather than the vertical cut
+/// edges of a rectangle.
 ///
 /// This record does not repair anything. It states which traversal the branch
 /// chose and what `Σδ` that choice produced, so the population can be counted
@@ -599,8 +601,9 @@ pub struct TwoLoopJoinRecord {
     pub loop0_displacement: [i64; 2],
     /// Loop 1's lattice displacement `[ku, kv]`.
     pub loop1_displacement: [i64; 2],
-    /// Whether loop 1 was traversed reversed. Currently always `true`: the
-    /// branch reverses unconditionally.
+    /// Whether loop 1 was traversed reversed. True when the deck equation
+    /// selects the reversed traversal (`δ₀ = δ₁`) or when the equation is
+    /// unresolved/inconsistent and the legacy traversal is retained.
     pub loop1_reversed: bool,
     /// The lattice translate applied to loop 1 by the mean-parameter alignment,
     /// `[ku, kv]`.
