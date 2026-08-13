@@ -917,7 +917,14 @@ impl Table {
         let mut product_entities = Vec::<ProductEntity>::new();
         let mut indices_map = HashMap::<u64, usize>::new();
         let mut assy_nodes = Vec::<(AssembleEntity, (u64, u64))>::new();
-        for (&pds_idx, pds) in &self.product_definition_shape {
+        // Iterate in entity-id order so the node numbering of the graph is a
+        // function of the document, not of HashMap iteration order. A
+        // downstream consumer assigns geometry and occurrence indices from
+        // these node numbers; without the sort the same file could enumerate
+        // its assembly differently on every process.
+        let mut pds_entries = self.product_definition_shape.iter().collect::<Vec<_>>();
+        pds_entries.sort_by_key(|(&id, _)| id);
+        for (&pds_idx, pds) in pds_entries {
             let &PlaceHolder::Ref(Name::Entity(idx)) = &pds.definition else {
                 return Err("failed to reference `product_definition_shape.definition`".into());
             };
