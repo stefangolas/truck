@@ -672,10 +672,20 @@ pub enum NodeMatrix {
     Transform(Box<ItemDefinedTransformation>),
 }
 
-#[derive(Clone, Debug, PartialEq, derive_more::From)]
+/// The definition geometry of a product node, kept definition-local.
+///
+/// The geometry variants also carry the source shell entity ids the geometry
+/// was converted from, so a consumer can re-derive per-shell conversion losses
+/// (the DIAG-002 stream) without re-resolving the assembly or re-walking the
+/// source `SHAPE_REPRESENTATION_RELATIONSHIP`. The ids are authoritative: they
+/// are read from the exact source entities the conversion walked.
+#[derive(Clone, Debug, PartialEq)]
 pub enum ProductShape {
-    Shells(Vec<CompressedShell<Point3, Curve3D, Surface>>),
-    Solid(CompressedSolid<Point3, Curve3D, Surface>),
+    /// A `SHELL_BASED_SURFACE_MODEL`'s shells and their source boundary ids.
+    Shells(Vec<CompressedShell<Point3, Curve3D, Surface>>, Vec<u64>),
+    /// A `MANIFOLD_SOLID_BREP`'s boundaries and their source shell ids
+    /// (the outer shell first, then each void shell).
+    Solid(CompressedSolid<Point3, Curve3D, Surface>, Vec<u64>),
     Matrix(Matrix4),
 }
 
@@ -706,12 +716,35 @@ impl TryFrom<&NodeMatrix> for Matrix4 {
 impl ProductShape {
     pub fn try_from_index(idx: u64, table: &Table) -> Result<Self, StepConvertingError> {
         if let Some(step_solid) = table.manifold_solid_brep.get(&idx) {
-            table.to_compressed_solid(step_solid).map(Into::into)
+            let mut source_shell_ids = Vec::new();
+            if let PlaceHolder::Ref(Name::Entity(outer_idx)) = &step_solid.outer {
+                source_shell_ids.push(*outer_idx);
+            }
+            for shell in &step_solid.voids {
+                if let PlaceHolder::Ref(Name::Entity(void_idx)) = shell {
+                    source_shell_ids.push(*void_idx);
+                }
+            }
+            Ok(ProductShape::Solid(
+                table.to_compressed_solid(step_solid)?,
+                source_shell_ids,
+            ))
         } else if let Some(step_shells) = table.shell_based_surface_model.get(&idx) {
-            table.to_compressed_shells(step_shells).map(Into::into)
+            let source_shell_ids = step_shells
+                .sbsm_boundary
+                .iter()
+                .filter_map(|place_holder| match place_holder {
+                    PlaceHolder::Ref(Name::Entity(idx)) => Some(*idx),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            Ok(ProductShape::Shells(
+                table.to_compressed_shells(step_shells)?,
+                source_shell_ids,
+            ))
         } else if table.axis2_placement_3d.contains_key(&idx) {
             let axis = EntityTable::<Axis2Placement3dHolder>::get_owned(table, idx)?;
-            Ok(Matrix4::from(&axis).into())
+            Ok(ProductShape::Matrix(Matrix4::from(&axis)))
         } else {
             Err("Unknown Shape".into())
         }
@@ -1613,8 +1646,8 @@ END-ISO-10303-21;
         for shape in shape {
             match shape {
                 ProductShape::Matrix(_) => matrix += 1,
-                ProductShape::Solid(_) => solid += 1,
-                ProductShape::Shells(_) => shells += 1,
+                ProductShape::Solid(..) => solid += 1,
+                ProductShape::Shells(..) => shells += 1,
             }
         }
         (matrix, solid, shells)
@@ -1635,6 +1668,27 @@ END-ISO-10303-21;
             (count_variants(node_shape(&mapped, "partB"))),
             (1, 1, 0),
             "partB must carry both its placement frame and its linked solid"
+        );
+    }
+
+    /// The linked solid exposes the source shell entity ids it was converted
+    /// from, so a consumer can re-derive the DIAG-002 conversion-loss stream
+    /// without re-resolving the assembly.
+    #[test]
+    fn a_linked_solid_exposes_its_source_shell_ids() {
+        let (_assy, mapped) = mapped_assembly();
+        let shape = node_shape(&mapped, "partA");
+        let (_, source_ids) = shape
+            .iter()
+            .find_map(|shape| match shape {
+                ProductShape::Solid(solid, source) => Some((solid, source)),
+                _ => None,
+            })
+            .expect("partA carries a solid");
+        assert_eq!(
+            source_ids,
+            &vec![129],
+            "the solid's outer shell is the source shell entity id"
         );
     }
 
@@ -1679,7 +1733,11 @@ END-ISO-10303-21;
             5,
             "five source occurrences, one per NAUO edge"
         );
-        assert_eq!(assy.len(), 5, "five nodes: root, partA, partB, partC, partD");
+        assert_eq!(
+            assy.len(),
+            5,
+            "five nodes: root, partA, partB, partC, partD"
+        );
 
         let b_index = mapped
             .all_nodes()
@@ -1699,11 +1757,11 @@ END-ISO-10303-21;
             .iter()
             .map(|path| path.matrix().w)
             .collect::<Vec<_>>();
-        assert!(translations[0] != translations[1], "the two placements differ");
-        let mut xs = translations
-            .iter()
-            .map(|t| t.x)
-            .collect::<Vec<_>>();
+        assert!(
+            translations[0] != translations[1],
+            "the two placements differ"
+        );
+        let mut xs = translations.iter().map(|t| t.x).collect::<Vec<_>>();
         xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert!(
             (xs[0] - (-1.0)).abs() < 1.0e-9 && (xs[1] - 2.0).abs() < 1.0e-9,

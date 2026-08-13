@@ -64,7 +64,7 @@ fn assy_ioi() {
     let assy = step_assy.map(
         |NodeEntity { shape, attrs }| {
             let shape = shape.iter().find_map(|shape| match shape {
-                ProductShape::Solid(solid) => Some(StepModel::from(solid)),
+                ProductShape::Solid(solid, _) => Some(StepModel::from(solid)),
                 _ => None,
             });
             NodeEntity {
