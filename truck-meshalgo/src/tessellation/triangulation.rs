@@ -245,6 +245,12 @@ fn proj_domain_recovery_enabled_cached() -> bool {
     *ENABLED.get_or_init(diagnosis::proj_domain_recovery_enabled)
 }
 
+/// PROJ-003 Stage D gate, read once for the same reason as Stage A's.
+fn proj_domain_constrained_enabled_cached() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(diagnosis::proj_domain_constrained_enabled)
+}
+
 /// PROJ-002's deep inverse probe. Same reason for the `OnceLock`, and more of
 /// it: this one runs a full Newton solve per seed per failing point.
 fn projection_deep_probe_enabled() -> bool {
@@ -777,6 +783,173 @@ fn residual_certified_domain_recovery<S: PreMeshableSurface>(
         Some(((nu, nv), residual, class))
     } else {
         None
+    }
+}
+
+/// Grid divisions per axis of the Stage D constrained inverse.
+///
+/// The grid is evaluated only on the projection-failure path, so its cost is
+/// paid by faces that would otherwise fail. `64` resolves 1/64 of a declared
+/// span, which is fine for both boundary-adjacent roots and the wrapped
+/// representatives of a surface whose evaluator repeats with the span.
+const DOMAIN_CONSTRAINED_GRID: usize = 64;
+/// Clamped-Newton iterations after the grid.
+const DOMAIN_CONSTRAINED_ITERS: usize = 64;
+
+/// PROJ-003 Stage D: the constrained inverse over the declared parameter range.
+///
+/// The unconstrained projection chain (and Stages A-C) operate on the
+/// *unconstrained* Newton iterate. A boundary point whose nearest root lies on
+/// an extrapolated branch — a spline that genuinely wraps despite an open
+/// declaration, or a degenerate edge — can come back out of the declared range
+/// even though an in-range root exists on the same surface. This runs a fresh
+/// inverse **restricted to `D_accept`**: a grid over the declared range, then
+/// clamped Newton refinement pinned to the box, re-certified under the
+/// residual contract (finite UV, finite evaluation, `|S(u, v) - P| <= tol`).
+///
+/// Refinement-only by construction: it runs only where the whole legacy chain
+/// and Stages A-C refused the point, so it changes nothing that already
+/// projected or was recovered. It never clamps a solver answer into range and
+/// never modulos a non-periodic axis — it searches inside the range in the
+/// first place, so an admitted coordinate is genuinely in `D_accept`.
+fn constrained_domain_inverse<S: PreMeshableSurface>(
+    surface: &S,
+    point: Point3,
+    tol: f64,
+) -> Option<((f64, f64), f64)> {
+    let (urange, vrange) = surface.try_range_tuple();
+    let (u0, u1) = urange?;
+    let (v0, v1) = vrange?;
+    if !(u1 > u0)
+        || !(v1 > v0)
+        || !u0.is_finite()
+        || !u1.is_finite()
+        || !v0.is_finite()
+        || !v1.is_finite()
+    {
+        return None;
+    }
+    // Dense grid over the declared range.
+    let mut best = (f64::INFINITY, 0.0f64, 0.0f64);
+    for i in 0..=DOMAIN_CONSTRAINED_GRID {
+        let u = u0 + (u1 - u0) * (i as f64 / DOMAIN_CONSTRAINED_GRID as f64);
+        for j in 0..=DOMAIN_CONSTRAINED_GRID {
+            let v = v0 + (v1 - v0) * (j as f64 / DOMAIN_CONSTRAINED_GRID as f64);
+            let evaluated = surface.subs(u, v);
+            if !evaluated.x.is_finite() || !evaluated.y.is_finite() || !evaluated.z.is_finite() {
+                continue;
+            }
+            let residual = evaluated.distance(point);
+            if residual < best.0 {
+                best = (residual, u, v);
+            }
+        }
+    }
+    if !best.0.is_finite() {
+        return None;
+    }
+    // Clamped Newton refinement from the best cell, pinned to the box.
+    let mut u = best.1;
+    let mut v = best.2;
+    let mut best_ref = (best.0, u, v);
+    for _ in 0..DOMAIN_CONSTRAINED_ITERS {
+        let diff = surface.subs(u, v) - point;
+        let uder = surface.uder(u, v);
+        let vder = surface.vder(u, v);
+        let (uu, uv, vv) = (uder.dot(uder), uder.dot(vder), vder.dot(vder));
+        let jac = Matrix2::new(uu, uv, uv, vv);
+        let val = Vector2::new(uder.dot(diff), vder.dot(diff));
+        let Some(step) = jac.invert() else {
+            break;
+        };
+        let next = Vector2::new(u, v) - step * val;
+        u = next.x.clamp(u0, u1);
+        v = next.y.clamp(v0, v1);
+        let evaluated = surface.subs(u, v);
+        if !evaluated.x.is_finite() || !evaluated.y.is_finite() || !evaluated.z.is_finite() {
+            break;
+        }
+        let residual = evaluated.distance(point);
+        if residual < best_ref.0 {
+            best_ref = (residual, u, v);
+        }
+    }
+    let (residual, u, v) = best_ref;
+    if !residual.is_finite() || residual > tol {
+        return None;
+    }
+    Some(((u, v), residual))
+}
+
+/// The Stage D recovery wrapper, gated like the other recovery stages.
+fn constrained_domain_recovery<S: PreMeshableSurface>(
+    surface: &S,
+    point: Point3,
+    tol: f64,
+) -> Option<((f64, f64), f64)> {
+    if !proj_domain_constrained_enabled_cached() {
+        return None;
+    }
+    constrained_domain_inverse(surface, point, tol)
+}
+
+#[cfg(test)]
+mod constrained_domain_inverse_tests {
+    use super::constrained_domain_inverse;
+    use truck_geometry::prelude::{Plane, Point3};
+
+    fn plane() -> Plane {
+        Plane::new(
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        )
+    }
+
+    /// Positive: an on-surface point inside the declared range is found by the
+    /// constrained inverse and returned with a certified residual, pinned to
+    /// the box.
+    #[test]
+    fn in_range_point_is_found() {
+        let s = plane();
+        let p = Point3::new(0.25, 0.75, 0.0);
+        let got = constrained_domain_inverse(&s, p, 1.0e-6);
+        let ((u, v), residual) = got.expect("an on-plane point is found in range");
+        assert!((u - 0.25).abs() < 1.0e-6);
+        assert!((v - 0.75).abs() < 1.0e-6);
+        assert!(residual <= 1.0e-6);
+    }
+
+    /// Positive: a point on the domain boundary (the `u = 1` edge) is found in
+    /// range; the returned coordinate is never pushed outside `D_accept`.
+    #[test]
+    fn boundary_edge_point_is_found_in_range() {
+        let s = plane();
+        let p = Point3::new(1.0, 0.5, 0.0);
+        let got = constrained_domain_inverse(&s, p, 1.0e-6);
+        let ((u, v), residual) = got.expect("a boundary-edge point is found");
+        assert!(u >= 0.0 && u <= 1.0, "u must stay in D_accept, got {u}");
+        assert!(v >= 0.0 && v <= 1.0, "v must stay in D_accept, got {v}");
+        assert!(residual <= 1.0e-6);
+    }
+
+    /// Negative: no in-range solution within tolerance, so the constrained
+    /// inverse refuses and the face stays out of domain.
+    #[test]
+    fn no_in_range_root_refuses() {
+        let s = plane();
+        // 0.5 off the plane in z: no point on the plane is within tol.
+        let p = Point3::new(5.0, 5.0, 0.5);
+        assert!(constrained_domain_inverse(&s, p, 1.0e-6).is_none());
+    }
+
+    /// Negative: an in-range point whose certified residual exceeds the caller
+    /// tolerance is refused (ResidualAboveTolerance semantics preserved).
+    #[test]
+    fn above_tolerance_refuses() {
+        let s = plane();
+        let p = Point3::new(0.5, 0.5, 1.0e-3);
+        assert!(constrained_domain_inverse(&s, p, 1.0e-6).is_none());
     }
 }
 
@@ -4516,6 +4689,11 @@ impl PolyBoundaryPiece {
         let mut recovered_c_residual_max = 0.0f64;
         let mut domain_class_counts: rustc_hash::FxHashMap<diagnosis::DomainRecoveryClass, usize> =
             rustc_hash::FxHashMap::default();
+        // PROJ-003 Stage D per-face accumulators: constrained-inverse
+        // admissions and the certified residual spread across them.
+        let mut recovered_d_points = 0usize;
+        let mut recovered_d_residual_min = f64::INFINITY;
+        let mut recovered_d_residual_max = 0.0f64;
         // PROJ-002 per-face accumulators.
         let mut deep_probed = 0usize;
         let mut deep_point_cap_hit = false;
@@ -4610,6 +4788,19 @@ impl PolyBoundaryPiece {
                             recovered_c_residual_min = recovered_c_residual_min.min(residual);
                             recovered_c_residual_max = recovered_c_residual_max.max(residual);
                             *domain_class_counts.entry(class).or_insert(0) += 1;
+                            uv
+                        } else if let Some((uv, residual)) =
+                            // PROJ-003 Stage D: the constrained inverse over the
+                            // declared range. Runs only after the whole legacy
+                            // chain and Stages A-C refused the point, so an
+                            // in-range root that the unconstrained Newton
+                            // iterate missed is preferred over the extrapolated
+                            // branch that left the declared range.
+                            constrained_domain_recovery(surface, pt, tol)
+                        {
+                            recovered_d_points += 1;
+                            recovered_d_residual_min = recovered_d_residual_min.min(residual);
+                            recovered_d_residual_max = recovered_d_residual_max.max(residual);
                             uv
                         } else if proj_probe {
                             failed_points += 1;

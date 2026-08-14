@@ -1514,6 +1514,24 @@ pub fn proj_domain_recovery_enabled() -> bool {
     formal_recovery_enabled() && recovery_route_enabled("TRUCK_FORMAL_RECOVERY_PROJ_STAGE_C")
 }
 
+/// Whether PROJ-003 Stage D is active: the constrained inverse over the
+/// declared parameter range.
+///
+/// Refinement-only like the stages before it: it runs only where the whole
+/// legacy chain, Stage A, Stage B, and Stage C all returned `None` for a
+/// point. Where the unconstrained Newton iterate escapes the declared range
+/// (an extrapolated branch of a spline that genuinely wraps, or a degenerate
+/// edge), an in-range root can still exist; this runs a fresh inverse
+/// restricted to `D_accept` — a grid over the declared range, then clamped
+/// Newton refinement — and admits the in-range candidate under the same
+/// residual contract. It never clamps a solver answer into the range and never
+/// modulos a non-periodic axis; it only searches inside the range in the first
+/// place. Set `TRUCK_FORMAL_RECOVERY_PROJ_STAGE_D=0` to disable (emergency
+/// withdrawal).
+pub fn proj_domain_constrained_enabled() -> bool {
+    formal_recovery_enabled() && recovery_route_enabled("TRUCK_FORMAL_RECOVERY_PROJ_STAGE_D")
+}
+
 /// Whether the winding-number reading of material parity is active.
 ///
 /// The parity flood floods over the *set* of realized constraint edges, so an
