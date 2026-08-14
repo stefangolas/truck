@@ -7802,13 +7802,19 @@ impl PolyBoundary {
         let mut join_outcome = TwoLoopJoinOutcome::NotAttempted;
         let probe = std::env::var_os("TRUCK_PROBE_BOUNDARY").is_some();
         let had_source_pieces = !pieces.is_empty();
-        // EXPERIMENT (TRUCK_FACE_DOMAIN): take the working rectangle from the
-        // face's own bounds rather than from the supporting primitive's
-        // declared range. Default off until swept.
-        let range = match std::env::var_os("TRUCK_FACE_DOMAIN").is_some() {
-            true => working_range(&pieces, surface),
-            false => surface.try_range_tuple(),
-        };
+        // The synthetic closure rectangle comes from the face's own bounds,
+        // never from the supporting primitive's declared parameter range. A
+        // surface's declared range is a property of the primitive it was
+        // constructed from, not of any face that references it (a
+        // `RevolutedCurve` inherits `Line::parameter_range` = `[0, 1]`); a
+        // trimmed face's material interval can sit far inside it, and closing
+        // an open boundary piece against the full declared rectangle walks an
+        // artificial parameter span unrelated to the face. That inflated
+        // closure expands the interior sampling domain `insert_surface`
+        // subdivides and hands the CDT pathological constraint geometry. The
+        // face-derived `working_range` bounds synthetic closure by the boundary
+        // evidence this face already carries.
+        let range = working_range(&pieces, surface);
         let (mut closed, mut open) = (Vec::new(), Vec::new());
         // The lattice displacement of each closed loop, parallel to `closed`.
         // The `BoundaryLoop` the classification produces does not retain it,
@@ -11723,6 +11729,99 @@ mod cone_topology_tests {
             TwoLoopJoinPolicy::DeckConsistent,
         );
         assert_eq!(outcome, TwoLoopJoinOutcome::LegacyDeckConsistent);
+    }
+
+    /// The synthetic closure of an open boundary piece is bounded by the
+    /// face-local working range, never by the carrier surface's declared
+    /// parameter range.
+    ///
+    /// A trimmed face can present one open piece plus one Euclidean-closed loop
+    /// while the supporting surface's declared range is materially larger than
+    /// the face's own extent. Closing the open piece against the declared
+    /// rectangle walks synthetic segments to corners no face boundary point
+    /// approaches; that inflated closure expands the interior sampling domain
+    /// `insert_surface` subdivides and hands the CDT pathological constraint
+    /// geometry (the UR10 `#88144`/`#89705` mechanism).
+    #[test]
+    fn open_piece_closure_uses_face_local_range_not_declared_range() {
+        use truck_geometry::prelude::*;
+        // Declared range is `[0, 1] × [0, 1]` (Plane::parameter_range), which is
+        // materially larger than the face-local extent `[0.2, 0.8] × [0.2, 0.8]`
+        // the two pieces below actually span.
+        let plane = Plane::new(
+            Point3::origin(),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        );
+        let tol = 0.01;
+        let lattice = unevidenced_lattice(&plane);
+        // Open piece: a diagonal run whose UV endpoints do not coincide, so it
+        // is classified `Open` and must be closed synthetically.
+        let open_piece = PolyBoundaryPiece::untagged(vec![
+            (Point2::new(0.2, 0.2), Point3::new(0.2, 0.2, 0.0)).into(),
+            (Point2::new(0.5, 0.5), Point3::new(0.5, 0.5, 0.0)).into(),
+            (Point2::new(0.8, 0.8), Point3::new(0.8, 0.8, 0.0)).into(),
+        ]);
+        // Euclidean-closed piece: a small loop whose first UV equals its last,
+        // so it is classified `EuclideanClosed` and needs no synthetic closure.
+        let closed_piece = PolyBoundaryPiece::untagged(vec![
+            (Point2::new(0.3, 0.3), Point3::new(0.3, 0.3, 0.0)).into(),
+            (Point2::new(0.7, 0.3), Point3::new(0.7, 0.3, 0.0)).into(),
+            (Point2::new(0.7, 0.7), Point3::new(0.7, 0.7, 0.0)).into(),
+            (Point2::new(0.3, 0.7), Point3::new(0.3, 0.7, 0.0)).into(),
+            (Point2::new(0.3, 0.3), Point3::new(0.3, 0.3, 0.0)).into(),
+        ]);
+        let boundary = PolyBoundary::new(
+            vec![open_piece, closed_piece],
+            &plane,
+            tol,
+            &lattice,
+        );
+        // The open piece must have been closed synthetically: exactly two loops
+        // result, and the merged one carries SyntheticClosure segments.
+        assert_eq!(
+            boundary.0.len(),
+            2,
+            "the open piece is closed into a second loop",
+        );
+        let merged = boundary
+            .0
+            .iter()
+            .find(|loop_| loop_.origins.iter().any(|o| *o == SegmentOrigin::SyntheticClosure))
+            .expect("the open piece's closure is synthetic");
+        assert!(
+            merged
+                .origins
+                .iter()
+                .any(|o| *o == SegmentOrigin::Source),
+            "the open piece's own segments keep their Source role",
+        );
+        // Every loop satisfies the BoundaryLoop equal-length invariant.
+        for loop_ in &boundary.0 {
+            assert_eq!(
+                loop_.points.len(),
+                loop_.origins.len(),
+                "every boundary segment carries exactly one origin",
+            );
+            assert_eq!(
+                loop_.points.len(),
+                loop_.source_uses.len(),
+                "every boundary segment carries exactly one provenance entry",
+            );
+        }
+        // No synthetic closure vertex may leave the face-derived working extent
+        // [0.2, 0.8] × [0.2, 0.8]. Walking the declared-range rectangle would
+        // place vertices at the corners (0, 0), (0, 1), (1, 0), (1, 1) that no
+        // face boundary point approaches.
+        for loop_ in &boundary.0 {
+            for p in &loop_.points {
+                let (u, v) = (p.uv.x, p.uv.y);
+                assert!(
+                    u >= 0.1 && u <= 0.9 && v >= 0.1 && v <= 0.9,
+                    "synthetic closure escapes the face-local extent: uv=({u}, {v})",
+                );
+            }
+        }
     }
 
     #[test]
