@@ -4911,21 +4911,59 @@ impl PolyBoundaryPiece {
                                 }
                             }
                         }
-                        // DIAG-002: the lift refusal witness. Bisection
-                        // exhausted the step without disambiguating the two
-                        // period copies; the facts that caused the refusal are
-                        // the two candidate copies and the declared axes.
-                        diagnosis::record_lift_refusal(diagnosis::LiftWitness {
-                            candidate_lift_count: 2,
-                            periodic_axes: diagnosis::PeriodicAxes {
-                                u: up.is_some(),
-                                v: vp.is_some(),
-                            },
-                            candidate_deck_shifts: vec![[1, 0], [0, 1]],
-                            closure_seam_evidence: None,
-                            dominance_explanation: Some("bisection_exhausted"),
-                        });
-                        return Err(TessellationFailureReason::AmbiguousLift);
+                        // The two candidate deck copies are [1, 0] (a one-period
+                        // advance along `u`) and [0, 1] (one along `v`). An
+                        // advance along an axis is structurally legal only when
+                        // that axis is periodic, so the candidate set is
+                        // filtered by the same `periodic_axes` evidence the
+                        // diagnostic reports before any numerical dominance is
+                        // attempted. A step that appears to advance one period
+                        // along a certified-non-periodic axis is an artefact of
+                        // an uncertified declared period, not a real branch.
+                        let periodic_u = surface.u_period().is_some();
+                        let periodic_v = surface.v_period().is_some();
+                        let legal_candidates =
+                            legal_deck_shifts(&[[1, 0], [0, 1]], periodic_u, periodic_v);
+                        match legal_candidates.len() {
+                            // Both axes certified periodic: both deck copies are
+                            // structurally legal and the numerical ambiguity
+                            // stands. DIAG-002: the lift refusal witness.
+                            // Bisection exhausted the step without
+                            // disambiguating the two period copies.
+                            2 => {
+                                diagnosis::record_lift_refusal(diagnosis::LiftWitness {
+                                    candidate_lift_count: legal_candidates.len(),
+                                    periodic_axes: diagnosis::PeriodicAxes {
+                                        u: periodic_u,
+                                        v: periodic_v,
+                                    },
+                                    candidate_deck_shifts: legal_candidates,
+                                    closure_seam_evidence: None,
+                                    dominance_explanation: Some("bisection_exhausted"),
+                                });
+                                return Err(TessellationFailureReason::AmbiguousLift);
+                            }
+                            // Exactly one axis certified periodic: the other
+                            // deck copy is structurally impossible, so the
+                            // ambiguity is resolved by the certified axes, not
+                            // by `get_mindiff` between the candidates. No axis
+                            // certified periodic: neither deck copy is legal and
+                            // the periodic deck resolver must not activate at
+                            // all. Both cases resume the lift from the ordinary
+                            // base sample the alternatives were derived from --
+                            // the originating real boundary point -- exactly as
+                            // the singular tie branch does, discarding the
+                            // synthetic midpoint chain that could not shrink.
+                            _ => {
+                                if let Some((ou, ov, opt_pt, origin_tag)) = origin {
+                                    vec.push((Point2::new(ou, ov), opt_pt).into());
+                                    lifted_tags.push(origin_tag);
+                                    previous = Some((ou, ov));
+                                    previous_pt = Some(opt_pt);
+                                }
+                                break;
+                            }
+                        }
                     }
                 }
                 vec.push((Point2::new(u, v), pt).into());
@@ -5919,6 +5957,73 @@ fn get_mindiff(u: f64, u0: f64, up: f64) -> f64 {
     // wrapped further was silently pulled back; rounding has no such bound and
     // is cheaper.
     u + f64::round((u0 - u) / up) * up
+}
+
+/// Filter periodic deck-candidate shifts by the certified periodicity of the
+/// two parameter axes.
+///
+/// A deck shift `(ku, kv)` advances `ku` full periods along `u` and `kv` along
+/// `v`. An advance along an axis is legal only when that axis is periodic, so a
+/// shift is retained iff `ku != 0 ⇒ periodic_u` and `kv != 0 ⇒ periodic_v`.
+///
+/// This is the structural filter applied to a bisection-exhausted lift step
+/// before any numerical dominance ([`get_mindiff`]) is attempted: an advance
+/// along a certified-non-periodic axis is impossible however close the
+/// numerical copies are. `periodic_u`/`periodic_v` are the same accessor facts
+/// the diagnostic records as `periodic_axes`.
+fn legal_deck_shifts(candidates: &[[i64; 2]], periodic_u: bool, periodic_v: bool) -> Vec<[i64; 2]> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|&[ku, kv]| (ku == 0 || periodic_u) && (kv == 0 || periodic_v))
+        .collect()
+}
+
+#[cfg(test)]
+mod legal_deck_shift_tests {
+    use super::legal_deck_shifts;
+
+    /// U-periodic only: the `v` deck copy is structurally illegal, so
+    /// `[1, 0], [0, 1]` reduces to `[1, 0]` and no numerical dominance
+    /// (`get_mindiff`) is run between the candidates.
+    #[test]
+    fn u_periodic_only_retains_u_copy() {
+        assert_eq!(
+            legal_deck_shifts(&[[1, 0], [0, 1]], true, false),
+            vec![[1, 0]]
+        );
+    }
+
+    /// V-periodic only: `[1, 0], [0, 1]` reduces to `[0, 1]`.
+    #[test]
+    fn v_periodic_only_retains_v_copy() {
+        assert_eq!(
+            legal_deck_shifts(&[[1, 0], [0, 1]], false, true),
+            vec![[0, 1]]
+        );
+    }
+
+    /// Neither axis certified periodic: no deck candidate is legal, so the
+    /// periodic deck resolver must not activate and the ordinary base lift is
+    /// preserved.
+    #[test]
+    fn nonperiodic_retains_no_deck_candidate() {
+        assert_eq!(
+            legal_deck_shifts(&[[1, 0], [0, 1]], false, false),
+            Vec::<[i64; 2]>::new()
+        );
+    }
+
+    /// Both axes certified periodic: both deck copies may remain, and the
+    /// numerical dominance decision (`get_mindiff`; `AmbiguousLift` when it
+    /// cannot prove dominance) is the only arbiter left.
+    #[test]
+    fn doubly_periodic_retains_both_candidates() {
+        assert_eq!(
+            legal_deck_shifts(&[[1, 0], [0, 1]], true, true),
+            vec![[1, 0], [0, 1]]
+        );
+    }
 }
 
 /// How far a boundary point may sit from its own surface, as a multiple of the
