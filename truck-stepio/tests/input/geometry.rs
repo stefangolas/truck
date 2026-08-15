@@ -346,6 +346,84 @@ fn b_spline_curve_with_knots(
     exec_b_spline_curve_with_knots(knot_len, knot_incrs, knot_mults, degree, ctrlpt_coords)
 }
 
+/// A `b_spline_curve_with_knots` whose knot interval is nonzero but smaller
+/// than truck's `TOLERANCE` (absolute) must still convert. The exporter chose
+/// a tiny parameter span; normalizing the knot vector to `[0, 1]` is an exact,
+/// shape-preserving reparameterization of the same curve, which is the
+/// canonical geometric interpretation the source justifies.
+#[test]
+fn b_spline_curve_with_knots_tiny_knot_interval_converts() {
+    let degree = 3;
+    let points: Vec<Point3> = vec![
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 2.0, -0.5),
+        Point3::new(2.0, 1.0, 0.25),
+        Point3::new(3.0, 3.0, 1.0),
+    ];
+    let (step_cps_indices, step_cps) = step_bsp_curve_ctrls(&points);
+    // A knot span of 5e-7: below TOLERANCE, above a true zero range.
+    let step_str = format!(
+        "DATA;
+#1 = B_SPLINE_CURVE_WITH_KNOTS('', {degree}, {step_cps_indices}, .UNSPECIFIED., .F., .F., (4,4), (0.0, 5.0E-7), .UNSPECIFIED.);
+{step_cps}ENDSEC;"
+    );
+    let bsp_step = step_to_entity::<BSplineCurveWithKnotsHolder>(&step_str);
+    let res: BSplineCurve<Point3> = (&bsp_step).try_into().expect("tiny-range curve converts");
+    assert_eq!(res.knot_vec().len(), 8, "knot count preserved");
+    res.knot_vec()
+        .iter()
+        .zip([0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0])
+        .for_each(|(x, y)| {
+            assert_near!(*x, y, "normalized to [0, 1]");
+        });
+    assert_eq!(res.control_points().len(), points.len());
+    // The normalized curve is exactly the Bezier curve the source control
+    // points define: a clamped cubic with knot vector `[0,0,0,0,1,1,1,1]`
+    // evaluates to the same 3D points as the source parameterization over
+    // `[0, 5e-7]` (a linear reparameterization changes nothing geometric).
+    for i in 0..=100 {
+        let t = i as f64 / 100.0;
+        let a = (1.0 - t).powi(3);
+        let b = 3.0 * (1.0 - t) * (1.0 - t) * t;
+        let c = 3.0 * (1.0 - t) * t * t;
+        let d = t.powi(3);
+        let ans = points[0].to_vec() * a
+            + points[1].to_vec() * b
+            + points[2].to_vec() * c
+            + points[3].to_vec() * d;
+        let got = res.subs(t).to_vec();
+        assert!(
+            (got - ans).magnitude() < 1.0e-9,
+            "t:{t} got:{got:?} ans:{ans:?}"
+        );
+    }
+}
+
+/// A malformed knot vector the source does not justify repairing must still
+/// refuse. An unsorted (decreasing) knot sequence is not a reparameterization
+/// of anything, so conversion must refuse rather than normalize it away.
+#[test]
+fn b_spline_curve_with_knots_unsorted_knots_still_refuse() {
+    let degree = 3;
+    let points: Vec<Point3> = vec![
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 2.0, -0.5),
+        Point3::new(2.0, 1.0, 0.25),
+        Point3::new(3.0, 3.0, 1.0),
+    ];
+    let (step_cps_indices, step_cps) = step_bsp_curve_ctrls(&points);
+    let step_str = format!(
+        "DATA;
+#1 = B_SPLINE_CURVE_WITH_KNOTS('', {degree}, {step_cps_indices}, .UNSPECIFIED., .F., .F., (4,4), (0.5, 0.4), .UNSPECIFIED.);
+{step_cps}ENDSEC;"
+    );
+    let bsp_step = step_to_entity::<BSplineCurveWithKnotsHolder>(&step_str);
+    assert!(
+        BSplineCurve::<Point3>::try_from(&bsp_step).is_err(),
+        "an unsorted knot vector must still refuse",
+    );
+}
+
 fn step_bsp_curve_ctrls(points: &[Point3]) -> (String, String) {
     (
         IndexSliceDisplay((0..points.len()).map(|i| 2 + i)).to_string(),

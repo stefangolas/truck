@@ -1858,13 +1858,28 @@ impl<P: for<'a> From<&'a CartesianPoint>> TryFrom<&BSplineCurveWithKnots> for BS
         let ctrpts: Vec<P> = curve.control_points_list.iter().map(Into::into).collect();
         let degree = curve.degree as usize;
         let ctrl_count = ctrpts.len();
-        let kv = match ValidatedKnotVector::validate(knots, multi, degree, ctrl_count, None) {
+        let mut kv = match ValidatedKnotVector::validate(knots, multi, degree, ctrl_count, None) {
             Ok(v) => v.into_inner(),
             Err(e @ truck_geometry::nurbs::SplineConstructionError::UnsortedRawKnots { .. }) => {
                 return Err(e.into())
             }
             Err(_) => quasi_uniform_knots(ctrl_count, degree),
         };
+        // A STEP exporter may parameterize a perfectly valid curve over a tiny,
+        // nonzero knot interval (measured: the six lost core_xy edge curves
+        // span ~2e-8..6e-7). `BSplineCurve::try_new` treats any total range
+        // under `TOLERANCE` (1e-6, absolute) as zero and refuses it, which
+        // would surface here as `EdgeCurveConversionFailed` even though the
+        // source curve is well-formed. Normalizing the knot vector to `[0, 1]`
+        // is an exact, shape-preserving reparameterization of the same curve,
+        // so it is the faithful recovery of the source geometry rather than an
+        // approximation. `ValidatedKnotVector::validate` has already proved
+        // the active domain is nonzero (it rejects `<= 1e-12`), so `transform`
+        // never divides by a zero range here.
+        if kv.range_length().so_small() {
+            let range = kv.range_length();
+            kv.transform(1.0 / range, -kv[0] / range);
+        }
         Ok(Self::try_new(kv, ctrpts)?)
     }
 }
