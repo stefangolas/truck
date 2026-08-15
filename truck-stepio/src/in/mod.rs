@@ -70,6 +70,7 @@ pub struct Table {
     pub offset_surface: HashMap<u64, OffsetSurfaceHolder>,
     pub cylindrical_surface: HashMap<u64, CylindricalSurfaceHolder>,
     pub toroidal_surface: HashMap<u64, ToroidalSurfaceHolder>,
+    pub degenerate_toroidal_surface: HashMap<u64, DegenerateToroidalSurfaceHolder>,
     pub conical_surface: HashMap<u64, ConicalSurfaceHolder>,
     pub b_spline_surface_with_knots: HashMap<u64, BSplineSurfaceWithKnotsHolder>,
     pub uniform_surface: HashMap<u64, UniformSurfaceHolder>,
@@ -444,6 +445,10 @@ impl Table {
                     }
                     "TOROIDAL_SURFACE" => {
                         self.toroidal_surface
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "DEGENERATE_TOROIDAL_SURFACE" => {
+                        self.degenerate_toroidal_surface
                             .insert(*id, Deserialize::deserialize(record)?);
                     }
                     "CONICAL_SURFACE" => {
@@ -2378,7 +2383,7 @@ impl TryFrom<&SurfaceAny> for Surface {
     fn try_from(x: &SurfaceAny) -> Result<Self, Self::Error> {
         use SurfaceAny::*;
         Ok(match x {
-            ElementarySurface(x) => Self::ElementarySurface(x.as_ref().into()),
+            ElementarySurface(x) => Self::ElementarySurface(x.as_ref().try_into()?),
             BSplineSurface(x) => x.as_ref().try_into()?,
             SweptSurface(x) => Self::SweptCurve(x.as_ref().try_into()?),
             OffsetSurface(x) => Self::OffsetSurface(x.as_ref().try_into()?),
@@ -2400,20 +2405,23 @@ pub enum ElementarySurfaceAny {
     #[holder(use_place_holder)]
     ToroidalSurface(Box<ToroidalSurface>),
     #[holder(use_place_holder)]
+    DegenerateToroidalSurface(Box<DegenerateToroidalSurface>),
+    #[holder(use_place_holder)]
     ConicalSurface(Box<ConicalSurface>),
 }
 
-impl From<&ElementarySurfaceAny> for ElementarySurface {
-    #[inline(always)]
-    fn from(value: &ElementarySurfaceAny) -> Self {
+impl TryFrom<&ElementarySurfaceAny> for ElementarySurface {
+    type Error = StepConvertingError;
+    fn try_from(value: &ElementarySurfaceAny) -> Result<Self, Self::Error> {
         use ElementarySurfaceAny::*;
-        match value {
+        Ok(match value {
             Plane(x) => Self::Plane(x.as_ref().into()),
             SphericalSurface(x) => Self::Sphere(x.as_ref().into()),
             CylindricalSurface(x) => Self::CylindricalSurface(x.as_ref().into()),
             ToroidalSurface(x) => Self::ToroidalSurface(x.as_ref().into()),
+            DegenerateToroidalSurface(x) => Self::DegenerateToroidalSurface(x.as_ref().try_into()?),
             ConicalSurface(x) => Self::ConicalSurface(x.as_ref().into()),
-        }
+        })
     }
 }
 
@@ -2540,6 +2548,51 @@ impl From<&ToroidalSurface> for step_geometry::ToroidalSurface {
         let mat = Matrix4::from(position);
         let torus = Torus::new(Point3::origin(), *major_radius, *minor_radius);
         Processor::new(torus).transformed(mat)
+    }
+}
+
+/// `degenerate_toroidal_surface`
+///
+/// An AP242 subtype of `toroidal_surface` carrying the same carrier geometry
+/// plus a `select_outer` sheet flag. The EXPRESS WHERE clause fixes
+/// `major_radius < minor_radius`, so the carrier is a self-intersecting
+/// (spindle) torus and the face must name which of the two sheets of the
+/// parametrisation it lies on. The conversion preserves that source-defined
+/// sheet as a restricted parameter domain on the existing torus carrier; it is
+/// not a full-`[0, 2π]` torus.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Holder)]
+#[holder(table = Table)]
+#[holder(field = degenerate_toroidal_surface)]
+#[holder(generate_deserialize)]
+pub struct DegenerateToroidalSurface {
+    label: String,
+    #[holder(use_place_holder)]
+    position: Axis2Placement3d,
+    major_radius: f64,
+    minor_radius: f64,
+    select_outer: bool,
+}
+
+impl TryFrom<&DegenerateToroidalSurface> for step_geometry::DegenerateToroidalSurface {
+    type Error = StepConvertingError;
+    fn try_from(
+        DegenerateToroidalSurface {
+            position,
+            major_radius,
+            minor_radius,
+            select_outer,
+            ..
+        }: &DegenerateToroidalSurface,
+    ) -> Result<Self, Self::Error> {
+        let carrier =
+            step_geometry::DegenerateTorus::new(*major_radius, *minor_radius, *select_outer)
+                .ok_or_else(|| {
+                    "degenerate_toroidal_surface: radii must be positive and finite with \
+             major_radius < minor_radius (EXPRESS WHERE)"
+                        .to_string()
+                })?;
+        let mat = Matrix4::from(position);
+        Ok(Processor::new(carrier).transformed(mat))
     }
 }
 

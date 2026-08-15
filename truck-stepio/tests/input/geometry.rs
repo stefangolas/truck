@@ -985,7 +985,9 @@ fn exec_spherical_surface(
         StepDataDisplay::new(VectorAsDirection(ref_dir.normalize()), 5),
     );
     let step_sphere = step_to_entity::<ElementarySurfaceAnyHolder>(&step_str);
-    let sphere: step_geometry::ElementarySurface = (&step_sphere).into();
+    let sphere: step_geometry::ElementarySurface = (&step_sphere)
+        .try_into()
+        .expect("elementary surface conversion");
     let mat = Matrix4::from_cols(
         x.extend(0.0),
         y.extend(0.0),
@@ -1042,12 +1044,16 @@ fn exec_cylindrical_surface(
         StepDataDisplay::new(VectorAsDirection(ref_dir.normalize()), 5),
     );
     let step_cylinder0 = step_to_entity::<ElementarySurfaceAnyHolder>(&step_str0);
-    let cylinder0: step_geometry::ElementarySurface = (&step_cylinder0).into();
+    let cylinder0: step_geometry::ElementarySurface = (&step_cylinder0)
+        .try_into()
+        .expect("elementary surface conversion");
 
     // It has its own output, so test it accordingly.
     let step_str1 = format!("DATA;\n{}ENDSEC;", StepDataDisplay::new(&cylinder0, 1));
     let step_cylinder1 = step_to_entity::<ElementarySurfaceAnyHolder>(&step_str1);
-    let cylinder1: step_geometry::ElementarySurface = (&step_cylinder1).into();
+    let cylinder1: step_geometry::ElementarySurface = (&step_cylinder1)
+        .try_into()
+        .expect("elementary surface conversion");
 
     let mat = Matrix4::from_cols(
         x.extend(0.0),
@@ -1106,7 +1112,9 @@ fn exec_toroidal_surface(
         StepDataDisplay::new(VectorAsDirection(ref_dir.normalize()), 5),
     );
     let step_toroidal = step_to_entity::<ElementarySurfaceAnyHolder>(&step_str);
-    let toroidal: step_geometry::ElementarySurface = (&step_toroidal).into();
+    let toroidal: step_geometry::ElementarySurface = (&step_toroidal)
+        .try_into()
+        .expect("elementary surface conversion");
     let mat = Matrix4::from_cols(
         x.extend(0.0),
         y.extend(0.0),
@@ -1138,6 +1146,99 @@ fn toroidal_surface(
     exec_toroidal_surface(org_coord, dir_array, ref_dir_array, radii)
 }
 
+fn exec_degenerate_toroidal_surface(select_outer: bool) {
+    // A spindle torus (major < minor). The analytic surface is the same torus;
+    // the source-defined sheet restricts the usable v domain.
+    let major_radius = 0.5;
+    let minor_radius = 1.0;
+    let select = if select_outer { ".T." } else { ".F." };
+    let step_str = format!(
+        "DATA;
+#1 = DEGENERATE_TOROIDAL_SURFACE('', #2, {major_radius}, {minor_radius}, {select});
+#2 = AXIS2_PLACEMENT_3D('', #3, #4, #5);
+{}{}{}ENDSEC;",
+        StepDataDisplay::new(Point3::origin(), 3),
+        StepDataDisplay::new(VectorAsDirection(Vector3::unit_z()), 4),
+        StepDataDisplay::new(VectorAsDirection(Vector3::unit_x()), 5),
+    );
+    let step_deg = step_to_entity::<ElementarySurfaceAnyHolder>(&step_str);
+    assert!(
+        matches!(step_deg, ElementarySurfaceAny::DegenerateToroidalSurface(_)),
+        "the record must dispatch to the degenerate arm, not `dummy`",
+    );
+    let deg: step_geometry::ElementarySurface = (&step_deg)
+        .try_into()
+        .expect("degenerate toroidal surface conversion");
+    let step_geometry::ElementarySurface::DegenerateToroidalSurface(surface) = &deg else {
+        panic!("expected DegenerateToroidalSurface");
+    };
+    let phi = f64::acos(-major_radius / minor_radius);
+    let (v0, v1) = surface.entity().v_range();
+    match select_outer {
+        true => {
+            assert!((v0 + phi).abs() < 1.0e-12);
+            assert!((v1 - phi).abs() < 1.0e-12);
+        }
+        false => {
+            assert!((v0 - phi).abs() < 1.0e-12);
+            assert!((v1 - (2.0 * PI - phi)).abs() < 1.0e-12);
+        }
+    }
+    (0..=10)
+        .flat_map(move |i| (0..=10).map(move |j| (i, j)))
+        .for_each(|(i, j)| {
+            let u = 2.0 * PI * i as f64 / 10.0;
+            let v = v0 + (v1 - v0) * j as f64 / 10.0;
+            let res = surface.subs(u, v);
+            let ans = Point3::new(
+                (major_radius + minor_radius * f64::cos(v)) * f64::cos(u),
+                (major_radius + minor_radius * f64::cos(v)) * f64::sin(u),
+                minor_radius * f64::sin(v),
+            );
+            assert_near!(res, ans, "u:{u} v:{v} res:{res:?} ans:{ans:?}");
+            let (u2, v2) = surface
+                .search_parameter(res, SPHint2D::None, 100)
+                .expect("on-sheet inverse");
+            assert_near!(
+                surface.subs(u2, v2),
+                res,
+                "search round trip failed on sheet {select_outer}",
+            );
+        });
+}
+
+#[test]
+fn degenerate_toroidal_surface_outer_sheet() {
+    exec_degenerate_toroidal_surface(true)
+}
+
+#[test]
+fn degenerate_toroidal_surface_inner_sheet() {
+    exec_degenerate_toroidal_surface(false)
+}
+
+/// A record violating the EXPRESS WHERE clause `major_radius < minor_radius`
+/// must refuse conversion rather than degrade to an ordinary torus.
+#[test]
+fn degenerate_toroidal_surface_refuses_invalid_radii() {
+    let step_str = "DATA;
+#1 = DEGENERATE_TOROIDAL_SURFACE('', #2, 2.0, 1.0, .T.);
+#2 = AXIS2_PLACEMENT_3D('', #3, #4, #5);
+#3 = CARTESIAN_POINT('', (0.0, 0.0, 0.0));
+#4 = DIRECTION('', (0.0, 0.0, 1.0));
+#5 = DIRECTION('', (1.0, 0.0, 0.0));
+ENDSEC;";
+    let step_deg = step_to_entity::<ElementarySurfaceAnyHolder>(&step_str);
+    assert!(
+        matches!(step_deg, ElementarySurfaceAny::DegenerateToroidalSurface(_)),
+        "the record must parse into the degenerate arm",
+    );
+    assert!(
+        step_geometry::ElementarySurface::try_from(&step_deg).is_err(),
+        "R >= r must refuse conversion",
+    );
+}
+
 fn exec_conical_surface(
     org_coord: [f64; 3],
     dir_array: [f64; 2],
@@ -1164,12 +1265,16 @@ fn exec_conical_surface(
         StepDataDisplay::new(VectorAsDirection(ref_dir.normalize()), 5),
     );
     let step_conical = step_to_entity::<ElementarySurfaceAnyHolder>(&step_str);
-    let conical: step_geometry::ElementarySurface = (&step_conical).into();
+    let conical: step_geometry::ElementarySurface = (&step_conical)
+        .try_into()
+        .expect("elementary surface conversion");
 
     // It has its own output, so test it accordingly.
     let step_str1 = format!("DATA;\n{}ENDSEC;", StepDataDisplay::new(conical, 1));
     let step_cylinder1 = step_to_entity::<ElementarySurfaceAnyHolder>(&step_str1);
-    let conical1: step_geometry::ElementarySurface = (&step_cylinder1).into();
+    let conical1: step_geometry::ElementarySurface = (&step_cylinder1)
+        .try_into()
+        .expect("elementary surface conversion");
 
     let mat = Matrix4::from_cols(
         x.extend(0.0),
