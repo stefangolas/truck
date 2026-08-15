@@ -325,6 +325,20 @@ impl Table {
         Some((surface, Some(*idx)))
     }
 
+    /// Whether an untrimmed carrier is a closed bounded surface that a
+    /// point-degenerate-only boundary can validly describe.
+    ///
+    /// A `VERTEX_LOOP` (or a face declaring no bounds at all) trims nothing, so
+    /// the whole surface is the face. That is only a well-formed statement on a
+    /// surface with no boundary of its own — a closed surface like a sphere.
+    /// On an unbounded or open carrier it would invent geometry.
+    fn closed_surface_accepts_untrimmed(surface: &Surface) -> bool {
+        matches!(
+            surface,
+            Surface::ElementarySurface(ElementarySurface::Sphere(_))
+        )
+    }
+
     fn tune_conical_surface(
         surface: &mut Surface,
         wires: &[TopologicallyClosedWire],
@@ -516,11 +530,19 @@ impl Table {
                     BoundOutcome::Collapsed(_) => None,
                 })
                 .collect();
-            if wires.is_empty() {
+            if wires.is_empty() && !Self::closed_surface_accepts_untrimmed(&surface) {
                 // Every bound collapsed, so nothing describes where this face
                 // ends. A cone that is only an apex is not a face, and trimming
                 // by no boundary at all would emit the entire unbounded surface
                 // — the blob failure mode this project exists to avoid.
+                //
+                // The one exception is a face whose every declared bound is a
+                // genuine vertex loop (or which declares no bound at all) on a
+                // *closed* bounded surface: the degenerate loop trims nothing,
+                // so the whole surface is the face. That is the ball — a full
+                // sphere trimmed by a `VERTEX_LOOP` at its pole. Any other
+                // carrier (a plane, an open cylinder) would mesh an invented
+                // region, so the refusal stands for them.
                 losses.push(FaceLoss {
                     provenance,
                     reason: FaceLossReason::AllBoundsCollapsed,

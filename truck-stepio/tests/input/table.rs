@@ -718,3 +718,67 @@ Record { name: \"REPRESENTATION_CONTEXT\", parameter: List([String(\"2D SPACE\")
     };
     assert_eq!(table, ans_table);
 }
+
+use truck_stepio::r#in::convert::FaceLossReason;
+
+/// A face whose only bound is a VERTEX_LOOP on a closed sphere is the whole
+/// ball: the degenerate loop trims nothing, so the face converts with no
+/// surviving boundary instead of being refused as AllBoundsCollapsed.
+#[test]
+fn vertex_loop_only_sphere_face_is_a_full_closed_surface() {
+    let step_str = "DATA;
+#1 = CLOSED_SHELL('', (#2));
+#2 = ADVANCED_FACE('', (#3), #4, .T.);
+#3 = FACE_BOUND('', #5, .T.);
+#5 = VERTEX_LOOP('', #6);
+#6 = VERTEX_POINT('', #7);
+#7 = CARTESIAN_POINT('', (0.0, 0.0, 0.005));
+#4 = SPHERICAL_SURFACE('', #8, 0.005);
+#8 = AXIS2_PLACEMENT_3D('', #9, #10, #11);
+#9 = CARTESIAN_POINT('', (0.0, 0.0, 0.0));
+#10 = DIRECTION('', (0.0, 0.0, 1.0));
+#11 = DIRECTION('', (1.0, 0.0, 0.0));
+ENDSEC;";
+    let data_section = DataSection::from_str(step_str).unwrap();
+    let table = Table::from_data_section(&data_section);
+    let (&shell_id, shell) = table.shell.iter().next().unwrap();
+    let (cshell, losses) = table
+        .to_compressed_shell_with_losses(shell_id, shell)
+        .unwrap();
+    assert!(
+        losses.is_empty(),
+        "a closed sphere trimmed by a vertex loop is a full face, not a loss: {losses:?}",
+    );
+    assert_eq!(cshell.faces.len(), 1);
+    assert!(
+        cshell.faces[0].boundaries.is_empty(),
+        "a vertex-loop-only bound leaves no trim boundary",
+    );
+}
+
+/// The same vertex-loop-only structure on an open, unbounded carrier must
+/// still refuse: an untrimmed plane would mesh an invented sheet.
+#[test]
+fn vertex_loop_only_plane_face_still_refuses() {
+    let step_str = "DATA;
+#1 = CLOSED_SHELL('', (#2));
+#2 = ADVANCED_FACE('', (#3), #4, .T.);
+#3 = FACE_BOUND('', #5, .T.);
+#5 = VERTEX_LOOP('', #6);
+#6 = VERTEX_POINT('', #7);
+#7 = CARTESIAN_POINT('', (0.0, 0.0, 0.0));
+#4 = PLANE('', #8);
+#8 = AXIS2_PLACEMENT_3D('', #9, #10, #11);
+#9 = CARTESIAN_POINT('', (0.0, 0.0, 0.0));
+#10 = DIRECTION('', (0.0, 0.0, 1.0));
+#11 = DIRECTION('', (1.0, 0.0, 0.0));
+ENDSEC;";
+    let data_section = DataSection::from_str(step_str).unwrap();
+    let table = Table::from_data_section(&data_section);
+    let (&shell_id, shell) = table.shell.iter().next().unwrap();
+    let (_, losses) = table
+        .to_compressed_shell_with_losses(shell_id, shell)
+        .unwrap();
+    assert_eq!(losses.len(), 1);
+    assert_eq!(losses[0].reason, FaceLossReason::AllBoundsCollapsed);
+}

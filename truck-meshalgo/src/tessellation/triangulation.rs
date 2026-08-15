@@ -7195,6 +7195,16 @@ fn working_range(
     surface: &impl PreMeshableSurface,
 ) -> (Option<(f64, f64)>, Option<(f64, f64)>) {
     let (udeclared, vdeclared) = surface.try_range_tuple();
+    // A face with no boundary at all takes its domain from the surface — the
+    // closure rectangle `new_with_join` synthesises is that declared domain,
+    // never a piece-derived interval (there are no pieces). This is the ball:
+    // a full closed sphere trimmed by a vertex loop, admitted only by the
+    // converter's closed-surface gate. Returning `None` here would leave
+    // `closed` empty and the face would reach the CDT with no boundary at
+    // all, which the parity flood cannot turn into material.
+    if pieces.is_empty() {
+        return (udeclared, vdeclared);
+    }
     let axis = |idx: usize, period: Option<f64>, declared: Option<(f64, f64)>| {
         // A period determines the extent; the bounds do not get a say.
         if period.is_some() {
@@ -11771,12 +11781,7 @@ mod cone_topology_tests {
             (Point2::new(0.3, 0.7), Point3::new(0.3, 0.7, 0.0)).into(),
             (Point2::new(0.3, 0.3), Point3::new(0.3, 0.3, 0.0)).into(),
         ]);
-        let boundary = PolyBoundary::new(
-            vec![open_piece, closed_piece],
-            &plane,
-            tol,
-            &lattice,
-        );
+        let boundary = PolyBoundary::new(vec![open_piece, closed_piece], &plane, tol, &lattice);
         // The open piece must have been closed synthetically: exactly two loops
         // result, and the merged one carries SyntheticClosure segments.
         assert_eq!(
@@ -11787,13 +11792,15 @@ mod cone_topology_tests {
         let merged = boundary
             .0
             .iter()
-            .find(|loop_| loop_.origins.iter().any(|o| *o == SegmentOrigin::SyntheticClosure))
+            .find(|loop_| {
+                loop_
+                    .origins
+                    .iter()
+                    .any(|o| *o == SegmentOrigin::SyntheticClosure)
+            })
             .expect("the open piece's closure is synthetic");
         assert!(
-            merged
-                .origins
-                .iter()
-                .any(|o| *o == SegmentOrigin::Source),
+            merged.origins.iter().any(|o| *o == SegmentOrigin::Source),
             "the open piece's own segments keep their Source role",
         );
         // Every loop satisfies the BoundaryLoop equal-length invariant.
