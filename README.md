@@ -1,101 +1,44 @@
-# truck - Truck is a RUst Cad Kernel
+# truck — the certified B-rep kernel fork
 
-## Overview
+`truck` is an open-source shape processing kernel in Rust by
+[ricosjp](https://github.com/ricosjp/truck) (Apache-2.0). This repository is a
+fork whose core crates have been rewritten into a **certified
+boundary-representation kernel**: every geometric answer is a typed outcome
+carrying the evidence that produced it, and every refusal states why the
+kernel could not certify an answer instead of returning an approximation
+silently.
 
-`truck` is an open-source shape processing kernel by Rust.  
-The broad concept consists of the following three elements.
+**Start with [`OVERVIEW.md`](OVERVIEW.md)** — what the fork is, the
+certification model, the capability map by crate, program status, and where
+the deep specifications live. The mirrored documentation snapshot is under
+[`docs/`](docs/).
 
-- Trendy Tools
-- Traditional Arts
-- Theseus' ship
+## Status
 
-### Trendy Tools
+The rewrite is developed through an automated packet/worker/verify loop
+driven by the `look` repository (the kernel is vendored there as
+`vendor/truck/`). Landed to date: the base kernel program, the audit
+remediation, the analytic solver family, the build123d coverage program, and
+the constructive-geometry contract with its spine/frame/profile, diagnostics,
+ledger, and Coons surface packets. The certified-kernel promotion plan is
+booked in [`CERTIFIED-KERNEL-PLAN.md`](CERTIFIED-KERNEL-PLAN.md).
 
-- We are targeting the next generation of market share using developmental tools: Rust and WebGPU.
-- Advanced optimizations using Rust and WebGPU maximize the performance of each crate.
+## Crates
 
-### Traditional Arts
-
-- We will break away from the legacy by re-implementing the B-rep with NURBS in the above trendy tools.
-- Safe implementation using Rust to eliminate core dumped for CPU-derived processes.
-- Cargo's extensive maintenance features ensure thorough continuous integration.
-
-### Theseus' ship
-
-- We are modularizing into smaller crates that can be replaced, like [the Ship of Theseus](https://en.wikipedia.org/wiki/Ship_of_Theseus).
-- Based on the many lessons learned in the past, we have given up on overall optimization as a single application, and design as a collection of individual optimized crates.
-- Since unexpected expansions are bound to occur, we deal with uncontrolled expansions in the form of small modules.
+| Crate | Role in the fork |
+|---|---|
+| `truck-base` | Evidence algebra (`Outcome`, `Certified`, `Refusal`, `Certificate`, `Method`, `Budget`), tolerance types |
+| `truck-geotrait` | Geometric traits; `Outcome`-returning `IncludeCurve`; `MetricSpace` migration |
+| `truck-geometry` | NURBS/B-splines, analytic `specifieds`, `decorators` (`IntersectionCurve`, `Offset`, `RbfSurface`, `CoonsSurface`), `constructive/` recipes |
+| `truck-topology` | Vertex/edge/wire/face/shell/solid + substrate diagnostics and `ManifoldDiagnostics` |
+| `truck-polymesh` | `PolygonMesh` and polygon structures |
+| `truck-meshalgo` | Certified tessellation, edge-sample ledger; `formal/` (Krawczyk, analytic support schemas) and `domain/` (quotient/deck) substrate |
+| `truck-modeling` | CAD facade: extrude, revolve, fillet, chamfer, split, section, booleans, placement |
+| `truck-shapeops` | The boundary rewrite: split → classify → decide → assemble; legacy transversal booleans |
+| `truck-stepio` | STEP ingestion through certified encoders with provenance |
+| `truck-evidence` | Reference implementation of the evidence pattern (P-6) |
+| `truck-assembly`, `truck-derivers` | Upstream crates, largely untouched |
 
 ## License
 
-Apache License 2.0
-
-## Usage
-
-### How to Run Examples
-
-All examples are located under the examples directory in each crates.  
-These examples use the default syntax for running examples, as found in the [Cargo](https://doc.rust-lang.org/cargo/reference/cargo-targets.html#examples) documentation.
-
-At first, let's run the following example!
-
-```bash
-git submodule update --init
-cargo run --example rotate-objects
-```
-
-## crates
-
-### truck-base  [![Crates.io](https://img.shields.io/crates/v/truck-base.svg)](https://crates.io/crates/truck-base) [![Docs.rs](https://docs.rs/truck-base/badge.svg)](https://docs.rs/truck-base)
-
-basic structs and traits: importing cgmath, curve and surface traits, tolerance, etc...
-
-### truck-geotrait [![Crates.io](https://img.shields.io/crates/v/truck-geotrait.svg)](https://crates.io/crates/truck-geotrait) [![Docs.rs](https://docs.rs/truck-geotrait/badge.svg)](https://docs.rs/truck-geotrait)
-
-Defines geometric traits: `ParametricCurve`, `ParametricSurface`, and so on.
-
-### truck-geometry  [![Crates.io](https://img.shields.io/crates/v/truck-geometry.svg)](https://crates.io/crates/truck-geometry) [![Docs.rs](https://docs.rs/truck-geometry/badge.svg)](https://docs.rs/truck-geometry)
-
-geometrical structs: knot vector, B-spline and NURBS
-
-### truck-topology  [![Crates.io](https://img.shields.io/crates/v/truck-topology.svg)](https://crates.io/crates/truck-topology) [![Docs.rs](https://docs.rs/truck-topology/badge.svg)](https://docs.rs/truck-topology)
-
-topological structs: vertex, edge, wire, face, shell, and solid
-
-### truck-polymesh  [![Crates.io](https://img.shields.io/crates/v/truck-polymesh.svg)](https://crates.io/crates/truck-polymesh) [![Docs.rs](https://docs.rs/truck-polymesh/badge.svg)](https://docs.rs/truck-polymesh)
-
-defines polygon data structure and some algorithms handling mesh, including meshing the shapes
-
-### truck-meshalgo [![Crates.io](https://img.shields.io/crates/v/truck-meshalgo.svg)](https://crates.io/crates/truck-meshalgo) [![Docs.rs](https://docs.rs/truck-meshalgo/badge.svg)](https://docs.rs/truck-meshalgo)
-
-Mesh algorighms, include tessellations of the shape.
-
-### truck-modeling  [![Crates.io](https://img.shields.io/crates/v/truck-modeling.svg)](https://crates.io/crates/truck-modeling) [![Docs.rs](https://docs.rs/truck-modeling/badge.svg)](https://docs.rs/truck-modeling)
-
-integrated modeling algorithms by geometry and topology
-
-### truck-shapeops [![Crates.io](https://img.shields.io/crates/v/truck-shapeops.svg)](https://crates.io/crates/truck-shapeops) [![Docs.rs](https://docs.rs/truck-shapeops/badge.svg)](https://docs.rs/truck-shapeops)
-
-Provides boolean operations to Solid
-
-### truck-platform  [![Crates.io](https://img.shields.io/crates/v/truck-platform.svg)](https://crates.io/crates/truck-platform) [![Docs.rs](https://docs.rs/truck-platform/badge.svg)](https://docs.rs/truck-platform)
-
-graphic utility library based on wgpu
-
-### truck-rendimpl  [![Crates.io](https://img.shields.io/crates/v/truck-rendimpl.svg)](https://crates.io/crates/truck-rendimpl) [![Docs.rs](https://docs.rs/truck-rendimpl/badge.svg)](https://docs.rs/truck-rendimpl)
-
-visualization of shape and polygon mesh based on platform
-
-### truck-js
-
-Javascript wrapper of `truck`.
-
-![dependencies](./dependencies.svg)
-
-## Tutorials
-
-There are some learning resources for using `truck` v0.6.x series.
-
-- [truck-tutorial](https://ricos.gitlab.io/truck-tutorial/v0.6/)
-- [truck-tutorial-ja](https://ricos.gitlab.io/truck-tutorial-ja/v0.6/) (Japanese version)
-- [truck-tutorial-code](https://github.com/ricosjp/truck-tutorial-code/tree/v0.6) (pre-created sample code)
+Apache License 2.0, inherited from upstream. See `LICENSE` files in each crate.
