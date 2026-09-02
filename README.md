@@ -41,56 +41,55 @@ booked in [`CERTIFIED-KERNEL-PLAN.md`](CERTIFIED-KERNEL-PLAN.md).
 
 ## Agentic CAD API surface
 
-This is the concrete entry surface for building and modifying solids
-programmatically (including from agent harnesses). It is Rust-only; the
-Python binding (pyo3) is booked but deliberately deferred.
+The entry point for building and modifying solids programmatically is
+`truck_shapeops::facade` — build123d-shaped operations over a certified
+kernel. Rust-only; the Python binding (pyo3) is booked but deliberately
+deferred.
 
-### The certified contract
+### How modeling works
 
-Every fallible geometric operation returns evidence, never a bare value and
-never an approximation:
+1. **Sketch a closed profile** on the z = 0 plane out of line and circle
+   pieces.
+2. **Arrange it.** One call decides which regions of the plane are material
+   (interiors, holes, nesting) — you never hand-build faces or sew shells.
+3. **Lift it into 3-D**: extrude by a height, extrude along a vector, or
+   revolve about the z-axis. You get back a closed, manifold solid —
+   acceptance is checked before the solid exists.
+4. **Modify**: place it (`translate` / `rotate` / `scale` / `mirror`), soften
+   it (`fillet` / `chamfer`), combine it with others (add, subtract,
+   intersect), or slice it (`section` / `split`).
+5. **Measure or ship**: bounding box, topology iteration, certified
+   tessellation, and export to STL / OBJ / VTK / STEP.
 
-```rust
-type Outcome<T> = Result<Certified<T>, Refusal>;
-```
+### What every call gives you back
 
-- `Certified<T>` carries the value plus a `Certificate` (the evidence tuple:
-  properties, method `Exact | Interval | Float | None`, remaining `Budget`,
-  margin, modulus).
-- `Refusal` is a typed, matchable vocabulary (`Empty`,
-  `UnsupportedEnvelope(..)`, `NumericallyUnresolved { spent, witness }`,
-  `NonCanonicalCarrier`, `Collapsed { .. }`, `ForwardToleranceExceeded`,
-  ...) — treat refusals as control flow, not errors. Nothing panics on bad
-  geometry; house rules deny `unwrap`/`expect`/`panic`/`indexing_slicing`.
-- Fallible numerics thread an explicit `Budget { subdiv, newton, depth }`
-  so a caller can bound work per call; exhaustion is a typed refusal, not a
-  hang.
-- Verdicts are three-valued where honesty matters
-  (`CertifiedWithinTolerance | Failed | Inconclusive`) — an inconclusive
-  result is never promoted to success.
+Each fallible operation returns one of two things. Either your geometry
+**plus a certificate** — how the answer was computed (exactly, with interval
+proofs, or in floats), which invariants hold, and what compute it consumed —
+or a **typed refusal** naming the precise reason nothing was produced: the
+input used an unsupported curve/surface type, the compute budget ran out, the
+contact was degenerate, and so on. You hand heavy numerics a small budget so
+a hard problem fails fast instead of hanging. Nothing panics on bad geometry,
+and a result the kernel could not verify is never dressed up as success.
 
-Geometry must use the **canonical carriers** (`truck_geometry::canonical`):
-`Curve` = Line / Circle / BSpline / NURBS / Intersection / SpineFrame, and
-`Surface` = Plane / Cylinder / Sphere / Cone / Torus / Placed. Certified
-operations refuse `NonCanonicalCarrier` on anything else.
+In Rust terms that is `Outcome<T> = Result<Certified<T>, Refusal>`: take the
+shape from `.value`, and match on the `Refusal` arms when you want retry or
+fallback logic. Refusals are data, not error strings.
 
-### The build123d-shaped facade: `truck_shapeops::facade`
+### The operations
 
-The intended modeling entry point — build123d-named operations that compose
-landed certified primitives and add zero new geometry:
-
-| Op | Signature sketch |
+| Intent | Operations (all in `truck_shapeops::facade`) |
 |---|---|
-| `make_face` | `(&[Curve]) -> Outcome<Vec<Face>>` — one face per material region |
-| `make_hull` | `(&[Point3]) -> Outcome<Face>` — exact 2-D convex hull |
-| `extrude` | `(&[Curve], &Arrangement, height) -> Outcome<Solid>` |
-| `extrude_vector` | `(&[Curve], &Arrangement, dir, both: bool)` |
-| `revolve` | `(&[Curve], &Arrangement, angle)` — about the z-axis |
-| `boolean_op` | `(&Solid, Mode::{Add, Subtract, Intersect}, &Solid, &mut Budget)` |
-| `fillet` / `chamfer` | `(&Solid, specs, &mut Budget)` — `BlendSpec::Straight(..)` / `BlendSpec::Circular(..)` |
-| `section` / `split` | `(&Solid, &Plane, &mut Budget)` — cut faces / `(plus, minus)` halves |
-| `mirror` / `mirror_about_plane` / `rotate` / `scale` / `translate` | `(&Solid, ..) -> Outcome<Solid>` |
-| `bounding_box` | `(&Solid, &mut Budget) -> Outcome<BoundingBox<Point3>>` |
+| Create | `make_face`, `make_hull`, `extrude`, `extrude_vector`, `revolve` |
+| Place | `translate`, `rotate`, `scale`, `mirror`, `mirror_about_plane` |
+| Feature | `fillet`, `chamfer` |
+| Combine | `boolean_op` (add / subtract / intersect), `section`, `split` |
+| Query | `bounding_box` |
+
+The names track build123d deliberately, so a build123d-shaped agent program
+maps almost one-to-one. Anything the kernel cannot yet support is listed
+under *Known limits* below — and refuses with a typed reason instead of
+approximating.
 
 ### End-to-end example
 
@@ -184,6 +183,26 @@ plane-plane edges and circular rims; `mirror` (solid) is axis-aligned planes
 (`mirror_about_plane` is general); revolve is z-axis with line/circle
 profiles; no shell/offset/thicken, patterns, or sketch solver. Unsupported
 requests refuse with the matching `Refusal` arm.
+
+### The contract underneath
+
+For readers who want the formal view — everything above is a thin table over
+these rules (full details in [`OVERVIEW.md`](OVERVIEW.md) and
+`truck-base/src/evidence.rs`):
+
+- `Outcome<T> = Result<Certified<T>, Refusal>`; `Certified<T>` = value +
+  certificate (properties, method `Exact | Interval | Float | None`,
+  remaining budget, margin, modulus).
+- Certified operations accept only **canonical carriers**
+  (`truck_geometry::canonical`): curves are Line / Circle / BSpline / NURBS /
+  Intersection / SpineFrame; surfaces are Plane / Cylinder / Sphere / Cone /
+  Torus / Placed. Anything else refuses `NonCanonicalCarrier` before any
+  contact work starts.
+- Fallible numerics thread `Budget { subdiv, newton, depth }`; exhaustion is
+  `NumericallyUnresolved { spent, witness }`, not a hang.
+- Verdicts are three-valued (`CertifiedWithinTolerance | Failed |
+  Inconclusive`); the house rules deny `unwrap`/`expect`/`panic`/
+  `indexing_slicing` in kernel code.
 
 ## Sync model
 
