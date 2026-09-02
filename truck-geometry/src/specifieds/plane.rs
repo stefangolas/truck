@@ -1,4 +1,7 @@
 use super::*;
+use truck_base::evidence::{
+    Budget, Certificate, Certified, Margin, Method, Modulus, Outcome, PropMap,
+};
 
 impl Plane {
     /// Creates a new plane from three points.
@@ -173,40 +176,81 @@ impl Invertible for Plane {
 
 impl IncludeCurve<Line<Point3>> for Plane {
     #[inline(always)]
-    fn include(&self, line: &Line<Point3>) -> bool {
-        self.search_parameter(line.0, None, 1).is_some()
-            && self.search_parameter(line.1, None, 1).is_some()
+    fn include(&self, line: &Line<Point3>) -> Outcome<bool> {
+        // BG-S0-001: the certificate is explicit field-by-field; the predicate
+        // is a float computation (H-6), claims no properties, and consumes no
+        // caller-provided budget. The stability margin is unbounded and the
+        // modulus `Unbounded` because a standalone boolean predicate does not
+        // participate in composition (OB-6).
+        Ok(Certified::new(
+            self.search_parameter(line.0, None, 1).is_some()
+                && self.search_parameter(line.1, None, 1).is_some(),
+            Certificate {
+                props: PropMap::new(),
+                method: Method::Float,
+                budget_left: Budget::new(0, 0, 0),
+                margin: Margin::UNBOUNDED,
+                modulus: Modulus::Unbounded,
+            },
+        ))
     }
 }
 
 impl IncludeCurve<BSplineCurve<Point3>> for Plane {
     #[inline(always)]
-    fn include(&self, curve: &BSplineCurve<Point3>) -> bool {
+    fn include(&self, curve: &BSplineCurve<Point3>) -> Outcome<bool> {
+        let ctx = ToleranceCtx::unscaled_legacy();
         let origin = self.origin();
         let normal = self.normal();
-        curve
-            .control_points()
-            .iter()
-            .all(|pt| (pt - origin).dot(normal).so_small())
+        Ok(Certified::new(
+            curve
+                .control_points()
+                .iter()
+                .all(|pt| ctx.is_small_len((pt - origin).dot(normal))), // BG-TOL-001: model
+            Certificate {
+                props: PropMap::new(),
+                method: Method::Float,
+                budget_left: Budget::new(0, 0, 0),
+                margin: Margin::UNBOUNDED,
+                modulus: Modulus::Unbounded,
+            },
+        ))
     }
 }
 
 impl IncludeCurve<NurbsCurve<Vector4>> for Plane {
-    fn include(&self, curve: &NurbsCurve<Vector4>) -> bool {
-        let origin = self.origin();
-        let normal = self.normal();
-        let (s, e) = (curve.front(), curve.back());
-        if !(s - origin).dot(normal).so_small() || !(e - origin).dot(normal).so_small() {
-            return false;
-        }
-        curve.non_rationalized().control_points().iter().all(|pt| {
-            if pt[3].so_small() {
-                true
-            } else {
-                let pt = Point3::from_homogeneous(*pt);
-                (pt - origin).dot(normal).so_small()
+    fn include(&self, curve: &NurbsCurve<Vector4>) -> Outcome<bool> {
+        let ctx = ToleranceCtx::unscaled_legacy();
+        let value = (|| {
+            let origin = self.origin();
+            let normal = self.normal();
+            let (s, e) = (curve.front(), curve.back());
+            if !ctx.is_small_len((s - origin).dot(normal))
+                || !ctx.is_small_len((e - origin).dot(normal))
+            {
+                // BG-TOL-001: model
+                return false;
             }
-        })
+            curve.non_rationalized().control_points().iter().all(|pt| {
+                if ctx.is_small_ratio(pt[3]) {
+                    // BG-TOL-001: param
+                    true
+                } else {
+                    let pt = Point3::from_homogeneous(*pt);
+                    ctx.is_small_len((pt - origin).dot(normal)) // BG-TOL-001: model
+                }
+            })
+        })();
+        Ok(Certified::new(
+            value,
+            Certificate {
+                props: PropMap::new(),
+                method: Method::Float,
+                budget_left: Budget::new(0, 0, 0),
+                margin: Margin::UNBOUNDED,
+                modulus: Modulus::Unbounded,
+            },
+        ))
     }
 }
 
@@ -243,8 +287,10 @@ impl SearchParameter<D2> for Plane {
         _: H,
         _: usize,
     ) -> Option<(f64, f64)> {
+        let ctx = ToleranceCtx::unscaled_legacy();
         let v = self.get_parameter(point);
-        match v[2].so_small() {
+        match ctx.is_small_len(v[2]) {
+            // BG-TOL-001: model
             true => Some((v[0], v[1])),
             false => None,
         }

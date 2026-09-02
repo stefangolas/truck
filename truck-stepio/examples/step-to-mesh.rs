@@ -60,8 +60,8 @@ fn step_to_mesh(table: &Table) -> Vec<MeshedCShell> {
             .iter()
             .filter_map(|shape| {
                 let shells = match shape {
-                    ProductShape::Solid(solid) => &solid.boundaries,
-                    ProductShape::Shells(shells) => shells,
+                    ProductShape::Solid(solid, _) => &solid.boundaries,
+                    ProductShape::Shells(shells, _) => shells,
                     _ => return None,
                 };
                 let meshed_shells = shells

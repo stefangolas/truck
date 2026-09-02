@@ -25,6 +25,12 @@ pub type SphericalSurface = Processor<Sphere, Matrix4>;
 pub type CylindricalSurface = Processor<RevolutedCurve<Line<Point3>>, Matrix4>;
 /// `toroidal_surface`, realized in `truck`
 pub type ToroidalSurface = Processor<Torus, Matrix4>;
+/// `degenerate_toroidal_surface`, realized in `truck`
+///
+/// The carrier is the same torus, but the source fixes `major < minor` and
+/// names one sheet (`select_outer`), so the usable parameter domain is a
+/// restricted v-interval rather than the full torus's `[0, 2π]`.
+pub type DegenerateToroidalSurface = Processor<DegenerateTorus, Matrix4>;
 /// `conical_surface`, realized in `truck`
 pub type ConicalSurface = Processor<RevolutedCurve<Line<Point3>>, Matrix4>;
 /// `surface_of_linear_extrusion`, realized in `truck`
@@ -204,6 +210,7 @@ pub enum ElementarySurface {
     Sphere(SphericalSurface),
     CylindricalSurface(CylindricalSurface),
     ToroidalSurface(ToroidalSurface),
+    DegenerateToroidalSurface(DegenerateToroidalSurface),
     ConicalSurface(ConicalSurface),
 }
 
@@ -437,7 +444,7 @@ pub enum Surface {
 
 impl truck_stepio::out::DisplayByStep for Surface {
     fn fmt(&self, idx: usize, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use Surface::*;
+        use self::Surface::*;
         match self {
             ElementarySurface(x) => x.fmt(idx, f),
             SweptCurve(x) => x.fmt(idx, f),
@@ -461,7 +468,10 @@ impl truck_stepio::out::StepSurface for Processor<Sphere, Matrix4> {
     }
 }
 
+/// carrier for `degenerate_toroidal_surface`
+mod degenerate_torus;
 mod sphere;
+pub use degenerate_torus::DegenerateTorus;
 
 /// Implementation required to apply a closed surface division to a shape parsed from a STEP file.
 mod from_pcurve {

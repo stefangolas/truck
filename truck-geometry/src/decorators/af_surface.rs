@@ -1,4 +1,8 @@
 use super::{rbf_surface::*, *};
+use truck_base::evidence::{
+    Budget, Certificate, Certified, Margin, Method, Modulus, Outcome, PropMap, Refusal,
+    UnresolvedWitness,
+};
 
 impl<S0, S1> ApproxFilletSurface<S0, S1> {
     /// Returns the first surface.
@@ -371,29 +375,69 @@ impl<S0, S1> From<ApproxFilletSurface<S0, S1>> for ApproxFilletSurface<Box<S0>, 
     }
 }
 
+/// What a call consumed: the budget at entry minus what remains. `Budget` is
+/// `Copy`; a refusal carries the difference, never the remainder (BG-NUM-001).
+fn budget_spent(initial: Budget, remaining: Budget) -> Budget {
+    Budget {
+        subdiv: initial.subdiv - remaining.subdiv,
+        newton: initial.newton - remaining.newton,
+        depth: initial.depth - remaining.depth,
+    }
+}
+
 impl<S0, S1> ApproxFilletSurface<S0, S1>
 where
     S0: ParametricSurface3D + SearchParameter<D2, Point = Point3>,
     S1: ParametricSurface3D + SearchParameter<D2, Point = Point3>,
 {
     /// approx fillet by `ApproxFilletSurface`.
+    ///
+    /// The contact-curve refinement spends one subdivision per pass from
+    /// `budget` (H-5). On success `budget` holds what remains; on refusal the
+    /// `spent` field reports what this call consumed.
     pub fn approx_rolling_ball_fillet<C, R>(
         fillet_surface: &RbfSurface<C, S0, S1, R>,
         edge_parameter_range: (f64, f64),
         tol: f64,
-    ) -> Option<Self>
+        budget: &mut Budget,
+    ) -> Outcome<Self>
     where
         C: ParametricCurve3D,
         R: ScalarFunctionD1,
     {
+        // `spent` on a refusal is the difference between the budget at entry
+        // and what remains: what this call consumed, not what the caller has
+        // left (BG-NUM-001).
+        let initial = *budget;
         let (v0, v1) = edge_parameter_range;
+        if v0 > v1 {
+            return Err(Refusal::NumericallyUnresolved {
+                spent: budget_spent(initial, *budget),
+                witness: UnresolvedWitness::ContactCurveNotFound,
+            });
+        }
         let v_5 = (v0 + v1) / 2.0;
-        let cc0 = fillet_surface.contact_circle(v0)?;
-        let cc_5 = fillet_surface.contact_circle(v_5)?;
-        let cc1 = fillet_surface.contact_circle(v1)?;
+        let cc0 = fillet_surface
+            .contact_circle(v0)
+            .ok_or(Refusal::NumericallyUnresolved {
+                spent: budget_spent(initial, *budget),
+                witness: UnresolvedWitness::ContactCurveNotFound,
+            })?;
+        let cc_5 = fillet_surface
+            .contact_circle(v_5)
+            .ok_or(Refusal::NumericallyUnresolved {
+                spent: budget_spent(initial, *budget),
+                witness: UnresolvedWitness::ContactCurveNotFound,
+            })?;
+        let cc1 = fillet_surface
+            .contact_circle(v1)
+            .ok_or(Refusal::NumericallyUnresolved {
+                spent: budget_spent(initial, *budget),
+                witness: UnresolvedWitness::ContactCurveNotFound,
+            })?;
         let mut ccs = vec![(v0, cc0), (v_5, cc_5), (v1, cc1)];
 
-        for _i in 0..16 {
+        while budget.spend_subdiv(1).is_ok() {
             let mut vec = Vec::with_capacity(ccs.len() + 3);
             vec.extend([v0, v0, v0]);
             vec.extend({
@@ -401,7 +445,10 @@ where
                 ccs[1..n].windows(2).map(move |v| (v[0].0 + v[1].0) / 2.0)
             });
             vec.extend([v1, v1, v1]);
-            let knot_vec = KnotVec::try_from(vec).unwrap();
+            let knot_vec = KnotVec::try_from(vec).map_err(|_| Refusal::NumericallyUnresolved {
+                spent: budget_spent(initial, *budget),
+                witness: UnresolvedWitness::ContactCurveNotFound,
+            })?;
 
             let make_uv0 = move |&(v, cc): &(f64, ContactCircle)| (v, cc.contact_point0().uv);
             let uv0s = ccs.iter().map(make_uv0).collect::<Vec<_>>();
@@ -427,7 +474,10 @@ where
                 let n0 = fillet_surface.surface0.normal(uv0.x, uv0.y);
                 let handle0 = cder0.cross(n0);
                 let mat0 = Matrix3::from_cols(handle0, cder0, n0);
-                let vec0 = mat0.invert().unwrap() * der0;
+                let vec0 = mat0.invert().ok_or(Refusal::NumericallyUnresolved {
+                    spent: budget_spent(initial, *budget),
+                    witness: UnresolvedWitness::ContactCurveNotFound,
+                })? * der0;
                 raw_tangent_vecs0.push((v, vec0.truncate()));
 
                 let der1 = -nurbs.der(1.0);
@@ -436,7 +486,10 @@ where
                 let n1 = fillet_surface.surface1.normal(uv1.x, uv1.y);
                 let handle1 = cder1.cross(n1);
                 let mat1 = Matrix3::from_cols(handle1, cder1, n1);
-                let vec1 = mat1.invert().unwrap() * der1;
+                let vec1 = mat1.invert().ok_or(Refusal::NumericallyUnresolved {
+                    spent: budget_spent(initial, *budget),
+                    witness: UnresolvedWitness::ContactCurveNotFound,
+                })? * der1;
                 raw_tangent_vecs1.push((v, vec1.truncate()));
             }
 
@@ -456,35 +509,61 @@ where
                 tangent_vecs1: tangent_curve1.destruct().1,
                 weights,
             };
-            let added_ccs = ccs
-                .windows(2)
-                .filter_map(|v| {
-                    let v = (v[0].0 + v[1].0) / 2.0;
-                    let cc = fillet_surface.contact_circle(v).unwrap();
-                    let is_far = |t: f64| approx.subs(t, v).distance2(cc.subs(t)) < tol * tol;
-                    match [0.0, 0.5, 1.0].into_iter().all(is_far) {
-                        true => None,
-                        false => Some((v, cc)),
-                    }
-                })
-                .collect::<Vec<_>>();
+            let added_ccs =
+                ccs.windows(2)
+                    .map(|v| {
+                        let v = (v[0].0 + v[1].0) / 2.0;
+                        let cc = fillet_surface.contact_circle(v).ok_or(
+                            Refusal::NumericallyUnresolved {
+                                spent: budget_spent(initial, *budget),
+                                witness: UnresolvedWitness::ContactCurveNotFound,
+                            },
+                        )?;
+                        let is_far = |t: f64| approx.subs(t, v).distance2(cc.subs(t)) < tol * tol;
+                        Ok(match [0.0, 0.5, 1.0].into_iter().all(is_far) {
+                            true => None,
+                            false => Some((v, cc)),
+                        })
+                    })
+                    .collect::<std::result::Result<Vec<Option<(f64, ContactCircle)>>, Refusal>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
             if added_ccs.is_empty() {
-                return Some(Self {
-                    knot_vec: approx.knot_vec,
-                    surface0: S0::clone(approx.surface0),
-                    side_control_points0: approx.side_control_points0,
-                    tangent_vecs0: approx.tangent_vecs0,
-                    surface1: S1::clone(approx.surface1),
-                    side_control_points1: approx.side_control_points1,
-                    tangent_vecs1: approx.tangent_vecs1,
-                    weights: approx.weights,
-                });
+                return Ok(Certified::new(
+                    Self {
+                        knot_vec: approx.knot_vec,
+                        surface0: S0::clone(approx.surface0),
+                        side_control_points0: approx.side_control_points0,
+                        tangent_vecs0: approx.tangent_vecs0,
+                        surface1: S1::clone(approx.surface1),
+                        side_control_points1: approx.side_control_points1,
+                        tangent_vecs1: approx.tangent_vecs1,
+                        weights: approx.weights,
+                    },
+                    Certificate {
+                        props: PropMap::new(),
+                        method: Method::Float,
+                        budget_left: *budget,
+                        margin: Margin::UNBOUNDED,
+                        modulus: Modulus::Unbounded,
+                    },
+                ));
             }
             ccs.extend(added_ccs);
+            if ccs.iter().any(|(v, _)| !v.is_finite()) {
+                return Err(Refusal::NumericallyUnresolved {
+                    spent: budget_spent(initial, *budget),
+                    witness: UnresolvedWitness::ContactCurveNotFound,
+                });
+            }
             ccs.sort_by(|(x, _), (y, _)| x.partial_cmp(y).unwrap());
         }
 
-        None
+        Err(Refusal::NumericallyUnresolved {
+            spent: budget_spent(initial, *budget),
+            witness: UnresolvedWitness::ContactCurveNotFound,
+        })
     }
 }
 
@@ -492,6 +571,25 @@ where
 mod tests {
     use super::*;
     use proptest::{prelude::*, property_test};
+
+    #[test]
+    fn fillet_reversed_range_refuses() {
+        let sphere0 = Sphere::new(Point3::new(0.0, 0.0, 10.0), 20.0);
+        let sphere1 = Sphere::new(Point3::new(0.0, 0.0, -10.0), 20.0);
+        let edge_circle = Processor::with_transform(
+            UnitCircle::<Point3>::new(),
+            Matrix4::from_scale(10.0 * f64::sqrt(3.0)),
+        );
+        let fillet = RbfSurface::new(edge_circle, sphere0, sphere1, 10.0);
+        let mut budget = Budget::new(16, 16, 16);
+        let result = ApproxFilletSurface::approx_rolling_ball_fillet(
+            &fillet,
+            (1.0, 0.0),
+            0.001,
+            &mut budget,
+        );
+        assert!(matches!(result, Err(Refusal::NumericallyUnresolved { .. })));
+    }
 
     #[property_test]
     fn plane_cylinder(#[strategy = 0.0..=1.0] u: f64, #[strategy = 0.0..=1.0] v: f64) {

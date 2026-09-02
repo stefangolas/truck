@@ -325,6 +325,20 @@ impl Table {
         Some((surface, Some(*idx)))
     }
 
+    /// Whether an untrimmed carrier is a closed bounded surface that a
+    /// point-degenerate-only boundary can validly describe.
+    ///
+    /// A `VERTEX_LOOP` (or a face declaring no bounds at all) trims nothing, so
+    /// the whole surface is the face. That is only a well-formed statement on a
+    /// surface with no boundary of its own — a closed surface like a sphere.
+    /// On an unbounded or open carrier it would invent geometry.
+    fn closed_surface_accepts_untrimmed(surface: &Surface) -> bool {
+        matches!(
+            surface,
+            Surface::ElementarySurface(ElementarySurface::Sphere(_))
+        )
+    }
+
     fn tune_conical_surface(
         surface: &mut Surface,
         wires: &[TopologicallyClosedWire],
@@ -516,11 +530,19 @@ impl Table {
                     BoundOutcome::Collapsed(_) => None,
                 })
                 .collect();
-            if wires.is_empty() {
+            if wires.is_empty() && !Self::closed_surface_accepts_untrimmed(&surface) {
                 // Every bound collapsed, so nothing describes where this face
                 // ends. A cone that is only an apex is not a face, and trimming
                 // by no boundary at all would emit the entire unbounded surface
                 // — the blob failure mode this project exists to avoid.
+                //
+                // The one exception is a face whose every declared bound is a
+                // genuine vertex loop (or which declares no bound at all) on a
+                // *closed* bounded surface: the degenerate loop trims nothing,
+                // so the whole surface is the face. That is the ball — a full
+                // sphere trimmed by a `VERTEX_LOOP` at its pole. Any other
+                // carrier (a plane, an open cylinder) would mesh an invented
+                // region, so the refusal stands for them.
                 losses.push(FaceLoss {
                     provenance,
                     reason: FaceLossReason::AllBoundsCollapsed,
@@ -672,10 +694,20 @@ pub enum NodeMatrix {
     Transform(Box<ItemDefinedTransformation>),
 }
 
-#[derive(Clone, Debug, PartialEq, derive_more::From)]
+/// The definition geometry of a product node, kept definition-local.
+///
+/// The geometry variants also carry the source shell entity ids the geometry
+/// was converted from, so a consumer can re-derive per-shell conversion losses
+/// (the DIAG-002 stream) without re-resolving the assembly or re-walking the
+/// source `SHAPE_REPRESENTATION_RELATIONSHIP`. The ids are authoritative: they
+/// are read from the exact source entities the conversion walked.
+#[derive(Clone, Debug, PartialEq)]
 pub enum ProductShape {
-    Shells(Vec<CompressedShell<Point3, Curve3D, Surface>>),
-    Solid(CompressedSolid<Point3, Curve3D, Surface>),
+    /// A `SHELL_BASED_SURFACE_MODEL`'s shells and their source boundary ids.
+    Shells(Vec<CompressedShell<Point3, Curve3D, Surface>>, Vec<u64>),
+    /// A `MANIFOLD_SOLID_BREP`'s boundaries and their source shell ids
+    /// (the outer shell first, then each void shell).
+    Solid(CompressedSolid<Point3, Curve3D, Surface>, Vec<u64>),
     Matrix(Matrix4),
 }
 
@@ -706,12 +738,35 @@ impl TryFrom<&NodeMatrix> for Matrix4 {
 impl ProductShape {
     pub fn try_from_index(idx: u64, table: &Table) -> Result<Self, StepConvertingError> {
         if let Some(step_solid) = table.manifold_solid_brep.get(&idx) {
-            table.to_compressed_solid(step_solid).map(Into::into)
+            let mut source_shell_ids = Vec::new();
+            if let PlaceHolder::Ref(Name::Entity(outer_idx)) = &step_solid.outer {
+                source_shell_ids.push(*outer_idx);
+            }
+            for shell in &step_solid.voids {
+                if let PlaceHolder::Ref(Name::Entity(void_idx)) = shell {
+                    source_shell_ids.push(*void_idx);
+                }
+            }
+            Ok(ProductShape::Solid(
+                table.to_compressed_solid(step_solid)?,
+                source_shell_ids,
+            ))
         } else if let Some(step_shells) = table.shell_based_surface_model.get(&idx) {
-            table.to_compressed_shells(step_shells).map(Into::into)
+            let source_shell_ids = step_shells
+                .sbsm_boundary
+                .iter()
+                .filter_map(|place_holder| match place_holder {
+                    PlaceHolder::Ref(Name::Entity(idx)) => Some(*idx),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            Ok(ProductShape::Shells(
+                table.to_compressed_shells(step_shells)?,
+                source_shell_ids,
+            ))
         } else if table.axis2_placement_3d.contains_key(&idx) {
             let axis = EntityTable::<Axis2Placement3dHolder>::get_owned(table, idx)?;
-            Ok(Matrix4::from(&axis).into())
+            Ok(ProductShape::Matrix(Matrix4::from(&axis)))
         } else {
             Err("Unknown Shape".into())
         }
@@ -758,7 +813,7 @@ impl Table {
         let Some(sr) = self.shape_representation.get(sr_idx) else {
             return Err("failed to reference `shape_representation`".into());
         };
-        let Some(shape) = sr
+        let mut shape = sr
             .items
             .iter()
             .map(|place_holder| {
@@ -769,9 +824,59 @@ impl Table {
                 }
             })
             .collect::<Option<Vec<_>>>()
-        else {
-            return Err("failed to reference an element of `shape_representation.items`".into());
-        };
+            .ok_or::<StepConvertingError>(
+                "failed to reference an element of `shape_representation.items`".into(),
+            )?;
+
+        // The SDR's used representation can be a placement/frame-only
+        // representation while the definition geometry lives in a separate
+        // `ADVANCED_BREP_SHAPE_REPRESENTATION`. The two are connected by an
+        // explicit `SHAPE_REPRESENTATION_RELATIONSHIP` whose `rep_1` is the
+        // used representation and whose `rep_2` is the geometry representation.
+        // Follow that source relationship so the definition BREP becomes
+        // reachable alongside the retained frame. The placement information is
+        // preserved: both shapes stay in the node's shape vector.
+        let mut linked = self
+            .shape_representation_relationship
+            .values()
+            .filter_map(|relationship| {
+                let PlaceHolder::Ref(Name::Entity(rep_1)) = &relationship.rep_1 else {
+                    return None;
+                };
+                (*rep_1 == *sr_idx).then_some(relationship)
+            })
+            .collect::<Vec<_>>();
+        linked.sort_by_key(|relationship| match &relationship.rep_2 {
+            PlaceHolder::Ref(Name::Entity(rep_2)) => *rep_2,
+            _ => u64::MAX,
+        });
+        for relationship in linked {
+            let PlaceHolder::Ref(Name::Entity(rep_2)) = &relationship.rep_2 else {
+                return Err(
+                    "failed to reference the geometry `shape_representation` of a `shape_representation_relationship`"
+                        .into(),
+                );
+            };
+            let Some(geometry_rep) = self.shape_representation.get(rep_2) else {
+                return Err("failed to reference the geometry `shape_representation`".into());
+            };
+            let geometry = geometry_rep
+                .items
+                .iter()
+                .map(|place_holder| {
+                    if let &PlaceHolder::Ref(Name::Entity(item_idx)) = place_holder {
+                        ProductShape::try_from_index(item_idx, self).ok()
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Option<Vec<_>>>()
+                .ok_or::<StepConvertingError>(
+                    "failed to reference an element of the geometry `shape_representation.items`"
+                        .into(),
+                )?;
+            shape.extend(geometry);
+        }
 
         Ok(NodeEntity { shape, attrs })
     }
@@ -834,7 +939,14 @@ impl Table {
         let mut product_entities = Vec::<ProductEntity>::new();
         let mut indices_map = HashMap::<u64, usize>::new();
         let mut assy_nodes = Vec::<(AssembleEntity, (u64, u64))>::new();
-        for (&pds_idx, pds) in &self.product_definition_shape {
+        // Iterate in entity-id order so the node numbering of the graph is a
+        // function of the document, not of HashMap iteration order. A
+        // downstream consumer assigns geometry and occurrence indices from
+        // these node numbers; without the sort the same file could enumerate
+        // its assembly differently on every process.
+        let mut pds_entries = self.product_definition_shape.iter().collect::<Vec<_>>();
+        pds_entries.sort_by_key(|(&id, _)| id);
+        for (&pds_idx, pds) in pds_entries {
             let &PlaceHolder::Ref(Name::Entity(idx)) = &pds.definition else {
                 return Err("failed to reference `product_definition_shape.definition`".into());
             };
@@ -1383,5 +1495,331 @@ mod vertex_loop_tests {
             orientation: true,
         };
         assert!(bound.bound_holder(&Table::default()).is_none());
+    }
+}
+
+/// Assembly definition-geometry attachment through the explicit
+/// `SHAPE_REPRESENTATION_RELATIONSHIP`.
+///
+/// The fixture models the `core_xy.step` encoding: every part definition's
+/// `SHAPE_DEFINITION_REPRESENTATION` points at a placement-only
+/// `SHAPE_REPRESENTATION`, and the actual BREP lives in a separate
+/// `ADVANCED_BREP_SHAPE_REPRESENTATION` reached through an explicit
+/// `SHAPE_REPRESENTATION_RELATIONSHIP` whose `rep_1` is the placement
+/// representation.
+#[cfg(test)]
+mod step_assy_geometry_tests {
+    use super::*;
+
+    const FIXTURE: &str = r#"ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('Fixture'),'2;1');
+FILE_NAME('assembly_geometry_fixture','2026-01-01T00:00:00',(''),(''),
+  '','','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));
+ENDSEC;
+DATA;
+#1 = APPLICATION_CONTEXT('assembly context');
+#3 = PRODUCT_CONTEXT('',#1,'mechanical');
+#4 = PRODUCT_DEFINITION_CONTEXT('part definition',#1,'design');
+#5 = REPRESENTATION_CONTEXT('Context #1','3D Context');
+#10 = PRODUCT('assembly','assembly','',(#3));
+#11 = PRODUCT_DEFINITION_FORMATION('','',#10);
+#12 = PRODUCT_DEFINITION('','',#11,#4);
+#13 = PRODUCT_DEFINITION_SHAPE('','',#12);
+#20 = PRODUCT('partA','partA','',(#3));
+#21 = PRODUCT_DEFINITION_FORMATION('','',#20);
+#22 = PRODUCT_DEFINITION('','',#21,#4);
+#23 = PRODUCT_DEFINITION_SHAPE('','',#22);
+#30 = PRODUCT('partB','partB','',(#3));
+#31 = PRODUCT_DEFINITION_FORMATION('','',#30);
+#32 = PRODUCT_DEFINITION('','',#31,#4);
+#33 = PRODUCT_DEFINITION_SHAPE('','',#32);
+#40 = PRODUCT('partC','partC','',(#3));
+#41 = PRODUCT_DEFINITION_FORMATION('','',#40);
+#42 = PRODUCT_DEFINITION('','',#41,#4);
+#43 = PRODUCT_DEFINITION_SHAPE('','',#42);
+#50 = PRODUCT('partD','partD','',(#3));
+#51 = PRODUCT_DEFINITION_FORMATION('','',#50);
+#52 = PRODUCT_DEFINITION('','',#51,#4);
+#53 = PRODUCT_DEFINITION_SHAPE('','',#52);
+#100 = DIRECTION('',(0.,0.,1.));
+#101 = DIRECTION('',(1.,0.,0.));
+#102 = CARTESIAN_POINT('',(0.,0.,0.));
+#103 = AXIS2_PLACEMENT_3D('',#102,#100,#101);
+#104 = PLANE('',#103);
+#105 = CARTESIAN_POINT('',(0.,0.,0.));
+#106 = CARTESIAN_POINT('',(1.,0.,0.));
+#107 = CARTESIAN_POINT('',(0.,1.,0.));
+#108 = VERTEX_POINT('',#105);
+#109 = VERTEX_POINT('',#106);
+#110 = VERTEX_POINT('',#107);
+#111 = DIRECTION('',(1.,0.,0.));
+#112 = VECTOR('',#111,1.);
+#113 = LINE('',#105,#112);
+#114 = DIRECTION('',(-1.,1.,0.));
+#115 = VECTOR('',#114,1.);
+#116 = LINE('',#106,#115);
+#117 = DIRECTION('',(0.,-1.,0.));
+#118 = VECTOR('',#117,1.);
+#119 = LINE('',#107,#118);
+#120 = EDGE_CURVE('',#108,#109,#113,.T.);
+#121 = EDGE_CURVE('',#109,#110,#116,.T.);
+#122 = EDGE_CURVE('',#110,#108,#119,.T.);
+#123 = ORIENTED_EDGE('',*,*,#120,.T.);
+#124 = ORIENTED_EDGE('',*,*,#121,.T.);
+#125 = ORIENTED_EDGE('',*,*,#122,.T.);
+#126 = EDGE_LOOP('',(#123,#124,#125));
+#127 = FACE_OUTER_BOUND('',#126,.T.);
+#128 = ADVANCED_FACE('',(#127),#104,.T.);
+#129 = CLOSED_SHELL('',(#128));
+#130 = MANIFOLD_SOLID_BREP('',#129);
+#131 = MANIFOLD_SOLID_BREP('',#129);
+#132 = ADVANCED_BREP_SHAPE_REPRESENTATION('',(#130),#5);
+#133 = ADVANCED_BREP_SHAPE_REPRESENTATION('',(#131),#5);
+#134 = ADVANCED_BREP_SHAPE_REPRESENTATION('',(#141,#130),#5);
+#140 = CARTESIAN_POINT('',(0.,0.,0.));
+#141 = AXIS2_PLACEMENT_3D('',#140,#100,#101);
+#143 = CARTESIAN_POINT('',(1.,0.,0.));
+#144 = AXIS2_PLACEMENT_3D('',#143,#100,#101);
+#145 = CARTESIAN_POINT('',(-1.,0.,0.));
+#146 = AXIS2_PLACEMENT_3D('',#145,#100,#101);
+#147 = CARTESIAN_POINT('',(2.,0.,0.));
+#149 = AXIS2_PLACEMENT_3D('',#147,#100,#101);
+#150 = CARTESIAN_POINT('',(0.,0.,1.));
+#153 = AXIS2_PLACEMENT_3D('',#150,#100,#101);
+#160 = SHAPE_REPRESENTATION('partA',(#141),#5);
+#161 = SHAPE_REPRESENTATION('partB',(#141),#5);
+#162 = SHAPE_REPRESENTATION('partC',(#141),#5);
+#163 = SHAPE_REPRESENTATION('main',(#141,#144,#146,#149,#153),#5);
+#170 = SHAPE_REPRESENTATION_RELATIONSHIP('','',#160,#132);
+#171 = SHAPE_REPRESENTATION_RELATIONSHIP('','',#161,#133);
+#180 = SHAPE_DEFINITION_REPRESENTATION(#23,#160);
+#181 = SHAPE_DEFINITION_REPRESENTATION(#33,#161);
+#182 = SHAPE_DEFINITION_REPRESENTATION(#43,#162);
+#183 = SHAPE_DEFINITION_REPRESENTATION(#53,#134);
+#184 = SHAPE_DEFINITION_REPRESENTATION(#13,#163);
+#600 = NEXT_ASSEMBLY_USAGE_OCCURRENCE('occA','','',#12,#22,'');
+#601 = NEXT_ASSEMBLY_USAGE_OCCURRENCE('occB1','','',#12,#32,'');
+#602 = NEXT_ASSEMBLY_USAGE_OCCURRENCE('occB2','','',#12,#32,'');
+#603 = NEXT_ASSEMBLY_USAGE_OCCURRENCE('occC','','',#12,#42,'');
+#604 = NEXT_ASSEMBLY_USAGE_OCCURRENCE('occD','','',#12,#52,'');
+#610 = PRODUCT_DEFINITION_SHAPE('','',#600);
+#611 = PRODUCT_DEFINITION_SHAPE('','',#601);
+#612 = PRODUCT_DEFINITION_SHAPE('','',#602);
+#613 = PRODUCT_DEFINITION_SHAPE('','',#603);
+#614 = PRODUCT_DEFINITION_SHAPE('','',#604);
+#630 = ITEM_DEFINED_TRANSFORMATION('','',#141,#144);
+#631 = ITEM_DEFINED_TRANSFORMATION('','',#141,#146);
+#632 = ITEM_DEFINED_TRANSFORMATION('','',#141,#149);
+#633 = ITEM_DEFINED_TRANSFORMATION('','',#141,#153);
+#634 = ITEM_DEFINED_TRANSFORMATION('','',#141,#144);
+#620 = ( REPRESENTATION_RELATIONSHIP(' ',' ',#160,#163)
+  REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#630)
+  SHAPE_REPRESENTATION_RELATIONSHIP() );
+#621 = ( REPRESENTATION_RELATIONSHIP(' ',' ',#161,#163)
+  REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#631)
+  SHAPE_REPRESENTATION_RELATIONSHIP() );
+#622 = ( REPRESENTATION_RELATIONSHIP(' ',' ',#161,#163)
+  REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#632)
+  SHAPE_REPRESENTATION_RELATIONSHIP() );
+#623 = ( REPRESENTATION_RELATIONSHIP(' ',' ',#162,#163)
+  REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#633)
+  SHAPE_REPRESENTATION_RELATIONSHIP() );
+#624 = ( REPRESENTATION_RELATIONSHIP(' ',' ',#134,#163)
+  REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#634)
+  SHAPE_REPRESENTATION_RELATIONSHIP() );
+#700 = CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#620,#610);
+#701 = CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#621,#611);
+#702 = CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#622,#612);
+#703 = CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#623,#613);
+#704 = CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#624,#614);
+ENDSEC;
+END-ISO-10303-21;
+"#;
+
+    fn mapped_assembly() -> (
+        StepAssembly,
+        Assembly<Vec<ProductShape>, PartAttrs, Matrix4, PartAttrs>,
+    ) {
+        let table = Table::from_step(FIXTURE).expect("fixture must parse");
+        let assy = table.step_assy().expect("assembly must build");
+        let mapped = assy.map(
+            |node: &NodeEntity<Vec<ProductShape>, PartAttrs>| NodeEntity {
+                shape: node.shape.clone(),
+                attrs: node.attrs.clone(),
+            },
+            |edge: &EdgeEntity<NodeMatrix, PartAttrs>| EdgeEntity {
+                matrix: Matrix4::try_from(&edge.matrix).expect("edge transform must convert"),
+                attrs: edge.attrs.clone(),
+            },
+        );
+        (assy, mapped)
+    }
+
+    fn node_shape<'a>(
+        mapped: &'a Assembly<Vec<ProductShape>, PartAttrs, Matrix4, PartAttrs>,
+        name: &str,
+    ) -> &'a Vec<ProductShape> {
+        mapped
+            .all_nodes()
+            .find(|node| node.entity().attrs.name == name)
+            .expect("node must exist")
+            .shape()
+    }
+
+    fn count_variants(shape: &[ProductShape]) -> (usize, usize, usize) {
+        let mut matrix = 0;
+        let mut solid = 0;
+        let mut shells = 0;
+        for shape in shape {
+            match shape {
+                ProductShape::Matrix(_) => matrix += 1,
+                ProductShape::Solid(..) => solid += 1,
+                ProductShape::Shells(..) => shells += 1,
+            }
+        }
+        (matrix, solid, shells)
+    }
+
+    /// T2 — an SDR whose used representation is placement-only still exposes
+    /// the linked definition BREP *and* keeps the placement frame.
+    #[test]
+    fn a_placement_representation_retains_placement_and_gains_geometry() {
+        let (_assy, mapped) = mapped_assembly();
+        let (matrix, solid, shells) = count_variants(node_shape(&mapped, "partA"));
+        assert_eq!(
+            (matrix, solid, shells),
+            (1, 1, 0),
+            "partA must carry both its placement frame and its linked solid"
+        );
+        assert_eq!(
+            (count_variants(node_shape(&mapped, "partB"))),
+            (1, 1, 0),
+            "partB must carry both its placement frame and its linked solid"
+        );
+    }
+
+    /// The linked solid exposes the source shell entity ids it was converted
+    /// from, so a consumer can re-derive the DIAG-002 conversion-loss stream
+    /// without re-resolving the assembly.
+    #[test]
+    fn a_linked_solid_exposes_its_source_shell_ids() {
+        let (_assy, mapped) = mapped_assembly();
+        let shape = node_shape(&mapped, "partA");
+        let (_, source_ids) = shape
+            .iter()
+            .find_map(|shape| match shape {
+                ProductShape::Solid(solid, source) => Some((solid, source)),
+                _ => None,
+            })
+            .expect("partA carries a solid");
+        assert_eq!(
+            source_ids,
+            &vec![129],
+            "the solid's outer shell is the source shell entity id"
+        );
+    }
+
+    /// T1 — an SDR already pointing directly at geometry keeps working.
+    #[test]
+    fn a_direct_geometry_representation_still_converts() {
+        let (_assy, mapped) = mapped_assembly();
+        let (matrix, solid, shells) = count_variants(node_shape(&mapped, "partD"));
+        assert_eq!(
+            (matrix, solid, shells),
+            (1, 1, 0),
+            "partD's used representation carries a frame and a solid directly"
+        );
+    }
+
+    /// T3 — a product with no source geometry relationship gets no invented
+    /// attachment.
+    #[test]
+    fn a_product_without_a_geometry_relationship_gets_no_geometry() {
+        let (_assy, mapped) = mapped_assembly();
+        let (matrix, solid, shells) = count_variants(node_shape(&mapped, "partC"));
+        assert_eq!(
+            (matrix, solid, shells),
+            (1, 0, 0),
+            "partC has only a frame; no geometry may be invented"
+        );
+    }
+
+    /// T4 — two occurrences of one definition share one node (one geometry),
+    /// stay distinct occurrences, and carry distinct world transforms.
+    #[test]
+    fn a_repeated_definition_produces_distinct_occurrences_sharing_one_node() {
+        let (assy, mapped) = mapped_assembly();
+        let top = mapped.top_nodes().next().expect("a root must exist");
+        let paths = mapped.paths_iter(top.index()).collect::<Vec<_>>();
+        let occurrences = paths
+            .iter()
+            .filter(|path| !path.edges().is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            occurrences.len(),
+            5,
+            "five source occurrences, one per NAUO edge"
+        );
+        assert_eq!(
+            assy.len(),
+            5,
+            "five nodes: root, partA, partB, partC, partD"
+        );
+
+        let b_index = mapped
+            .all_nodes()
+            .find(|node| node.entity().attrs.name == "partB")
+            .expect("partB must exist")
+            .index();
+        let b_paths = occurrences
+            .iter()
+            .filter(|path| path.terminal_node().index() == b_index)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            b_paths.len(),
+            2,
+            "both occurrences terminate at the same definition node"
+        );
+        let translations = b_paths
+            .iter()
+            .map(|path| path.matrix().w)
+            .collect::<Vec<_>>();
+        assert!(
+            translations[0] != translations[1],
+            "the two placements differ"
+        );
+        let mut xs = translations.iter().map(|t| t.x).collect::<Vec<_>>();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!(
+            (xs[0] - (-1.0)).abs() < 1.0e-9 && (xs[1] - 2.0).abs() < 1.0e-9,
+            "the two B placements must be the source frames: {xs:?}"
+        );
+    }
+
+    /// The linked geometry is reachable and the occurrence world transform
+    /// equals the source `ITEM_DEFINED_TRANSFORMATION` result.
+    #[test]
+    fn occurrence_world_transform_matches_the_source_frame() {
+        let (_assy, mapped) = mapped_assembly();
+        let top = mapped.top_nodes().next().expect("a root must exist");
+        let a_index = mapped
+            .all_nodes()
+            .find(|node| node.entity().attrs.name == "partA")
+            .expect("partA must exist")
+            .index();
+        let path = mapped
+            .paths_iter(top.index())
+            .find(|path| !path.edges().is_empty() && path.terminal_node().index() == a_index)
+            .expect("partA occurrence must exist");
+        let world = path.matrix();
+        assert!(
+            (world.w.x - 1.0).abs() < 1.0e-9
+                && world.w.y.abs() < 1.0e-9
+                && world.w.z.abs() < 1.0e-9,
+            "partA occurrence world transform must be the source placement, got {:?}",
+            world.w
+        );
     }
 }

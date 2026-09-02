@@ -40,10 +40,32 @@ pub mod specifieds;
 /// Declares some decorators
 pub mod decorators;
 
+/// The canonical curve and surface model (BG-CE-006): `Curve` and `Surface`
+/// with first-class analytic carriers, owned by this crate.
+pub mod canonical;
+
+/// BG-SOL-P0-REC: the structural recognizer (a witness, not a type).
+/// Scaffolded empty; the packet fills it.
+pub mod recognize;
+
+/// BG-SOL-P0-SPAN: the lazy rational-Bézier span cache. Scaffolded empty; the
+/// packet fills it.
+pub mod span;
+
+/// BG-SOL-S1-ARRANGE: the certified planar arrangement over analytic profiles.
+/// Scaffolded empty; the packet fills it.
+pub mod arrange;
+
+/// BG-CG-000-CONTRACT: the constructive geometry contract skeleton
+/// (`SpineFrameRecipe`, frame/profile laws, sampling policy, errors).
+/// Scaffolded with stub bodies; later CG packets fill them.
+pub mod constructive;
+
 /// re-export all modules.
 pub mod prelude {
     use crate::*;
     pub use base::*;
+    pub use canonical::*;
     pub use decorators::*;
     pub use errors::*;
     pub use nurbs::*;

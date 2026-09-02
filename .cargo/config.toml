@@ -1,0 +1,11 @@
+# Mirrored from the look repository's .cargo/config.toml.
+#
+# truck-evidence depends on inari (the BG-ENC interval engine), which requires
+# AVX+FMA on x86_64: its directed-rounding SIMD backend `compile_error!`s
+# without them. There is no per-crate mechanism (build-script
+# `cargo:rustc-flags` only allows -l/-L), so the flag is global per-target.
+# rustc does NOT contract `a*b+c` into FMA without fast-math, so float results
+# remain bit-identical; the only effect is x86_64 codegen/performance variance.
+# The aarch64 backend needs no flag.
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-Ctarget-feature=+avx,+fma"]

@@ -38,3 +38,18 @@ mod alternative;
 /// Fillets can be applied to a single edge whose end vertices are each adjacent to exactly three faces.
 /// Continuous edges are currently unsupported.
 pub mod fillet;
+
+/// BG-SOL-RW1-MATERIAL: the §13.1 material-state fragment-selection
+/// primitive.
+pub mod boolean;
+
+/// BG-CAD-P3-SPLIT: section + split by plane via the landed Boolean.
+pub mod section;
+
+/// BG-CAD-P6-REWRITE: the LocalBoundaryRewrite engine, proven on plane-plane
+/// chamfer.
+pub mod rewrite;
+
+/// BG-CAD-P8-FACADE: the build123d-shaped facade over the landed kernel
+/// entries (P1-P7) and the conformance battery's surface.
+pub mod facade;

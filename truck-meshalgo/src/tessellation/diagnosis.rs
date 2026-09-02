@@ -24,7 +24,9 @@
 
 use serde::Serialize;
 
-use super::triangulation::{ConstraintRole, SegmentOrigin, TessellationFailureReason};
+use super::triangulation::{
+    ConstraintRole, SegmentOrigin, TessellationFailure, TessellationFailureReason,
+};
 
 // ---------------------------------------------------------------------------
 // Origin classification
@@ -906,30 +908,328 @@ pub struct ArrSignature {
 }
 
 // ---------------------------------------------------------------------------
+// Production diagnostic contract (DIAG-002)
+// ---------------------------------------------------------------------------
+
+/// The version of the serialized diagnostic schema.
+///
+/// Analysis scripts must key off this field, never off `Debug` formatting.
+/// Future versions may add fields without breaking a v1 reader.
+pub const DIAGNOSTIC_SCHEMA_VERSION: u32 = 1;
+
+/// The terminal disposition of a diagnosed face.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum DiagnosticDisposition {
+    /// A genuine tessellation failure: the face did not render.
+    Failed,
+    /// A certified intrinsic rejection (`RejectedDegenerate` / a certificate-
+    /// backed `RejectedAmbiguous`). Not an unresolved correctness failure, but
+    /// precisely the source pathology a future corpus wants visible.
+    RejectedIntrinsic,
+}
+
+/// The coarse pipeline stage where a face was refused.
+///
+/// Recorded where the refusal occurs, never inferred later from the terminal
+/// reason.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+pub enum FailureStage {
+    /// The face was lost while converting source topology, before tessellation.
+    StepConversion,
+    /// A source edge traversal could not be established.
+    SourceEdgeTraversal,
+    /// A boundary sample could not be projected to the face's surface.
+    BoundaryProjection,
+    /// The periodic branch of a lift step could not be resolved.
+    BoundaryLift,
+    /// The lifted boundary could not be assembled.
+    BoundaryConstruction,
+    /// Validity classification certified the face intrinsically non-renderable.
+    ValidityClassification,
+    /// The parity/CDT arrangement contradicted itself.
+    Arrangement,
+    /// A constraint could not be inserted into the triangulation.
+    ConstraintInsertion,
+    /// No material region could be selected.
+    MaterialSelection,
+    /// Realized triangles failed validation.
+    TriangleValidation,
+    /// Refinement could not produce an acceptable mesh.
+    Refinement,
+    /// A surface evaluation produced a non-finite result.
+    SurfaceEvaluation,
+    /// The stage could not be established.
+    Other,
+}
+
+/// The coarse stage a terminal reason implies, for call sites that only have
+/// the reason. Refusal sites that know their stage pass it explicitly.
+pub fn failure_stage_for_reason(reason: TessellationFailureReason) -> FailureStage {
+    use TessellationFailureReason as R;
+    match reason {
+        R::BoundaryProjectionFailed | R::BoundaryPointOffSurface => {
+            FailureStage::BoundaryProjection
+        }
+        R::BoundaryWireEmpty | R::BoundaryConstructionFailed => FailureStage::BoundaryConstruction,
+        R::EdgeTraversalUnresolved => FailureStage::SourceEdgeTraversal,
+        R::AmbiguousLift | R::RejectedAmbiguous => FailureStage::BoundaryLift,
+        R::RejectedDegenerate => FailureStage::ValidityClassification,
+        R::ContradictoryDualParity | R::CdtConstructionFailed => FailureStage::Arrangement,
+        R::ConstraintOverlapUnsupported
+        | R::ConstraintInsertionIncomplete
+        | R::ConstraintChainNotClosed
+        | R::ConstraintIntersectionUnsupported
+        | R::ConstraintRoleMissing
+        | R::DegenerateConstraintChain => FailureStage::ConstraintInsertion,
+        R::NoOddParityRegion | R::NoFiniteTrianglesAfterParity => FailureStage::MaterialSelection,
+        R::NonFinitePosition => FailureStage::SurfaceEvaluation,
+    }
+}
+
+/// A world-space bounding box, cheap to accumulate from realized samples.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct DiagnosticBBox3 {
+    /// The lower corner `(x, y, z)`.
+    pub lo: [f64; 3],
+    /// The upper corner `(x, y, z)`.
+    pub hi: [f64; 3],
+}
+
+impl DiagnosticBBox3 {
+    /// The box's diagonal, an O(1) extent surrogate.
+    pub fn diameter(self) -> f64 {
+        let d = [
+            self.hi[0] - self.lo[0],
+            self.hi[1] - self.lo[1],
+            self.hi[2] - self.lo[2],
+        ];
+        (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+    }
+
+    /// The box's full surface area, a scale-invariant area surrogate.
+    pub fn surface_area(self) -> f64 {
+        let d = [
+            self.hi[0] - self.lo[0],
+            self.hi[1] - self.lo[1],
+            self.hi[2] - self.lo[2],
+        ];
+        2.0 * (d[0] * d[1] + d[1] * d[2] + d[0] * d[2])
+    }
+}
+
+/// A parameter-space bounding box.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct DiagnosticBBox2 {
+    /// The lower corner `(u, v)`.
+    pub lo: [f64; 2],
+    /// The upper corner `(u, v)`.
+    pub hi: [f64; 2],
+}
+
+/// The mechanism behind a `BoundaryProjectionFailed` refusal.
+///
+/// Chosen at the refusal site from the projection attempt the production chain
+/// just made, so a corpus can partition the population without re-running the
+/// model with a bespoke probe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+pub enum ProjectionFailureKind {
+    /// No search produced any usable inverse candidate.
+    NoInverseCandidate,
+    /// Every candidate lies further from the surface than the acceptance
+    /// tolerance.
+    ResidualAboveTolerance,
+    /// Only part of the boundary projected; the face failed mid-walk.
+    PartialProjection,
+    /// The inverse was not unique; production could not choose.
+    AmbiguousInverse,
+    /// A periodic branch could not be disambiguated.
+    PeriodicBranchAmbiguous,
+    /// The candidate landed outside the surface's declared parameter range.
+    EvaluatorOutOfDomain,
+    /// A seam discontinuity broke the walk.
+    SeamDiscontinuity,
+    /// The iteration stopped on a singular Jacobian.
+    SingularEvaluation,
+    /// The surface evaluated non-finite.
+    NonFiniteEvaluation,
+    /// The mechanism could not be classified from recorded evidence.
+    Other,
+}
+
+/// The structured local witness behind a `BoundaryProjectionFailed` refusal.
+///
+/// Every field is populated when the value was already in hand at the refusal
+/// site; nothing here is produced by an additional geometric solve.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ProjectionRefusalWitness {
+    /// The classified refusal mechanism.
+    pub kind: ProjectionFailureKind,
+    /// Boundary samples the walk presented.
+    pub attempted_samples: usize,
+    /// Samples that projected successfully before the refusal.
+    pub successful_samples: usize,
+    /// Samples whose projection failed.
+    pub failed_samples: usize,
+    /// Index of the first failing sample, when known.
+    pub first_failed_sample: Option<usize>,
+    /// Best world residual over the failing point's candidates.
+    pub min_residual: Option<f64>,
+    /// Worst world residual over the failing point's candidates.
+    pub max_residual: Option<f64>,
+    /// The caller's acceptance tolerance.
+    pub acceptance_tolerance: Option<f64>,
+    /// The source edge traversal parameter of the failing sample, when known.
+    pub source_parameter: Option<f64>,
+    /// The best candidate's parameter, when one was found.
+    pub candidate_uv: Option<[f64; 2]>,
+    /// The world point that failed to project.
+    pub world_point: Option<[f64; 3]>,
+    /// The number of periodic copies considered, when a branch was ambiguous.
+    pub periodic_candidate_count: Option<usize>,
+}
+
+/// The identity and incidence evidence of a source-edge traversal refusal.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SourceEdgeWitness {
+    /// Which of the face's bounds the failing edge belonged to.
+    pub source_bound: Option<usize>,
+    /// Which edge use within that bound was being traversed.
+    pub source_edge_use: Option<usize>,
+    /// The world residual of each of the edge's endpoints.
+    pub endpoint_residuals: Option<[f64; 2]>,
+    /// The source's declared geometric uncertainty.
+    pub declared_source_uncertainty: Option<f64>,
+    /// The incidence tolerance actually applied.
+    pub effective_incidence_tolerance: Option<f64>,
+    /// The caller's chord tolerance.
+    pub caller_tolerance: Option<f64>,
+    /// How the edge's carrier closure was classified.
+    pub carrier_closure: Option<ObservedClosure>,
+}
+
+/// The witness behind an `AmbiguousLift` refusal.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct LiftWitness {
+    /// Periodic copies the branch had to choose between.
+    pub candidate_lift_count: usize,
+    /// Which axes were periodic at the refusal.
+    pub periodic_axes: PeriodicAxes,
+    /// The integer deck shifts each candidate implied, when retained.
+    pub candidate_deck_shifts: Vec<[i64; 2]>,
+    /// The closure/seam evidence that was available.
+    pub closure_seam_evidence: Option<ObservedClosure>,
+    /// Why no candidate dominated, in one stable tag.
+    pub dominance_explanation: Option<&'static str>,
+}
+
+/// The witness behind a `BoundaryConstructionFailed` refusal.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct BoundaryWitness {
+    /// Which of the face's bounds was being assembled.
+    pub bound: Option<usize>,
+    /// Which edge/piece within that bound was being assembled.
+    pub edge_or_piece: Option<usize>,
+    /// Boundary pieces attempted.
+    pub pieces_attempted: usize,
+    /// Boundary pieces accepted.
+    pub pieces_accepted: usize,
+    /// Point count of each attempted piece.
+    pub point_counts: Vec<usize>,
+    /// Constraint segments that would have been presented to the CDT.
+    pub constraints_that_would_be_presented: usize,
+    /// The exact construction refusal, when named.
+    pub refusal: Option<&'static str>,
+}
+
+/// The tolerances the tessellation actually operated under.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ToleranceWitness {
+    /// The chord tolerance passed to the tessellator.
+    pub chord_tolerance: f64,
+    /// The source's declared geometric uncertainty.
+    pub source_geometric_uncertainty: Option<f64>,
+    /// The incidence tolerance applied to source-edge traversal.
+    pub incidence_tolerance: Option<f64>,
+    /// The GEO-005 compatibility factor on the acceptance tolerance.
+    pub compatibility_factor: Option<f64>,
+}
+
+// ---------------------------------------------------------------------------
 // Failed face diagnosis
 // ---------------------------------------------------------------------------
 
-/// One structured record per failed face.
+/// One structured, machine-readable record per terminally failed or
+/// intrinsically rejected face.
 ///
-/// The raw evidence fields are more important than the final bucket.
-/// `model_id` and `surface_family` are filled by the corpus runner; other
-/// fields are produced inside the tessellation pipeline.
+/// This is the production contract (DIAG-002): every failed/rejected face
+/// emits exactly one of these by default, with no environment variable needed
+/// to enable collection. Fields are filled from values already computed during
+/// normal processing; a quantity that would require an additional geometric
+/// solve is left `None` rather than computed for the record.
+///
+/// `document_id` and `surface_family` are filled by the corpus runner (or the
+/// CLI's document context); other fields are produced inside the tessellation
+/// pipeline.
 #[derive(Clone, Debug, Serialize)]
-pub struct FailedFaceDiagnosis {
-    /// The model identifier (STEP file name), filled by the corpus runner.
-    pub model_id: String,
+pub struct FaceDiagnosticRecord {
+    /// Schema version; analysis scripts key off this field.
+    pub schema_version: u32,
+    /// The document/model identifier, when the caller supplied one.
+    pub document_id: Option<String>,
     /// The document-local source face entity id, when available.
     pub source_face_id: Option<u64>,
+    /// The source face *use* id, when available (STEP's `ORIENTED_FACE`).
+    pub source_use_id: Option<u64>,
+    /// The terminal disposition.
+    pub disposition: DiagnosticDisposition,
     /// The typed terminal failure reason.
     pub terminal_reason: TessellationFailureReason,
+    /// The coarse stage where the face was refused.
+    pub failure_stage: FailureStage,
     /// The coarse surface family, filled by the corpus runner.
     pub surface_family: SurfaceFamily,
-    /// The parameter-space chart rank (0, 1, or 2).
-    pub chart_rank: u8,
-    /// Which axes are periodic.
-    pub periodic_axes: PeriodicAxes,
     /// The number of bounds on the face.
     pub bound_count: usize,
+    /// The number of source edge uses the face references.
+    pub edge_use_count: usize,
+    /// The number of distinct source vertices the face references.
+    pub distinct_vertex_count: usize,
+    /// The world-space numerical rank of the boundary, when measured.
+    pub world_rank: Option<u8>,
+    /// The world-space extent of the realized boundary samples.
+    pub world_bbox: Option<DiagnosticBBox3>,
+    /// `world_bbox` diagonal.
+    pub world_diameter: Option<f64>,
+    /// An O(1) area surrogate of the realized boundary extent.
+    pub approximate_world_area: Option<f64>,
+    /// Which axes are periodic.
+    pub periodic_axes: PeriodicAxes,
+    /// The source-declared closure, when the lattice certified it.
+    pub source_closed_axes: Option<PeriodicAxes>,
+    /// The parameter-space chart rank (0, 1, or 2).
+    pub uv_rank: Option<u8>,
+    /// The parameter-space extent of the realized boundary samples.
+    pub uv_bbox: Option<DiagnosticBBox2>,
+    /// The tolerances the tessellation operated under.
+    pub tolerance: ToleranceWitness,
+    /// The source-edge traversal refusal witness, when applicable.
+    pub source_edge: Option<SourceEdgeWitness>,
+    /// The boundary-projection refusal witness, when applicable.
+    pub projection: Option<ProjectionRefusalWitness>,
+    /// The lift refusal witness, when applicable.
+    pub lift: Option<LiftWitness>,
+    /// The boundary-construction refusal witness, when applicable.
+    pub boundary: Option<BoundaryWitness>,
+    /// The CDT and material pipeline stage counts.
+    pub cdt_stages: CdtStageVector,
+    /// FACE-VALIDITY: the certificate backing a hard degenerate rejection,
+    /// when the face was rejected as intrinsically non-renderable.
+    pub validity_certificate: Option<crate::tessellation::validity::FaceValidityCertificate>,
+    /// What each formal recovery route decided about this face.
+    pub route_decisions: Vec<RouteDecisionRecord>,
+    /// The parameter-space chart rank (0, 1, or 2), retained for census
+    /// compatibility.
+    pub chart_rank: u8,
     /// The number of authoritative-source-trim segments.
     pub source_segment_count: usize,
     /// The number of synthetic (closure + seam) segments.
@@ -952,23 +1252,12 @@ pub struct FailedFaceDiagnosis {
     /// The structured conflict witnesses, when the failure is an insertion
     /// failure.
     pub insertion_conflicts: Vec<ConstraintConflictWitness>,
-    /// The structured witnesses for constraint *overlaps*, held apart from
-    /// [`Self::insertion_conflicts`] because the loss bucket is derived from
-    /// that vector and must keep meaning what it meant.
+    /// The structured witnesses for constraint *overlaps*.
     pub overlap_conflicts: Vec<ConstraintConflictWitness>,
-    /// Overlaps whose blocking edge could not be named. Non-zero means pair
-    /// evidence is genuinely missing, rather than absent because there was no
-    /// overlap.
+    /// Overlaps whose blocking edge could not be named.
     pub unattributed_overlaps: usize,
-    /// The CDT and material pipeline stage counts.
-    pub cdt_stages: CdtStageVector,
     /// The deep projection witness (PROJ-002), when the probe ran.
     pub projection_witness: Option<ProjectionWitness>,
-    /// FACE-VALIDITY: the certificate backing a hard degenerate rejection,
-    /// when the face was rejected as intrinsically non-renderable.
-    pub validity_certificate: Option<crate::tessellation::validity::FaceValidityCertificate>,
-    /// What each formal recovery route decided about this face.
-    pub route_decisions: Vec<RouteDecisionRecord>,
     /// P3b: the periodic-cap route's activation evidence for this face.
     pub cap_activation: Option<CapActivationRecord>,
     /// The deterministic loss bucket.
@@ -1225,6 +1514,24 @@ pub fn proj_domain_recovery_enabled() -> bool {
     formal_recovery_enabled() && recovery_route_enabled("TRUCK_FORMAL_RECOVERY_PROJ_STAGE_C")
 }
 
+/// Whether PROJ-003 Stage D is active: the constrained inverse over the
+/// declared parameter range.
+///
+/// Refinement-only like the stages before it: it runs only where the whole
+/// legacy chain, Stage A, Stage B, and Stage C all returned `None` for a
+/// point. Where the unconstrained Newton iterate escapes the declared range
+/// (an extrapolated branch of a spline that genuinely wraps, or a degenerate
+/// edge), an in-range root can still exist; this runs a fresh inverse
+/// restricted to `D_accept` — a grid over the declared range, then clamped
+/// Newton refinement — and admits the in-range candidate under the same
+/// residual contract. It never clamps a solver answer into the range and never
+/// modulos a non-periodic axis; it only searches inside the range in the first
+/// place. Set `TRUCK_FORMAL_RECOVERY_PROJ_STAGE_D=0` to disable (emergency
+/// withdrawal).
+pub fn proj_domain_constrained_enabled() -> bool {
+    formal_recovery_enabled() && recovery_route_enabled("TRUCK_FORMAL_RECOVERY_PROJ_STAGE_D")
+}
+
 /// Whether the winding-number reading of material parity is active.
 ///
 /// The parity flood floods over the *set* of realized constraint edges, so an
@@ -1242,29 +1549,257 @@ pub fn winding_parity_enabled() -> bool {
 
 /// Whether diagnostic capture is enabled.
 ///
-/// Enabled by `TRUCK_FACE_DIAG_JSONL`, and independently by the cylinder-band
-/// fallback — not as a convenience: that route's admitted population *is* the
-/// `SyntheticSyntheticCrossing` bucket, and the bucket is derived from these
-/// witnesses. The sink is an input to a production decision, not only a
-/// report, so it must be filled whether or not anyone asked for the JSONL.
+/// **Constitutive since DIAG-002**: per-face witness collection is on by
+/// default and requires no enable flag. A failed or rejected face emits one
+/// structured record whether or not anyone asked for the JSONL.
 ///
-/// **Since the band route became default-on (`WAVE-2C`), this is true on a
-/// default run**, where it used to be false. That is a deliberate cost, and it
-/// is the price of the band and cone routes' admission rule rather than a
-/// diagnostic left switched on by accident: without the witnesses there is no
-/// certified way to tell a seam/seam crossing from any other insertion
-/// failure, and the routes would have to attempt every lost face instead of
-/// the population they are proven for. `TRUCK_FORMAL_RECOVERY=0` turns it back
-/// off along with the routes that need it.
+/// Collection stays coupled to the formal recovery chain rather than to any
+/// diagnostic variable, for a production reason: the band and cone routes read
+/// the derived bucket from these witnesses as an *admission rule*, so the sink
+/// is an input to a production decision, not only a report. `TRUCK_FORMAL_RECOVERY=0`
+/// turns collection off together with the routes that consume it. External
+/// *emission* is a separate concern — see [`emission_enabled`].
 pub fn diag_enabled() -> bool {
-    std::env::var_os("TRUCK_FACE_DIAG_JSONL").is_some() || cylinder_band_recovery_enabled()
+    formal_recovery_enabled()
+}
+
+/// Whether an environment variable is an explicit negative (`0`/`off`/`false`/
+/// `no`, case-insensitive). Unset or anything else leaves the default on.
+fn explicitly_disabled(variable: &str) -> bool {
+    match std::env::var(variable) {
+        Err(_) => false,
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "false" | "no"
+        ),
+    }
+}
+
+/// Whether diagnostic records are emitted externally.
+///
+/// On by default: every failed/rejected face writes one machine-readable JSON
+/// line to stderr. `TRUCK_FACE_DIAG=off` suppresses external emission without
+/// changing collection, geometry, or the returned failure. `TRUCK_FACE_DIAG_JSONL=<path>`
+/// redirects emission to the file.
+pub fn emission_enabled() -> bool {
+    !explicitly_disabled("TRUCK_FACE_DIAG")
+}
+
+/// The configured JSONL sink path, when `TRUCK_FACE_DIAG_JSONL` is set.
+fn jsonl_sink_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("TRUCK_FACE_DIAG_JSONL").map(std::path::PathBuf::from)
+}
+
+/// The process-global opaque document context, installed by the CLI before a
+/// tessellation call. Truck deliberately knows nothing about STEP paths; the
+/// caller names the document.
+static DOCUMENT_CONTEXT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Install the opaque document identifier for the tessellation being run.
+///
+/// Truck never interprets the value; it only carries it into every emitted
+/// record so a corpus can say which model a failure came from.
+pub fn set_document_context(document_id: Option<String>) {
+    *DOCUMENT_CONTEXT.lock().unwrap() = document_id;
+}
+
+/// The installed document context, if any.
+pub fn document_context() -> Option<String> {
+    DOCUMENT_CONTEXT.lock().unwrap().clone()
+}
+
+/// The shared file sink, lazily opened on first use and keyed by path so a
+/// change of `TRUCK_FACE_DIAG_JSONL` (as tests do) reopens cleanly.
+///
+/// Guarded by a mutex so parallel faces write whole lines without
+/// interleaving. A broken or unwritable sink falls back to stderr with one
+/// warning; diagnostic I/O must never affect tessellation.
+static FILE_SINK: std::sync::Mutex<Option<(std::path::PathBuf, std::fs::File)>> =
+    std::sync::Mutex::new(None);
+static FILE_SINK_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Write one JSON line to the configured external sink.
+///
+/// Exactly-once per terminal face by construction: the caller invokes this
+/// once, at the terminal finalizer. Serialization failure is swallowed —
+/// diagnostics must never crash or alter geometry processing.
+pub fn emit_record(record: &FaceDiagnosticRecord) {
+    if !emission_enabled() {
+        return;
+    }
+    let line = match serde_json::to_string(record) {
+        Ok(line) => line,
+        Err(_) => return,
+    };
+    emit_json_line(&line);
+}
+
+/// Test-only capture for the default (stderr) emission path, so a test can
+/// assert "no diagnostic-related environment variable set, failure still
+/// emits" without reading the process stderr.
+#[cfg(test)]
+static TEST_CAPTURE: std::sync::Mutex<Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>> =
+    std::sync::Mutex::new(None);
+
+/// Begin capturing default-sink emissions. Returns the shared buffer.
+#[cfg(test)]
+pub(crate) fn capture_emissions() -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+    let arc = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    *TEST_CAPTURE.lock().unwrap() = Some(arc.clone());
+    arc
+}
+
+/// Stop capturing default-sink emissions.
+#[cfg(test)]
+pub(crate) fn clear_emission_capture() {
+    *TEST_CAPTURE.lock().unwrap() = None;
+}
+
+/// Serializes environment-sensitive diagnostic tests, which otherwise race on
+/// the process-global `TRUCK_FACE_DIAG` / `TRUCK_FORMAL_RECOVERY` variables.
+#[cfg(test)]
+pub(crate) static DIAG_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Test-only override for the sink path, consulted before the environment.
+///
+/// Makes a test's assertions immune to concurrent tests that change
+/// `TRUCK_FACE_DIAG_JSONL`: the override wins over the env for sink selection,
+/// so the test's records land in exactly the file the test reads.
+#[cfg(test)]
+static TEST_SINK_OVERRIDE: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
+
+/// Force emission into `path` (or back to the environment default with `None`).
+#[cfg(test)]
+pub(crate) fn set_test_sink(path: Option<std::path::PathBuf>) {
+    *TEST_SINK_OVERRIDE.lock().unwrap() = path;
+}
+
+/// Write one JSON line to the default (stderr) sink, through the test capture
+/// hook when one is installed.
+fn emit_to_default(json: &str) {
+    #[cfg(test)]
+    if let Some(capture) = TEST_CAPTURE.lock().unwrap().as_ref() {
+        capture.lock().unwrap().push(json.to_string());
+        return;
+    }
+    eprintln!("{json}");
+}
+
+/// Write one raw JSON line to the configured external sink.
+///
+/// The same sink selection as [`emit_record`] (default stderr,
+/// `TRUCK_FACE_DIAG_JSONL` redirect, `TRUCK_FACE_DIAG=off` suppression), shared
+/// with package consumers that own their own record types — e.g. Look's import
+/// diagnostics — so one model's records never split between sinks. I/O failure
+/// falls back to stderr; it must never affect the caller's result.
+pub fn emit_json_line(json: &str) {
+    if !emission_enabled() {
+        return;
+    }
+    #[cfg(test)]
+    {
+        if let Some(path) = TEST_SINK_OVERRIDE.lock().unwrap().clone() {
+            emit_to_file(&path, json);
+            return;
+        }
+    }
+    match jsonl_sink_path() {
+        Some(path) => emit_to_file(&path, json),
+        None => emit_to_default(json),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn emit_to_file(path: &std::path::Path, line: &str) {
+    let mut sink = FILE_SINK.lock().unwrap();
+    if sink.as_ref().map(|(open, _)| open != path).unwrap_or(true) {
+        match std::fs::File::create(path) {
+            Ok(file) => *sink = Some((path.to_path_buf(), file)),
+            Err(_) => {
+                if !FILE_SINK_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!(
+                        "look-diag: warning: cannot open diagnostic JSONL sink {}; \
+                         falling back to stderr",
+                        path.display()
+                    );
+                }
+                emit_to_default(line);
+                return;
+            }
+        }
+    }
+    use std::io::Write;
+    if let Some((_, file)) = sink.as_mut() {
+        match writeln!(file, "{line}") {
+            Ok(_) => {}
+            Err(_) => {
+                if !FILE_SINK_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!(
+                        "look-diag: warning: diagnostic JSONL sink {} became unwritable; \
+                         falling back to stderr",
+                        path.display()
+                    );
+                }
+                emit_to_default(line);
+            }
+        }
+    }
+}
+
+/// Reset the shared file sink, for tests that switch `TRUCK_FACE_DIAG_JSONL`
+/// between cases.
+#[cfg(test)]
+pub(crate) fn reset_file_sink_for_tests() {
+    *FILE_SINK.lock().unwrap() = None;
+}
+
+#[cfg(target_arch = "wasm32")]
+fn emit_to_file(_path: &std::path::Path, line: &str) {
+    eprintln!("{line}");
+}
+
+/// Begin per-face diagnostic collection.
+///
+/// Clears the previous face's state and installs the identity and structural
+/// facts of the face about to be processed. Called once per face, before any
+/// stage runs, so a `fail`/`reject` anywhere in the pipeline can build a record
+/// without the caller threading identity through every signature.
+pub(crate) fn begin_face(
+    document_id: Option<String>,
+    source_face_id: Option<u64>,
+    source_use_id: Option<u64>,
+    periodic_axes: PeriodicAxes,
+    bound_count: usize,
+    edge_use_count: usize,
+    distinct_vertex_count: usize,
+    chart_rank: u8,
+    tol: f64,
+    all_periods_certified: bool,
+    source_geometric_uncertainty: Option<f64>,
+) {
+    FACE_DIAGNOSIS_SINK.with(|sink| {
+        let mut sink = sink.borrow_mut();
+        sink.clear();
+        sink.document_id = document_id;
+        sink.source_face_id = source_face_id;
+        sink.source_use_id = source_use_id;
+        sink.periodic_axes = periodic_axes;
+        sink.bound_count = bound_count;
+        sink.edge_use_count = edge_use_count;
+        sink.distinct_vertex_count = distinct_vertex_count;
+        sink.chart_rank = chart_rank;
+        sink.tolerance = tol;
+        sink.all_periods_certified = all_periods_certified;
+        sink.source_geometric_uncertainty = source_geometric_uncertainty;
+    });
+    ROUTE_DECISIONS.with(|s| s.borrow_mut().clear());
 }
 
 /// The thread-local diagnostic sink.
 ///
 /// Accumulates evidence during `insert_to` and is read by the
 /// `tessellate_face` closure after each face. Cleared before each face.
-#[derive(Default)]
 struct DiagnosisSink {
     segments: Vec<SemanticSegmentRef>,
     witnesses: Vec<ConstraintConflictWitness>,
@@ -1303,6 +1838,86 @@ struct DiagnosisSink {
     two_loop_join: Option<TwoLoopJoinRecord>,
     /// P3b: the periodic-cap route's activation evidence for this face.
     cap_activation: Option<CapActivationRecord>,
+    /// DIAG-002 identity and structural facts, installed by [`begin_face`].
+    document_id: Option<String>,
+    source_face_id: Option<u64>,
+    source_use_id: Option<u64>,
+    surface_family: SurfaceFamily,
+    bound_count: usize,
+    edge_use_count: usize,
+    distinct_vertex_count: usize,
+    chart_rank: u8,
+    periodic_axes: PeriodicAxes,
+    /// Whether the lattice certified every periodic axis from representation-
+    /// derived evidence, so `source_closed_axes` can be claimed honestly.
+    all_periods_certified: bool,
+    tolerance: f64,
+    source_geometric_uncertainty: Option<f64>,
+    incidence_tolerance: Option<f64>,
+    compatibility_factor: Option<f64>,
+    /// The world-space extent of the realized boundary samples, accumulated
+    /// during boundary construction.
+    world_bbox: Option<DiagnosticBBox3>,
+    world_rank: Option<u8>,
+    /// The parameter-space extent of the realized boundary samples.
+    uv_bbox: Option<DiagnosticBBox2>,
+    /// Stage-local refusal witnesses.
+    projection_refusal: Option<ProjectionRefusalWitness>,
+    lift_refusal: Option<LiftWitness>,
+    boundary_refusal: Option<BoundaryWitness>,
+    source_edge_refusal: Option<SourceEdgeWitness>,
+    /// The terminal set by [`fail`]/[`reject`], consumed by
+    /// [`finalize_and_emit`]. Guards against suspension and retries overwriting
+    /// the legacy attempt's terminal.
+    pending_terminal: Option<(
+        TessellationFailureReason,
+        FailureStage,
+        DiagnosticDisposition,
+    )>,
+}
+
+impl Default for DiagnosisSink {
+    fn default() -> Self {
+        Self {
+            segments: Vec::new(),
+            witnesses: Vec::new(),
+            overlap_witnesses: Vec::new(),
+            unattributed_overlaps: 0,
+            cdt_stages: CdtStageVector::default(),
+            projection_witness: None,
+            validity_certificate: None,
+            realized_chain: Vec::new(),
+            vertex_insertion_failed: false,
+            source_segment_count: 0,
+            synthetic_segment_count: 0,
+            seam_segment_count: 0,
+            boundary_pieces: Vec::new(),
+            two_loop_join: None,
+            cap_activation: None,
+            document_id: None,
+            source_face_id: None,
+            source_use_id: None,
+            surface_family: SurfaceFamily::Unknown,
+            bound_count: 0,
+            edge_use_count: 0,
+            distinct_vertex_count: 0,
+            chart_rank: 0,
+            periodic_axes: PeriodicAxes { u: false, v: false },
+            all_periods_certified: false,
+            tolerance: 0.0,
+            source_geometric_uncertainty: None,
+            incidence_tolerance: None,
+            compatibility_factor: None,
+            world_bbox: None,
+            world_rank: None,
+            uv_bbox: None,
+            projection_refusal: None,
+            lift_refusal: None,
+            boundary_refusal: None,
+            source_edge_refusal: None,
+            pending_terminal: None,
+        }
+    }
 }
 
 impl DiagnosisSink {
@@ -1322,6 +1937,28 @@ impl DiagnosisSink {
         self.boundary_pieces.clear();
         self.two_loop_join = None;
         self.cap_activation = None;
+        self.document_id = None;
+        self.source_face_id = None;
+        self.source_use_id = None;
+        self.surface_family = SurfaceFamily::Unknown;
+        self.bound_count = 0;
+        self.edge_use_count = 0;
+        self.distinct_vertex_count = 0;
+        self.chart_rank = 0;
+        self.periodic_axes = PeriodicAxes { u: false, v: false };
+        self.all_periods_certified = false;
+        self.tolerance = 0.0;
+        self.source_geometric_uncertainty = None;
+        self.incidence_tolerance = None;
+        self.compatibility_factor = None;
+        self.world_bbox = None;
+        self.world_rank = None;
+        self.uv_bbox = None;
+        self.projection_refusal = None;
+        self.lift_refusal = None;
+        self.boundary_refusal = None;
+        self.source_edge_refusal = None;
+        self.pending_terminal = None;
     }
 }
 
@@ -1642,20 +2279,144 @@ pub(crate) fn record_cap_activation(record: CapActivationRecord) {
 /// The certificate is the evidence that no positive-area trim region exists at
 /// tolerance; it rides in the face's diagnosis so a census can classify the
 /// face as `rejected_intrinsic` rather than as a generic tessellation failure.
-pub(crate) fn record_face_rejection(
-    certificate: crate::tessellation::validity::FaceValidityCertificate,
-) {
-    if suspended() {
-        return;
-    }
-    FACE_DIAGNOSIS_SINK.with(|sink| sink.borrow_mut().validity_certificate = Some(certificate));
-}
-
 /// Record that a vertex insertion failed.
 pub(crate) fn set_vertex_insertion_failed() {
     FACE_DIAGNOSIS_SINK.with(|sink| {
         sink.borrow_mut().vertex_insertion_failed = true;
     });
+}
+
+// ---------------------------------------------------------------------------
+// Stage-local refusal witnesses (DIAG-002)
+// ---------------------------------------------------------------------------
+
+/// Record the world/parameter extent of the realized boundary samples.
+///
+/// Accumulated during boundary construction from samples the pipeline already
+/// materialized, so it is a small O(boundary) pass rather than an extra
+/// geometric solve. `world_rank` is derived by the caller from the same
+/// samples when it was already measured.
+pub(crate) fn record_world_uv_extents(world_bbox: DiagnosticBBox3, uv_bbox: DiagnosticBBox2) {
+    if suspended() {
+        return;
+    }
+    FACE_DIAGNOSIS_SINK.with(|sink| {
+        let mut sink = sink.borrow_mut();
+        sink.world_bbox = Some(world_bbox);
+        sink.uv_bbox = Some(uv_bbox);
+    });
+}
+
+/// Record a measured world-space numerical rank for the realized boundary.
+///
+/// Set from the FACE-VALIDITY certificate at a rejection site, where the rank
+/// is already measured.
+fn record_world_rank(rank: u8) {
+    FACE_DIAGNOSIS_SINK.with(|sink| sink.borrow_mut().world_rank = Some(rank));
+}
+
+/// Record the boundary-projection refusal witness.
+pub(crate) fn record_projection_refusal(witness: ProjectionRefusalWitness) {
+    if suspended() {
+        return;
+    }
+    FACE_DIAGNOSIS_SINK.with(|sink| sink.borrow_mut().projection_refusal = Some(witness));
+}
+
+/// Record the lift refusal witness.
+pub(crate) fn record_lift_refusal(witness: LiftWitness) {
+    if suspended() {
+        return;
+    }
+    FACE_DIAGNOSIS_SINK.with(|sink| sink.borrow_mut().lift_refusal = Some(witness));
+}
+
+/// Record the boundary-construction refusal witness.
+pub(crate) fn record_boundary_refusal(witness: BoundaryWitness) {
+    if suspended() {
+        return;
+    }
+    FACE_DIAGNOSIS_SINK.with(|sink| sink.borrow_mut().boundary_refusal = Some(witness));
+}
+
+/// Record the source-edge traversal refusal witness.
+pub(crate) fn record_source_edge_refusal(witness: SourceEdgeWitness) {
+    if suspended() {
+        return;
+    }
+    FACE_DIAGNOSIS_SINK.with(|sink| sink.borrow_mut().source_edge_refusal = Some(witness));
+}
+
+/// Record the compatibility factor applied to the acceptance tolerance.
+pub(crate) fn record_compatibility_factor(value: f64) {
+    FACE_DIAGNOSIS_SINK.with(|sink| sink.borrow_mut().compatibility_factor = Some(value));
+}
+
+// ---------------------------------------------------------------------------
+// Terminal constructors (DIAG-002)
+// ---------------------------------------------------------------------------
+
+/// The single terminal constructor for a tessellation failure.
+///
+/// Finalizes a [`FaceDiagnosticRecord`] from the current face's accumulated
+/// evidence and returns the failure that carries it. A bare failure reason can
+/// no longer be turned into a terminal failure without going through here, so
+/// a future terminal path cannot bypass diagnostic finalization at compile
+/// time. Emission is deferred to [`finalize_and_emit`], which runs once at the
+/// terminal finalizer after every formal route has had its say.
+pub(crate) fn fail(reason: TessellationFailureReason, stage: FailureStage) -> TessellationFailure {
+    let disposition = DiagnosticDisposition::Failed;
+    if !suspended() {
+        FACE_DIAGNOSIS_SINK.with(|sink| {
+            sink.borrow_mut().pending_terminal = Some((reason, stage, disposition));
+        });
+    }
+    let diagnostic = build_face_record(reason, stage, disposition);
+    TessellationFailure { reason, diagnostic }
+}
+
+/// The single terminal constructor for a certified intrinsic rejection.
+///
+/// Like [`fail`], but disposition is `RejectedIntrinsic` and the backing
+/// certificate travels into the record.
+pub(crate) fn reject(
+    reason: TessellationFailureReason,
+    stage: FailureStage,
+    certificate: crate::tessellation::validity::FaceValidityCertificate,
+) -> TessellationFailure {
+    let disposition = DiagnosticDisposition::RejectedIntrinsic;
+    record_world_rank(certificate.world_rank);
+    if !suspended() {
+        FACE_DIAGNOSIS_SINK.with(|sink| {
+            let mut sink = sink.borrow_mut();
+            sink.validity_certificate = Some(certificate);
+            sink.pending_terminal = Some((reason, stage, disposition));
+        });
+    }
+    let diagnostic = build_face_record(reason, stage, disposition);
+    TessellationFailure { reason, diagnostic }
+}
+
+/// The single terminal finalizer.
+///
+/// Rebuilds the record with the complete route-decision trail, emits it
+/// exactly once, and returns the failure carrying the authoritative record.
+/// Called exactly once per terminal face, after every formal recovery route has
+/// run, so a face recovered by a route never emits and no face emits twice.
+pub(crate) fn finalize_and_emit(mut failure: TessellationFailure) -> TessellationFailure {
+    let (stage, disposition) = FACE_DIAGNOSIS_SINK.with(|sink| {
+        sink.borrow()
+            .pending_terminal
+            .map(|(_, stage, disposition)| (stage, disposition))
+            .unwrap_or((
+                failure_stage_for_reason(failure.reason),
+                DiagnosticDisposition::Failed,
+            ))
+    });
+    let diagnostic = take_face_record_and_clear(failure.reason, stage, disposition);
+    emit_record(&diagnostic);
+    failure.diagnostic = diagnostic;
+    failure
 }
 
 /// Snapshot of the realized constraint chain, for testing.
@@ -1669,7 +2430,7 @@ pub(crate) fn realized_chain_snapshot() -> Vec<RealizedConstraintMetadata> {
 
 /// The loss bucket the sink's current evidence derives, without consuming it.
 ///
-/// [`build_face_diagnosis`] takes the witnesses and clears the sink, which is
+/// The terminal finalizer takes the witnesses and clears the sink, which is
 /// correct for a record built once at the end of a face. A consumer that has to
 /// *classify the legacy failure while the face is still being worked on* — the
 /// cylinder-band fallback — needs the same derivation earlier and must leave
@@ -1717,10 +2478,10 @@ fn derive_arr_signature(
         },
     };
     let failure_stage = match terminal_reason {
-        R::BoundaryProjectionFailed | R::BoundaryPointOffSurface | R::BoundaryWireEmpty
-        | R::EdgeTraversalUnresolved => {
-            ArrFailureStage::BoundaryConstruction
-        }
+        R::BoundaryProjectionFailed
+        | R::BoundaryPointOffSurface
+        | R::BoundaryWireEmpty
+        | R::EdgeTraversalUnresolved => ArrFailureStage::BoundaryConstruction,
         R::AmbiguousLift => ArrFailureStage::LiftAmbiguous,
         R::RejectedDegenerate => ArrFailureStage::RejectedDegenerate,
         R::RejectedAmbiguous => ArrFailureStage::RejectedAmbiguous,
@@ -1792,79 +2553,150 @@ fn derive_arr_signature(
     }
 }
 
-/// Build the per-face diagnosis from the sink.
+/// Assemble a [`FaceDiagnosticRecord`] from the current face's retained
+/// evidence, without consuming it.
 ///
-/// Reads and clears the sink. The `model_id` and `surface_family` fields are
-/// filled by the corpus runner; here they default to empty and `Unknown`.
-pub(crate) fn build_face_diagnosis(
-    source_face_id: Option<u64>,
+/// Used by [`fail`] and [`reject`], which build the record at the refusal site;
+/// the authoritative record is rebuilt by [`finalize_and_emit`] with the
+/// complete route-decision trail.
+pub(crate) fn build_face_record(
     terminal_reason: TessellationFailureReason,
-    chart_rank: u8,
-    periodic_axes: PeriodicAxes,
-    bound_count: usize,
-    lift_status: ObservedLiftStatus,
-    deck_status: ObservedDeckStatus,
-) -> FailedFaceDiagnosis {
+    failure_stage: FailureStage,
+    disposition: DiagnosticDisposition,
+) -> FaceDiagnosticRecord {
     FACE_DIAGNOSIS_SINK.with(|sink| {
-        let mut sink = sink.borrow_mut();
-        let vertex_insertion_failed = sink.vertex_insertion_failed;
-        let witnesses = std::mem::take(&mut sink.witnesses);
-        let overlap_conflicts = std::mem::take(&mut sink.overlap_witnesses);
-        let unattributed_overlaps = sink.unattributed_overlaps;
-        let cdt_stages = sink.cdt_stages;
-        let projection_witness = sink.projection_witness.take();
-        let validity_certificate = sink.validity_certificate.take();
-        let route_decisions = ROUTE_DECISIONS.with(|s| std::mem::take(&mut *s.borrow_mut()));
-        let source_segment_count = sink.source_segment_count;
-        let synthetic_segment_count = sink.synthetic_segment_count;
-        let seam_segment_count = sink.seam_segment_count;
-        let boundary_pieces = std::mem::take(&mut sink.boundary_pieces);
-        let two_loop_join = sink.two_loop_join;
-        let cap_activation = sink.cap_activation.take();
-        let seam_mechanism = derive_seam_mechanism(two_loop_join.as_ref(), seam_segment_count);
-        sink.clear();
-        let derived_bucket =
-            derive_loss_bucket(terminal_reason, &witnesses, vertex_insertion_failed);
-        let projection_status = derive_projection_status(terminal_reason);
-        let arr = derive_arr_signature(
-            terminal_reason,
-            bound_count,
-            seam_segment_count,
-            two_loop_join.as_ref(),
-            &witnesses,
-            &overlap_conflicts,
-            cdt_stages,
-            projection_witness.as_ref(),
-        );
-        FailedFaceDiagnosis {
-            model_id: String::new(),
-            source_face_id,
-            terminal_reason,
-            surface_family: SurfaceFamily::Unknown,
-            chart_rank,
-            periodic_axes,
-            bound_count,
-            source_segment_count,
-            synthetic_segment_count,
-            lift_status,
-            deck_status,
-            projection_status,
-            seam_segment_count,
-            boundary_pieces,
-            two_loop_join,
-            seam_mechanism,
-            insertion_conflicts: witnesses,
-            overlap_conflicts,
-            unattributed_overlaps,
-            cdt_stages,
-            projection_witness,
-            validity_certificate,
+        let sink = sink.borrow();
+        let route_decisions = ROUTE_DECISIONS.with(|s| s.borrow().clone());
+        build_record_from_sink(
+            &sink,
             route_decisions,
-            cap_activation,
-            derived_bucket,
-            arr,
-        }
+            terminal_reason,
+            failure_stage,
+            disposition,
+        )
     })
+}
+
+/// Assemble the authoritative record and clear the per-face state.
+///
+/// Called exactly once per terminal face by [`finalize_and_emit`].
+pub(crate) fn take_face_record_and_clear(
+    terminal_reason: TessellationFailureReason,
+    failure_stage: FailureStage,
+    disposition: DiagnosticDisposition,
+) -> FaceDiagnosticRecord {
+    FACE_DIAGNOSIS_SINK.with(|sink| {
+        let sink = sink.borrow();
+        let route_decisions = ROUTE_DECISIONS.with(|s| std::mem::take(&mut *s.borrow_mut()));
+        let record = build_record_from_sink(
+            &sink,
+            route_decisions,
+            terminal_reason,
+            failure_stage,
+            disposition,
+        );
+        drop(sink);
+        clear_sink();
+        record
+    })
+}
+
+/// Build a [`FaceDiagnosticRecord`] from a sink snapshot.
+fn build_record_from_sink(
+    sink: &DiagnosisSink,
+    route_decisions: Vec<RouteDecisionRecord>,
+    terminal_reason: TessellationFailureReason,
+    failure_stage: FailureStage,
+    disposition: DiagnosticDisposition,
+) -> FaceDiagnosticRecord {
+    let vertex_insertion_failed = sink.vertex_insertion_failed;
+    let seam_mechanism =
+        derive_seam_mechanism(sink.two_loop_join.as_ref(), sink.seam_segment_count);
+    let derived_bucket =
+        derive_loss_bucket(terminal_reason, &sink.witnesses, vertex_insertion_failed);
+    let projection_status = derive_projection_status(terminal_reason);
+    let arr = derive_arr_signature(
+        terminal_reason,
+        sink.bound_count,
+        sink.seam_segment_count,
+        sink.two_loop_join.as_ref(),
+        &sink.witnesses,
+        &sink.overlap_witnesses,
+        sink.cdt_stages,
+        sink.projection_witness.as_ref(),
+    );
+    let lift_status = compute_lift_status(
+        sink.periodic_axes,
+        terminal_reason,
+        sink.all_periods_certified,
+    );
+    let uv_rank = sink.uv_bbox.map(|bbox| {
+        let du = bbox.hi[0] - bbox.lo[0];
+        let dv = bbox.hi[1] - bbox.lo[1];
+        u8::from(du > 0.0) + u8::from(dv > 0.0)
+    });
+    let source_closed_axes = if sink.all_periods_certified {
+        Some(sink.periodic_axes)
+    } else {
+        None
+    };
+    let world_bbox = sink.world_bbox;
+    let world_diameter = world_bbox.map(|bbox| bbox.diameter());
+    let approximate_world_area = world_bbox.map(|bbox| bbox.surface_area());
+    let document_id = sink.document_id.clone().or_else(document_context);
+    FaceDiagnosticRecord {
+        schema_version: DIAGNOSTIC_SCHEMA_VERSION,
+        document_id,
+        source_face_id: sink.source_face_id,
+        source_use_id: sink.source_use_id,
+        disposition,
+        terminal_reason,
+        failure_stage,
+        surface_family: sink.surface_family,
+        bound_count: sink.bound_count,
+        edge_use_count: sink.edge_use_count,
+        distinct_vertex_count: sink.distinct_vertex_count,
+        world_rank: sink.world_rank,
+        world_bbox,
+        world_diameter,
+        approximate_world_area,
+        periodic_axes: sink.periodic_axes,
+        source_closed_axes,
+        uv_rank,
+        uv_bbox: sink.uv_bbox,
+        tolerance: ToleranceWitness {
+            chord_tolerance: sink.tolerance,
+            source_geometric_uncertainty: sink.source_geometric_uncertainty,
+            incidence_tolerance: sink
+                .incidence_tolerance
+                .or(sink.source_geometric_uncertainty),
+            compatibility_factor: sink.compatibility_factor,
+        },
+        source_edge: sink.source_edge_refusal.clone(),
+        projection: sink.projection_refusal.clone(),
+        lift: sink.lift_refusal.clone(),
+        boundary: sink.boundary_refusal.clone(),
+        cdt_stages: sink.cdt_stages,
+        validity_certificate: sink.validity_certificate,
+        route_decisions,
+        chart_rank: sink.chart_rank,
+        source_segment_count: sink.source_segment_count,
+        synthetic_segment_count: sink.synthetic_segment_count,
+        lift_status,
+        deck_status: compute_deck_status(sink.chart_rank),
+        projection_status,
+        seam_segment_count: sink.seam_segment_count,
+        boundary_pieces: sink.boundary_pieces.clone(),
+        two_loop_join: sink.two_loop_join,
+        seam_mechanism,
+        insertion_conflicts: sink.witnesses.clone(),
+        overlap_conflicts: sink.overlap_witnesses.clone(),
+        unattributed_overlaps: sink.unattributed_overlaps,
+        projection_witness: sink.projection_witness.clone(),
+        cap_activation: sink.cap_activation.clone(),
+        derived_bucket,
+        arr,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2017,14 +2849,40 @@ mod tests {
     // Test 10: deterministic serialization and aggregation ordering.
     #[test]
     fn deterministic_serialization() {
-        let diag = FailedFaceDiagnosis {
-            model_id: "model.step".into(),
+        let diag = FaceDiagnosticRecord {
+            schema_version: DIAGNOSTIC_SCHEMA_VERSION,
+            document_id: Some("model.step".into()),
             source_face_id: Some(42),
+            source_use_id: None,
+            disposition: DiagnosticDisposition::Failed,
             terminal_reason: TessellationFailureReason::ConstraintInsertionIncomplete,
+            failure_stage: FailureStage::ConstraintInsertion,
             surface_family: SurfaceFamily::Cylinder,
-            chart_rank: 1,
-            periodic_axes: PeriodicAxes { u: false, v: true },
             bound_count: 1,
+            edge_use_count: 4,
+            distinct_vertex_count: 4,
+            world_rank: None,
+            world_bbox: None,
+            world_diameter: None,
+            approximate_world_area: None,
+            periodic_axes: PeriodicAxes { u: false, v: true },
+            source_closed_axes: None,
+            uv_rank: None,
+            uv_bbox: None,
+            tolerance: ToleranceWitness {
+                chord_tolerance: 0.001,
+                source_geometric_uncertainty: None,
+                incidence_tolerance: None,
+                compatibility_factor: None,
+            },
+            source_edge: None,
+            projection: None,
+            lift: None,
+            boundary: None,
+            cdt_stages: CdtStageVector::default(),
+            validity_certificate: None,
+            route_decisions: Vec::new(),
+            chart_rank: 1,
             source_segment_count: 4,
             synthetic_segment_count: 1,
             lift_status: ObservedLiftStatus::Unavailable,
@@ -2041,10 +2899,7 @@ mod tests {
             )],
             overlap_conflicts: Vec::new(),
             unattributed_overlaps: 0,
-            cdt_stages: CdtStageVector::default(),
             projection_witness: None,
-            validity_certificate: None,
-            route_decisions: Vec::new(),
             cap_activation: None,
             derived_bucket: LossBucket::SourceSourceSameBoundCrossing,
             arr: ArrSignature::default(),
@@ -2054,8 +2909,10 @@ mod tests {
         assert_eq!(json1, json2, "serialization must be deterministic");
         // Re-deserializing the bucket field name confirms stable output.
         let v: serde_json::Value = serde_json::from_str(&json1).unwrap();
+        assert_eq!(v["schema_version"], 1);
         assert_eq!(v["derived_bucket"], "SourceSourceSameBoundCrossing");
         assert_eq!(v["terminal_reason"], "ConstraintInsertionIncomplete");
+        assert_eq!(v["disposition"], "Failed");
     }
 
     // Test 11: typed non-insertion failures retaining their original categories.
@@ -2099,40 +2956,48 @@ mod tests {
         );
     }
 
-    // Test 12: the diagnostic sink follows the routes that consume it.
+    // Test 12: collection follows the routes that consume it, while emission
+    // is independently default-on.
     //
-    // This used to assert that an unset `TRUCK_FACE_DIAG_JSONL` left the sink
-    // off, which was the whole no-observable-change argument while the formal
-    // routes were opt-in. `WAVE-2C` made the cylinder-band route default-on,
-    // and that route's admission rule *is* the derived witness bucket, so the
-    // sink is now filled on a default run by construction. The invariant that
-    // replaces it is the one that still carries weight: the sink is on exactly
-    // when something needs it, and the master kill switch turns both off
-    // together.
+    // Since DIAG-002 the sink's witnesses are a production input to the formal
+    // routes' admission rule, so collection tracks the master kill switch
+    // exactly as it did under `WAVE-2C`. Emission is a separate concern: it is
+    // on by default, and only an explicit `TRUCK_FACE_DIAG=off` suppresses it.
     #[test]
-    fn diag_follows_the_routes_that_consume_it() {
+    fn collection_follows_routes_emission_is_default_on() {
+        // Serialize with the other environment-sensitive diagnostic tests.
+        let _guard = DIAG_TEST_MUTEX.lock().unwrap();
         // These tests share a process, so the variables are set explicitly
         // rather than assumed absent.
         std::env::remove_var("TRUCK_FACE_DIAG_JSONL");
+        std::env::remove_var("TRUCK_FACE_DIAG");
         std::env::remove_var("TRUCK_FORMAL_RECOVERY_BAND");
         std::env::remove_var("TRUCK_FORMAL_RECOVERY");
-        // Default: the band route is on, so its witnesses are collected.
-        assert!(cylinder_band_recovery_enabled());
+        // Default: collection and emission are both on.
         assert!(diag_enabled());
+        assert!(emission_enabled());
 
-        // Master kill switch: no route needs the sink, so it is off again and
-        // the legacy no-observable-change property is recovered in full.
+        // Master kill switch: no route needs the sink, so collection is off
+        // again, but external emission stays on — failure diagnostics are
+        // constitutive, not a byproduct of the recovery chain.
         std::env::set_var("TRUCK_FORMAL_RECOVERY", "0");
-        assert!(!cylinder_band_recovery_enabled());
         assert!(!diag_enabled());
+        assert!(emission_enabled());
 
-        // ...but an explicit request for the JSONL still turns it on, with
-        // every route switched off.
-        std::env::set_var("TRUCK_FACE_DIAG_JSONL", "diag.jsonl");
-        assert!(diag_enabled());
-
-        std::env::remove_var("TRUCK_FACE_DIAG_JSONL");
+        // Explicit opt-out suppresses emission without touching collection
+        // (which the routes still consume) or the kill switch.
         std::env::remove_var("TRUCK_FORMAL_RECOVERY");
+        std::env::set_var("TRUCK_FACE_DIAG", "off");
+        assert!(diag_enabled());
+        assert!(!emission_enabled());
+
+        // Anything but an explicit negative leaves emission on.
+        std::env::set_var("TRUCK_FACE_DIAG", "1");
+        assert!(emission_enabled());
+
+        std::env::remove_var("TRUCK_FACE_DIAG");
+        std::env::remove_var("TRUCK_FORMAL_RECOVERY");
+        std::env::remove_var("TRUCK_FACE_DIAG_JSONL");
     }
 
     /// Only an explicit negative disables a route; anything else leaves it on.

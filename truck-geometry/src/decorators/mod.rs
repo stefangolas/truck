@@ -439,6 +439,7 @@ pub trait ScalarFunctionD2: Clone {
 }
 
 mod af_surface;
+mod coons;
 mod edge_blend;
 mod extruded_curve;
 mod homotopy;
@@ -450,7 +451,11 @@ mod processor;
 pub mod rbf_surface;
 mod revolved_curve;
 mod scalar_function;
+mod spine_frame;
 mod trimmied_curve;
+
+pub use coons::CoonsSurface;
+pub use spine_frame::{SpineFrameCurve, SpineFrameSurface};
 
 fn bound2opt<T>(x: Bound<T>) -> Option<T> {
     match x {

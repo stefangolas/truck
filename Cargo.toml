@@ -3,8 +3,10 @@ resolver = "2"
 members = [
 	"truck-assembly",
 	"truck-base",
+	"truck-certified",
 	"truck-derivers",
 	"truck-drafting",
+	"truck-evidence",
 	"truck-geometry",
 	"truck-geotrait",
 	"truck-js",
@@ -19,6 +21,11 @@ members = [
 	"example-pages-generator",
 	"readme-generator",
 ]
+
+# look builds truck-stepio against this ruststep fork (crates.io releases
+# cannot read AP242); mirror that here so fork and vendor resolve identically.
+[patch.crates-io]
+ruststep = { git = "https://github.com/stefangolas/ruststep", rev = "67f1f7c" }
 
 [profile.release.package.truck-js]
 opt-level = "z"

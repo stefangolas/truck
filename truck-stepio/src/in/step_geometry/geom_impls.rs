@@ -1,4 +1,7 @@
 use super::*;
+use truck_base::evidence::{
+    Budget, Certificate, Certified, Margin, Method, Modulus, Outcome, PropMap,
+};
 
 impl ToSameGeometry<Curve2D> for Line<Point2> {
     #[inline]
@@ -57,7 +60,8 @@ impl Conic3D {
 
 impl IncludeCurve<Curve3D> for Plane {
     /// `PCurve` case is unimplemented! Returns always `false` if `matches!(curve, Curve3D::PCurve(_))`.
-    fn include(&self, curve: &Curve3D) -> bool {
+    fn include(&self, curve: &Curve3D) -> Outcome<bool> {
+        let ctx = ToleranceCtx::unscaled_legacy();
         match curve {
             Curve3D::Line(line) => self.include(line),
             Curve3D::BSplineCurve(bsp) => self.include(bsp),
@@ -65,14 +69,40 @@ impl IncludeCurve<Curve3D> for Plane {
             Curve3D::Conic(conic) => {
                 let mat = conic.posture();
                 let axis = mat.z.truncate();
-                axis.cross(self.normal()).so_small()
+                Ok(Certified::new(
+                    ctx.is_small_ratio(axis.cross(self.normal()).magnitude()), // BG-TOL-001: param
+                    Certificate {
+                        props: PropMap::new(),
+                        method: Method::Float,
+                        budget_left: Budget::new(0, 0, 0),
+                        margin: Margin::UNBOUNDED,
+                        modulus: Modulus::Unbounded,
+                    },
+                ))
             }
-            Curve3D::Polyline(poly) => poly
-                .iter()
-                .all(|p| self.search_parameter(*p, None, 1).is_some()),
+            Curve3D::Polyline(poly) => Ok(Certified::new(
+                poly.iter()
+                    .all(|p| self.search_parameter(*p, None, 1).is_some()),
+                Certificate {
+                    props: PropMap::new(),
+                    method: Method::Float,
+                    budget_left: Budget::new(0, 0, 0),
+                    margin: Margin::UNBOUNDED,
+                    modulus: Modulus::Unbounded,
+                },
+            )),
             Curve3D::PCurve(_) => {
                 eprintln!("IncludeCurve<Curve3D> for Plane: PCurve case is unimplemented!\nReturns always false.");
-                false
+                Ok(Certified::new(
+                    false,
+                    Certificate {
+                        props: PropMap::new(),
+                        method: Method::Float,
+                        budget_left: Budget::new(0, 0, 0),
+                        margin: Margin::UNBOUNDED,
+                        modulus: Modulus::Unbounded,
+                    },
+                ))
             }
         }
     }
@@ -95,6 +125,7 @@ impl ToSameGeometry<Surface> for ExtrudedCurve<Curve3D, Vector3> {
 impl ToSameGeometry<Surface> for RevolutedCurve<Curve3D> {
     #[inline]
     fn to_same_geometry(&self) -> Surface {
+        let ctx = ToleranceCtx::unscaled_legacy();
         let default = || {
             let (curve, origin, axis) = (self.entity_curve().inverse(), self.origin(), self.axis());
             let processor = Processor::new(RevolutedCurve::by_revolution(curve, origin, axis));
@@ -105,7 +136,8 @@ impl ToSameGeometry<Surface> for RevolutedCurve<Curve3D> {
                 let &Line(p, q) = line;
                 let v = q - p;
                 let axis = self.axis();
-                if v.cross(axis).so_small() {
+                if ctx.is_small_len(v.cross(axis).magnitude()) {
+                    // BG-TOL-001: model
                     let o = self.origin();
                     let origin = o + (p - o).dot(axis) * axis;
                     let revo = RevolutedCurve::by_revolution(*line, origin, axis);

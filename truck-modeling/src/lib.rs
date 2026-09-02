@@ -100,13 +100,30 @@ pub type Result<T> = std::result::Result<T, errors::Error>;
 
 /// the building model utility API
 pub mod builder;
+/// BG-CAD-P1-UTILITY: certified utility surface + planar face construction.
+pub mod cad;
 mod closed_sweep;
 /// declare errors
 pub mod errors;
+/// BG-SOL-S2-EXTRUDE: direct certified extrude of a planar arrangement.
+/// Scaffolded empty; the packet fills it.
+pub mod extrude;
+/// BG-CG-004-FACET: the direct facet realization backend (FAC) — a
+/// `SpineFrameRecipe` realized as a shared-topology `PolygonMesh`, closed
+/// by construction, with the mandatory mesh-level sanity audit (plan §3.3).
+pub mod facet_sweep;
 mod geom_impls;
 mod mapped;
 mod multi_sweep;
 /// primitive shapes
 pub mod primitive;
+/// BG-CAD-P5-REVOLVE: revolve of line-edge profiles via the carrier table.
+pub mod revolve;
+/// BG-CG-009-BREP: the authored-topology spine sweep constructor — side faces
+/// per profile edge on `SpineFrameSurface`, trajectory edges shared by
+/// identity, caps via `try_attach_plane`. No sewing anywhere.
+pub mod spine_sweep;
 mod sweep;
 mod topo_impls;
+/// BG-CAD-P4-UNTIL: the certified `until` sweep reduction and plane projection.
+pub mod until;

@@ -1,5 +1,6 @@
 use super::*;
 use algo::surface::SsnpVector;
+use truck_base::evidence::{EnvelopeCase, Outcome, Refusal};
 
 impl<E, T: One> Processor<E, T> {
     /// Creates new processor
@@ -346,11 +347,14 @@ where
     E: IncludeCurve<C>,
     T: Transform<C::Point>,
 {
-    fn include(&self, curve: &C) -> bool {
-        let inv = self
-            .transform
-            .inverse_transform()
-            .expect("irregular transform");
+    fn include(&self, curve: &C) -> Outcome<bool> {
+        // BG-S0-001 (H-1): a singular transform has no inverse to test the
+        // curve against. That is a chart degeneracy (§9.1), not a reason to
+        // panic — the previous `.expect("irregular transform")` aborted on
+        // data. Refuse instead.
+        let Some(inv) = self.transform.inverse_transform() else {
+            return Err(Refusal::UnsupportedEnvelope(EnvelopeCase::ChartDegenerate));
+        };
         let curve = curve.clone().transformed(inv);
         self.entity.include(&curve)
     }

@@ -79,11 +79,13 @@ impl SearchNearestParameter<D1> for UnitParabola<Point2> {
         _: H,
         _: usize,
     ) -> Option<f64> {
+        let ctx = ToleranceCtx::unscaled_legacy();
         let p = 2.0 - pt.x;
         let q = -pt.y;
         solver::pre_solve_cubic(p, q)
             .into_iter()
-            .filter_map(|x| match x.im.so_small() {
+            .filter_map(|x| match ctx.is_small_ratio(x.im) {
+                // BG-TOL-001: param
                 true => Some(x.re),
                 false => None,
             })
@@ -116,9 +118,11 @@ impl SearchParameter<D1> for UnitParabola<Point2> {
     type Point = Point2;
     #[inline]
     fn search_parameter<H: Into<SPHint1D>>(&self, pt: Point2, _: H, _: usize) -> Option<f64> {
+        let ctx = ToleranceCtx::unscaled_legacy();
         let t = pt.y / 2.0;
         let pt0 = self.subs(t);
-        match pt.near(&pt0) {
+        match ctx.is_small_len((pt - pt0).magnitude()) {
+            // BG-TOL-001: model
             true => Some(t),
             false => None,
         }
@@ -134,7 +138,9 @@ impl SearchParameter<D1> for UnitParabola<Point3> {
         _hint: H,
         _trials: usize,
     ) -> Option<f64> {
-        match pt.z.so_small() {
+        let ctx = ToleranceCtx::unscaled_legacy();
+        match ctx.is_small_ratio(pt.z) {
+            // BG-TOL-001: param
             true => UnitParabola::<Point2>::new().search_parameter(
                 Point2::new(pt.x, pt.y),
                 _hint,
@@ -165,4 +171,41 @@ fn sp_test() {
     assert_near!(curve.search_parameter(p, None, 0).unwrap(), -2.0);
     let p = Point2::new(-3.0, 6.0);
     assert!(curve.search_parameter(p, None, 0).is_none());
+}
+
+#[test]
+fn conic_containment_scale_invariant() {
+    let parabola = UnitParabola::<Point2>::new();
+    let hyperbola = UnitHyperbola::<Point2>::new();
+    for scale in [0.5, 1.0, 2.0, 10.0] {
+        let ctx = match ToleranceCtx::new(scale, TOLERANCE, TOLERANCE, TOLERANCE) {
+            Ok(certified) => certified.value,
+            Err(_) => {
+                unreachable!("a finite positive scale with finite nonnegative taus is accepted")
+            }
+        };
+        let offset = ctx.length_margin() * 10.0;
+        for t in [-2.0, -0.5, 0.0, 0.5, 2.0] {
+            let on = parabola.subs(t);
+            assert!(
+                parabola.search_parameter(on, None, 0).is_some(),
+                "parabola on-curve point must contain at scale {scale}"
+            );
+            let off = on + Vector2::new(offset, 0.0);
+            assert!(
+                parabola.search_parameter(off, None, 0).is_none(),
+                "parabola off-curve point must not contain at scale {scale}"
+            );
+            let on = hyperbola.subs(t);
+            assert!(
+                hyperbola.search_parameter(on, None, 0).is_some(),
+                "hyperbola on-curve point must contain at scale {scale}"
+            );
+            let off = on + Vector2::new(offset, 0.0);
+            assert!(
+                hyperbola.search_parameter(off, None, 0).is_none(),
+                "hyperbola off-curve point must not contain at scale {scale}"
+            );
+        }
+    }
 }

@@ -1,5 +1,8 @@
 use super::*;
 use std::f64::consts::PI;
+use truck_base::evidence::{
+    Budget, Certificate, Certified, Margin, Method, Modulus, Outcome, PropMap,
+};
 
 impl Sphere {
     /// Creates a sphere
@@ -20,7 +23,8 @@ impl Sphere {
     /// Returns whether the point `pt` is on sphere
     #[inline(always)]
     pub fn include(&self, pt: Point3) -> bool {
-        self.center.distance(pt).near(&self.radius)
+        let ctx = ToleranceCtx::unscaled_legacy();
+        ctx.is_small_len(self.center.distance(pt) - self.radius) // BG-TOL-001: model
     }
 }
 
@@ -118,23 +122,44 @@ impl BoundedSurface for Sphere {}
 
 impl IncludeCurve<BSplineCurve<Point3>> for Sphere {
     #[inline(always)]
-    fn include(&self, curve: &BSplineCurve<Point3>) -> bool {
-        curve.is_const() && self.include(curve.front())
+    fn include(&self, curve: &BSplineCurve<Point3>) -> Outcome<bool> {
+        // BG-S0-001: explicit float certificate (see the `Plane` impls for the
+        // provenance rationale).
+        Ok(Certified::new(
+            curve.is_const() && self.include(curve.front()),
+            Certificate {
+                props: PropMap::new(),
+                method: Method::Float,
+                budget_left: Budget::new(0, 0, 0),
+                margin: Margin::UNBOUNDED,
+                modulus: Modulus::Unbounded,
+            },
+        ))
     }
 }
 
 impl IncludeCurve<NurbsCurve<Vector4>> for Sphere {
-    fn include(&self, curve: &NurbsCurve<Vector4>) -> bool {
+    fn include(&self, curve: &NurbsCurve<Vector4>) -> Outcome<bool> {
         let (knots, _) = curve.knot_vec().to_single_multi();
         let degree = curve.degree() * 2;
-        knots
+        let value = knots
             .windows(2)
             .flat_map(move |window| (1..degree).map(move |i| (window, i)))
             .all(move |(window, i)| {
                 let t = i as f64 / degree as f64;
                 let t = window[0] * (1.0 - t) + window[1] * t;
                 self.include(curve.subs(t))
-            })
+            });
+        Ok(Certified::new(
+            value,
+            Certificate {
+                props: PropMap::new(),
+                method: Method::Float,
+                budget_left: Budget::new(0, 0, 0),
+                margin: Margin::UNBOUNDED,
+                modulus: Modulus::Unbounded,
+            },
+        ))
     }
 }
 
@@ -145,7 +170,8 @@ impl ParameterDivision2D for Sphere {
         (urange, vrange): ((f64, f64), (f64, f64)),
         tol: f64,
     ) -> (Vec<f64>, Vec<f64>) {
-        let tol = tol.max(TOLERANCE);
+        let ctx = ToleranceCtx::unscaled_legacy();
+        let tol = tol.max(ctx.length_margin()); // BG-TOL-001: model
         nonpositive_tolerance!(tol);
         // A tolerance coarser than the sphere is a meaningful request rather
         // than a caller error: a tolerance derived from the extent of a whole
@@ -183,13 +209,16 @@ impl SearchParameter<D2> for Sphere {
         hint: H,
         _: usize,
     ) -> Option<(f64, f64)> {
+        let ctx = ToleranceCtx::unscaled_legacy();
         let radius = point - self.center;
+        // FIXME(BG-TOL-001): squared order -- both sides are length squared and tau_rep is first order
         if (self.radius * self.radius).near(&radius.magnitude2()) {
             let radius = radius.normalize();
             let u = f64::acos(radius[2]);
             let sinu = f64::sqrt(1.0 - radius[2] * radius[2]);
             let cosv = f64::clamp(radius[0] / sinu, -1.0, 1.0);
-            let v = if sinu.so_small() {
+            let v = if ctx.is_small_ratio(sinu) {
+                // BG-TOL-001: param
                 match hint.into() {
                     SPHint2D::Parameter(_, hint) => hint,
                     _ => 0.0,
@@ -215,7 +244,12 @@ impl SearchNearestParameter<D2> for Sphere {
         _: H,
         _: usize,
     ) -> Option<(f64, f64)> {
-        let radius = (point - self.center).normalize();
+        let ctx = ToleranceCtx::unscaled_legacy();
+        let radius = point - self.center;
+        if ctx.is_small_len(radius.magnitude()) {
+            return None;
+        }
+        let radius = radius.normalize();
         let u = f64::acos(f64::clamp(radius[2], -1.0, 1.0));
         let sinu = f64::sqrt(1.0 - radius[2] * radius[2]);
         let cosv = f64::clamp(radius[0] / sinu, -1.0, 1.0);
@@ -226,4 +260,15 @@ impl SearchNearestParameter<D2> for Sphere {
         };
         Some((u, v))
     }
+}
+
+#[test]
+fn sphere_search_nearest_parameter_center_is_none() {
+    let sphere = Sphere::new(Point3::origin(), 1.0);
+    assert!(
+        sphere
+            .search_nearest_parameter(Point3::origin(), None, 0)
+            .is_none(),
+        "the sphere center has no nearest parameter"
+    );
 }

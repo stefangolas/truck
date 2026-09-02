@@ -1,4 +1,5 @@
 use super::*;
+use truck_base::evidence::Outcome;
 
 type Tuple = (f64, f64);
 /// Parametric surface
@@ -233,9 +234,15 @@ impl<S: BoundedSurface> BoundedSurface for &S {}
 impl<S: BoundedSurface> BoundedSurface for Box<S> {}
 
 /// Whether the surface includes the boundary curve.
+///
+/// BG-S0-001: `include` is a certified predicate. It returns `Outcome<bool>` —
+/// never a bare `bool` and never a panic — so an `IntersectionCurve` argument
+/// (the variant Booleans produce) is a terminal `Refusal`, not an
+/// `unimplemented!()` abort. Implementations may refuse where the inclusion
+/// question cannot be certified (`NumericallyUnresolved`); they must never lie.
 pub trait IncludeCurve<C: ParametricCurve> {
     /// Returns whether the curve `curve` is included in the surface `self`.
-    fn include(&self, curve: &C) -> bool;
+    fn include(&self, curve: &C) -> Outcome<bool>;
 }
 
 /// Dividable surface

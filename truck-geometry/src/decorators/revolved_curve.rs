@@ -1,5 +1,8 @@
 use super::*;
 use std::f64::consts::PI;
+use truck_base::evidence::{
+    Budget, Certificate, Certified, Margin, Method, Modulus, Outcome, PropMap,
+};
 
 impl Revolution {
     fn new(origin: Point3, axis: Vector3) -> Self {
@@ -23,7 +26,8 @@ impl Revolution {
     }
     #[inline(always)]
     fn contains(self, p: Point3) -> bool {
-        (p - self.origin).cross(self.axis).so_small()
+        let ctx = ToleranceCtx::unscaled_legacy();
+        ctx.is_small_len((p - self.origin).cross(self.axis).magnitude()) // BG-TOL-001: model
     }
     #[inline(always)]
     fn proj_point(&self, p: Point3) -> Point2 {
@@ -56,11 +60,23 @@ impl Revolution {
         let (p, q) = (p - self.origin, q - self.origin);
         let hp = (p - p.dot(self.axis) * self.axis).normalize();
         let hq = (q - q.dot(self.axis) * self.axis).normalize();
-        let t = f64::acos(f64::clamp(hp.dot(hq), -1.0, 1.0));
-        match hp.cross(hq).dot(self.axis) < 0.0 {
-            false => t,
-            true => 2.0 * PI - t,
-        }
+        // The signed angle from `hp` to `hq` about the axis, in (−π, π].
+        //
+        // The old `acos` + cross-product-sign test flipped between ~0 and 2π
+        // on the sign noise of a near-zero cross product: a point on the
+        // profile plane (v ≈ 0, the plane where `hp` and `hq` coincide) came
+        // back as ~0 or ~2π depending on rounding, so consecutive inverse
+        // lookups landed on opposite branches of the periodic parameter and
+        // flipped boundary orientation (BG-CE-006-r2). `atan2` measures the
+        // same angle continuously; a point near the profile plane returns ~0
+        // rather than ~2π. The result is negative for points ahead of the
+        // profile plane, which is a legitimate representative of a periodic
+        // parameter: `subs` is periodic, and `search_parameter` promises an
+        // inverse, not a branch.
+        f64::atan2(
+            hp.cross(hq).dot(self.axis),
+            f64::clamp(hp.dot(hq), -1.0, 1.0),
+        )
     }
 }
 
@@ -148,20 +164,25 @@ impl<C: ParametricCurve3D> ParametricSurface for RevolutedCurve<C> {
 impl<C: ParametricCurve3D + BoundedCurve> ParametricSurface3D for RevolutedCurve<C> {
     #[inline(always)]
     fn normal(&self, u: f64, v: f64) -> Vector3 {
+        let ctx = ToleranceCtx::unscaled_legacy();
         let (u0, u1) = self.curve.range_tuple();
-        let (uder, vder) = if u.near(&u0) {
+        let (uder, vder) = if ctx.is_small_ratio(u - u0) {
+            // BG-TOL-001: param
             let pt = self.curve.subs(u);
             let radius = self.axis().cross(pt - self.origin());
-            if radius.so_small() {
+            if ctx.is_small_len(radius.magnitude()) {
+                // BG-TOL-001: model
                 let uder = self.curve.der(u);
                 (uder, self.axis().cross(uder))
             } else {
                 (self.uder(u, v), self.vder(u, v))
             }
-        } else if u.near(&u1) {
+        } else if ctx.is_small_ratio(u - u1) {
+            // BG-TOL-001: param
             let pt = self.curve.subs(u);
             let radius = self.axis().cross(pt - self.origin());
-            if radius.so_small() {
+            if ctx.is_small_len(radius.magnitude()) {
+                // BG-TOL-001: model
                 let uder = self.curve.der(u);
                 (uder, uder.cross(self.axis()))
             } else {
@@ -242,7 +263,8 @@ impl<C: ParametricCurve3D + BoundedCurve> SearchParameter<D1> for ProjectedCurve
         hint: H,
         trials: usize,
     ) -> Option<f64> {
-        let hint = match hint.into() {
+        let hint = hint.into();
+        let search_hint = match hint {
             SPHint1D::Parameter(t) => t,
             SPHint1D::Range(x, y) => {
                 algo::curve::presearch(self, point, (x, y), PRESEARCH_DIVISION)
@@ -258,7 +280,8 @@ impl<C: ParametricCurve3D + BoundedCurve> SearchParameter<D1> for ProjectedCurve
                 )
             }
         };
-        algo::curve::search_parameter(self, point, hint, trials)
+        algo::curve::search_parameter(self, point, search_hint, trials)
+            .map(|t| normalize_branch(t, self.curve.period(), self.range_tuple().0, hint))
     }
 }
 
@@ -270,7 +293,8 @@ impl<C: ParametricCurve3D + BoundedCurve> SearchNearestParameter<D1> for Project
         hint: H,
         trials: usize,
     ) -> Option<f64> {
-        let hint = match hint.into() {
+        let hint = hint.into();
+        let search_hint = match hint {
             SPHint1D::Parameter(t) => t,
             SPHint1D::Range(x, y) => {
                 algo::curve::presearch(self, point, (x, y), PRESEARCH_DIVISION)
@@ -286,7 +310,8 @@ impl<C: ParametricCurve3D + BoundedCurve> SearchNearestParameter<D1> for Project
                 )
             }
         };
-        algo::curve::search_nearest_parameter(self, point, hint, trials)
+        algo::curve::search_nearest_parameter(self, point, search_hint, trials)
+            .map(|t| normalize_branch(t, self.curve.period(), self.range_tuple().0, hint))
     }
 }
 
@@ -366,14 +391,17 @@ impl<C: ParametricCurve3D + BoundedCurve> SearchParameter<D2> for RevolutedCurve
         hint: H,
         trials: usize,
     ) -> Option<(f64, f64)> {
+        let ctx = ToleranceCtx::unscaled_legacy();
         let (t0, t1) = self.curve.range_tuple();
-        if self.is_front_fixed() && self.curve.front().near(&point) {
+        if self.is_front_fixed() && ctx.near_pt(self.curve.front(), point) {
+            // BG-TOL-001: model
             match hint.into() {
                 SPHint2D::Parameter(_, y) => Some((t0, y)),
                 SPHint2D::Range((_, y), _) => Some((t0, y)),
                 SPHint2D::None => Some((t0, 0.0)),
             }
-        } else if self.is_back_fixed() && self.curve.back().near(&point) {
+        } else if self.is_back_fixed() && ctx.near_pt(self.curve.back(), point) {
+            // BG-TOL-001: model
             match hint.into() {
                 SPHint2D::Parameter(_, y) => Some((t1, y)),
                 SPHint2D::Range(_, (_, y)) => Some((t1, y)),
@@ -397,6 +425,7 @@ impl<C: ParametricCurve3D + BoundedCurve> SearchParameter<D2> for RevolutedCurve
                 SPHint2D::None => None,
             };
             let t = proj_curve.search_parameter(p, hint0, trials)?;
+            let t = normalize_branch(t, self.curve.period(), t0, hint0);
             let p_eval = self.curve.subs(t);
             let p_rad = p_eval - self.origin();
             let r_vec = p_rad - p_rad.dot(self.axis()) * self.axis();
@@ -425,10 +454,12 @@ impl<C: ParametricCurve3D + BoundedCurve> SearchNearestParameter<D2> for Revolut
         hint: H,
         trials: usize,
     ) -> Option<(f64, f64)> {
+        let ctx = ToleranceCtx::unscaled_legacy();
         let (t0, t1) = self.curve.range_tuple();
         let on_axis = move |o: Point3, normal: Vector3| {
             let op = point - o;
-            op.cross(self.revolution.axis).so_small() && op.dot(normal) >= 0.0
+            ctx.is_small_len(op.cross(self.revolution.axis).magnitude()) // BG-TOL-001: model
+                && op.dot(normal) >= 0.0
         };
         if self.is_front_fixed() && on_axis(self.curve.front(), self.normal(t0, 0.0)) {
             match hint.into() {
@@ -454,6 +485,7 @@ impl<C: ParametricCurve3D + BoundedCurve> SearchNearestParameter<D2> for Revolut
                 SPHint2D::None => SPHint1D::None,
             };
             let t = proj_curve.search_nearest_parameter(p, hint0, trials)?;
+            let t = normalize_branch(t, self.curve.period(), t0, hint0);
             let p = self.curve.subs(t);
             Some((t, self.revolution.proj_angle(p, point)))
         }
@@ -494,66 +526,138 @@ where
 }
 
 impl IncludeCurve<BSplineCurve<Point3>> for RevolutedCurve<&BSplineCurve<Point3>> {
-    fn include(&self, curve: &BSplineCurve<Point3>) -> bool {
+    fn include(&self, curve: &BSplineCurve<Point3>) -> Outcome<bool> {
         let knots = curve.knot_vec().to_single_multi().0;
         let degree = usize::max(2, usize::max(curve.degree(), self.curve.degree()));
-        sub_include(self, curve, &knots, degree)
+        Ok(Certified::new(
+            sub_include(self, curve, &knots, degree),
+            Certificate {
+                props: PropMap::new(),
+                method: Method::Float,
+                budget_left: Budget::new(0, 0, 0),
+                margin: Margin::UNBOUNDED,
+                modulus: Modulus::Unbounded,
+            },
+        ))
     }
 }
 
 impl IncludeCurve<BSplineCurve<Point3>> for RevolutedCurve<BSplineCurve<Point3>> {
-    fn include(&self, curve: &BSplineCurve<Point3>) -> bool {
+    fn include(&self, curve: &BSplineCurve<Point3>) -> Outcome<bool> {
         let knots = curve.knot_vec().to_single_multi().0;
         let degree = usize::max(2, usize::max(curve.degree(), self.curve.degree()));
-        sub_include(self, curve, &knots, degree)
+        Ok(Certified::new(
+            sub_include(self, curve, &knots, degree),
+            Certificate {
+                props: PropMap::new(),
+                method: Method::Float,
+                budget_left: Budget::new(0, 0, 0),
+                margin: Margin::UNBOUNDED,
+                modulus: Modulus::Unbounded,
+            },
+        ))
     }
 }
 
 impl IncludeCurve<BSplineCurve<Point3>> for RevolutedCurve<&NurbsCurve<Vector4>> {
-    fn include(&self, curve: &BSplineCurve<Point3>) -> bool {
+    fn include(&self, curve: &BSplineCurve<Point3>) -> Outcome<bool> {
         let knots = curve.knot_vec().to_single_multi().0;
         let degree = curve.degree() + usize::max(2, self.curve.degree());
-        sub_include(self, curve, &knots, degree)
+        Ok(Certified::new(
+            sub_include(self, curve, &knots, degree),
+            Certificate {
+                props: PropMap::new(),
+                method: Method::Float,
+                budget_left: Budget::new(0, 0, 0),
+                margin: Margin::UNBOUNDED,
+                modulus: Modulus::Unbounded,
+            },
+        ))
     }
 }
 
 impl IncludeCurve<BSplineCurve<Point3>> for RevolutedCurve<NurbsCurve<Vector4>> {
-    fn include(&self, curve: &BSplineCurve<Point3>) -> bool {
+    fn include(&self, curve: &BSplineCurve<Point3>) -> Outcome<bool> {
         let knots = curve.knot_vec().to_single_multi().0;
         let degree = curve.degree() + usize::max(2, self.curve.degree());
-        sub_include(self, curve, &knots, degree)
+        Ok(Certified::new(
+            sub_include(self, curve, &knots, degree),
+            Certificate {
+                props: PropMap::new(),
+                method: Method::Float,
+                budget_left: Budget::new(0, 0, 0),
+                margin: Margin::UNBOUNDED,
+                modulus: Modulus::Unbounded,
+            },
+        ))
     }
 }
 
 impl IncludeCurve<NurbsCurve<Vector4>> for RevolutedCurve<&BSplineCurve<Point3>> {
-    fn include(&self, curve: &NurbsCurve<Vector4>) -> bool {
+    fn include(&self, curve: &NurbsCurve<Vector4>) -> Outcome<bool> {
         let knots = curve.knot_vec().to_single_multi().0;
         let degree = curve.degree() + usize::max(2, self.curve.degree());
-        sub_include(self, curve, &knots, degree)
+        Ok(Certified::new(
+            sub_include(self, curve, &knots, degree),
+            Certificate {
+                props: PropMap::new(),
+                method: Method::Float,
+                budget_left: Budget::new(0, 0, 0),
+                margin: Margin::UNBOUNDED,
+                modulus: Modulus::Unbounded,
+            },
+        ))
     }
 }
 
 impl IncludeCurve<NurbsCurve<Vector4>> for RevolutedCurve<BSplineCurve<Point3>> {
-    fn include(&self, curve: &NurbsCurve<Vector4>) -> bool {
+    fn include(&self, curve: &NurbsCurve<Vector4>) -> Outcome<bool> {
         let knots = curve.knot_vec().to_single_multi().0;
         let degree = curve.degree() + usize::max(2, self.curve.degree());
-        sub_include(self, curve, &knots, degree)
+        Ok(Certified::new(
+            sub_include(self, curve, &knots, degree),
+            Certificate {
+                props: PropMap::new(),
+                method: Method::Float,
+                budget_left: Budget::new(0, 0, 0),
+                margin: Margin::UNBOUNDED,
+                modulus: Modulus::Unbounded,
+            },
+        ))
     }
 }
 
 impl IncludeCurve<NurbsCurve<Vector4>> for RevolutedCurve<&NurbsCurve<Vector4>> {
-    fn include(&self, curve: &NurbsCurve<Vector4>) -> bool {
+    fn include(&self, curve: &NurbsCurve<Vector4>) -> Outcome<bool> {
         let knots = curve.knot_vec().to_single_multi().0;
         let degree = curve.degree() + usize::max(2, self.curve.degree());
-        sub_include(self, curve, &knots, degree)
+        Ok(Certified::new(
+            sub_include(self, curve, &knots, degree),
+            Certificate {
+                props: PropMap::new(),
+                method: Method::Float,
+                budget_left: Budget::new(0, 0, 0),
+                margin: Margin::UNBOUNDED,
+                modulus: Modulus::Unbounded,
+            },
+        ))
     }
 }
 
 impl IncludeCurve<NurbsCurve<Vector4>> for RevolutedCurve<NurbsCurve<Vector4>> {
-    fn include(&self, curve: &NurbsCurve<Vector4>) -> bool {
+    fn include(&self, curve: &NurbsCurve<Vector4>) -> Outcome<bool> {
         let knots = curve.knot_vec().to_single_multi().0;
         let degree = curve.degree() + usize::max(2, self.curve.degree());
-        sub_include(self, curve, &knots, degree)
+        Ok(Certified::new(
+            sub_include(self, curve, &knots, degree),
+            Certificate {
+                props: PropMap::new(),
+                method: Method::Float,
+                budget_left: Budget::new(0, 0, 0),
+                margin: Margin::UNBOUNDED,
+                modulus: Modulus::Unbounded,
+            },
+        ))
     }
 }
 
@@ -615,6 +719,50 @@ where
     }
 }
 
+fn normalize_branch(t: f64, period: Option<f64>, t0: f64, hint: SPHint1D) -> f64 {
+    let Some(period) = period.filter(|p| *p > 0.0 && p.is_finite()) else {
+        return t;
+    };
+    match hint {
+        // No hint: fold the result into the profile's principal period.
+        SPHint1D::None => t0 + (t - t0).rem_euclid(period),
+        // A hint names the branch the caller is on: shift by whole periods to
+        // the copy nearest it.
+        SPHint1D::Parameter(hint) => t - ((t - hint) / period).round() * period,
+        SPHint1D::Range(hint0, _) => t - ((t - hint0) / period).round() * period,
+    }
+}
+
+fn from_axis_angle_derivation(n: usize, axis: Vector3, angle: Rad<f64>) -> Matrix3 {
+    let (s, c) = Rad::sin_cos(angle);
+    let (s, c) = match n % 4 {
+        0 => (s, c),
+        1 => (c, -s),
+        2 => (-s, -c),
+        _ => (-c, s),
+    };
+    let _1subc = match n {
+        0 => 1.0 - c,
+        _ => -c,
+    };
+
+    #[allow(clippy::deprecated_cfg_attr)]
+    #[cfg_attr(rustfmt, rustfmt_skip)]
+    Matrix3::new(
+        _1subc * axis.x * axis.x + c,
+        _1subc * axis.x * axis.y + s * axis.z,
+        _1subc * axis.x * axis.z - s * axis.y,
+
+        _1subc * axis.x * axis.y - s * axis.z,
+        _1subc * axis.y * axis.y + c,
+        _1subc * axis.y * axis.z + s * axis.x,
+
+        _1subc * axis.x * axis.z + s * axis.y,
+        _1subc * axis.y * axis.z - s * axis.x,
+        _1subc * axis.z * axis.z + c,
+    )
+}
+
 #[cfg(test)]
 mod parameter_division_bounds {
     use super::*;
@@ -671,32 +819,56 @@ mod parameter_division_bounds {
     }
 }
 
-fn from_axis_angle_derivation(n: usize, axis: Vector3, angle: Rad<f64>) -> Matrix3 {
-    let (s, c) = Rad::sin_cos(angle);
-    let (s, c) = match n % 4 {
-        0 => (s, c),
-        1 => (c, -s),
-        2 => (-s, -c),
-        _ => (-c, s),
-    };
-    let _1subc = match n {
-        0 => 1.0 - c,
-        _ => -c,
-    };
+#[cfg(test)]
+// BG-CE-006-r2: the projection search on a periodic profile must return
+// branch-consistent parameters, or a sweep boundary's successive inverse
+// lookups land on arbitrary period copies and flip boundary orientation.
+mod periodic_profile_search_tests {
+    use super::*;
+    use std::f64::consts::TAU;
 
-    #[allow(clippy::deprecated_cfg_attr)]
-    #[cfg_attr(rustfmt, rustfmt_skip)]
-    Matrix3::new(
-        _1subc * axis.x * axis.x + c,
-        _1subc * axis.x * axis.y + s * axis.z,
-        _1subc * axis.x * axis.z - s * axis.y,
+    /// A revolved surface whose profile is a placed full-range unit circle at
+    /// radius two: periodic with period `TAU`, the profile that used to return
+    /// `−10π` and `11π` for the same point.
+    fn revolved_circle_profile() -> RevolutedCurve<Curve> {
+        let trimmed = TrimmedCurve::new(UnitCircle::<Point3>::new(), (0.0, TAU));
+        let placement = Matrix4::from_translation(Vector3::new(2.0, 0.0, 0.0));
+        let profile = Processor::with_transform(trimmed, placement).to_same_geometry();
+        RevolutedCurve::by_revolution(profile, Point3::origin(), Vector3::unit_z())
+    }
 
-        _1subc * axis.x * axis.y - s * axis.z,
-        _1subc * axis.y * axis.y + c,
-        _1subc * axis.y * axis.z + s * axis.x,
+    #[test]
+    fn search_parameter_is_branch_consistent_for_periodic_profiles() {
+        let surface = revolved_circle_profile();
+        let point = surface.subs(1.0, 2.0);
 
-        _1subc * axis.x * axis.z + s * axis.y,
-        _1subc * axis.y * axis.z - s * axis.x,
-        _1subc * axis.z * axis.z + c,
-    )
+        // With a hint in the principal branch, the result stays within half a
+        // period of it.
+        let (u, _) = surface
+            .search_parameter(point, (1.0, 2.0), 100)
+            .expect("the sample point is on the surface");
+        assert!(
+            (u - 1.0).abs() <= TAU / 2.0,
+            "hinted search drifted off branch: u = {u}"
+        );
+
+        // Without a hint, the result lies in the profile's principal period
+        // `[0, TAU)` instead of an arbitrary period copy.
+        let (u0, _) = surface
+            .search_parameter(point, None, 100)
+            .expect("the sample point is on the surface");
+        assert!(
+            (0.0..TAU).contains(&u0),
+            "hintless search left the principal period: u0 = {u0}"
+        );
+
+        // A hint on the found branch reproduces it.
+        let (u1, _) = surface
+            .search_parameter(point, Some((u0, 2.0)), 100)
+            .expect("the sample point is on the surface");
+        assert!(
+            (u1 - u0).abs() <= TAU / 2.0,
+            "search returned an inconsistent branch: u0 = {u0}, u1 = {u1}"
+        );
+    }
 }

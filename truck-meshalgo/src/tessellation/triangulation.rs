@@ -245,6 +245,12 @@ fn proj_domain_recovery_enabled_cached() -> bool {
     *ENABLED.get_or_init(diagnosis::proj_domain_recovery_enabled)
 }
 
+/// PROJ-003 Stage D gate, read once for the same reason as Stage A's.
+fn proj_domain_constrained_enabled_cached() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(diagnosis::proj_domain_constrained_enabled)
+}
+
 /// PROJ-002's deep inverse probe. Same reason for the `OnceLock`, and more of
 /// it: this one runs a full Newton solve per seed per failing point.
 fn projection_deep_probe_enabled() -> bool {
@@ -416,6 +422,58 @@ fn better_outcome(a: NearestOutcome, b: NearestOutcome) -> NearestOutcome {
         std::cmp::Ordering::Equal if b.residual < a.residual => b,
         std::cmp::Ordering::Equal => a,
     }
+}
+
+/// Record the DIAG-002 boundary-projection refusal witness from the last
+/// projection attempt, at the refusal site.
+///
+/// Everything here is already in hand at the refusal: the attempt the
+/// production chain just made, the failing world point, the tolerance, and the
+/// walk's own counts. No additional geometric work is done.
+fn record_projection_refusal_witness(
+    attempt: &ProjectionAttempt,
+    world_point: Point3,
+    tol: f64,
+    attempted_samples: usize,
+    successful_samples: usize,
+    first_failed_index: Option<usize>,
+) {
+    let best = better_outcome(attempt.prod_best, attempt.seed_best);
+    let kind = if !best.ran() {
+        diagnosis::ProjectionFailureKind::NoInverseCandidate
+    } else if best.degenerate {
+        diagnosis::ProjectionFailureKind::SingularEvaluation
+    } else if !best.in_domain {
+        diagnosis::ProjectionFailureKind::EvaluatorOutOfDomain
+    } else if best.converged && best.residual > tol {
+        diagnosis::ProjectionFailureKind::ResidualAboveTolerance
+    } else {
+        diagnosis::ProjectionFailureKind::Other
+    };
+    let mut residuals = [attempt.prod_best, attempt.seed_best]
+        .into_iter()
+        .filter(|o| o.ran())
+        .map(|o| o.residual);
+    let min_residual = residuals.clone().reduce(f64::min);
+    let max_residual = residuals.reduce(f64::max);
+    diagnosis::record_projection_refusal(diagnosis::ProjectionRefusalWitness {
+        kind,
+        attempted_samples,
+        successful_samples,
+        failed_samples: attempted_samples.saturating_sub(successful_samples),
+        first_failed_sample: first_failed_index,
+        min_residual,
+        max_residual,
+        acceptance_tolerance: tol.is_finite().then_some(tol),
+        source_parameter: None,
+        candidate_uv: best.ran().then_some([best.uv.0, best.uv.1]),
+        world_point: world_point.is_finite().then_some([
+            world_point.x,
+            world_point.y,
+            world_point.z,
+        ]),
+        periodic_candidate_count: None,
+    });
 }
 
 /// The residual-certified admission contract, on one best candidate.
@@ -725,6 +783,173 @@ fn residual_certified_domain_recovery<S: PreMeshableSurface>(
         Some(((nu, nv), residual, class))
     } else {
         None
+    }
+}
+
+/// Grid divisions per axis of the Stage D constrained inverse.
+///
+/// The grid is evaluated only on the projection-failure path, so its cost is
+/// paid by faces that would otherwise fail. `64` resolves 1/64 of a declared
+/// span, which is fine for both boundary-adjacent roots and the wrapped
+/// representatives of a surface whose evaluator repeats with the span.
+const DOMAIN_CONSTRAINED_GRID: usize = 64;
+/// Clamped-Newton iterations after the grid.
+const DOMAIN_CONSTRAINED_ITERS: usize = 64;
+
+/// PROJ-003 Stage D: the constrained inverse over the declared parameter range.
+///
+/// The unconstrained projection chain (and Stages A-C) operate on the
+/// *unconstrained* Newton iterate. A boundary point whose nearest root lies on
+/// an extrapolated branch — a spline that genuinely wraps despite an open
+/// declaration, or a degenerate edge — can come back out of the declared range
+/// even though an in-range root exists on the same surface. This runs a fresh
+/// inverse **restricted to `D_accept`**: a grid over the declared range, then
+/// clamped Newton refinement pinned to the box, re-certified under the
+/// residual contract (finite UV, finite evaluation, `|S(u, v) - P| <= tol`).
+///
+/// Refinement-only by construction: it runs only where the whole legacy chain
+/// and Stages A-C refused the point, so it changes nothing that already
+/// projected or was recovered. It never clamps a solver answer into range and
+/// never modulos a non-periodic axis — it searches inside the range in the
+/// first place, so an admitted coordinate is genuinely in `D_accept`.
+fn constrained_domain_inverse<S: PreMeshableSurface>(
+    surface: &S,
+    point: Point3,
+    tol: f64,
+) -> Option<((f64, f64), f64)> {
+    let (urange, vrange) = surface.try_range_tuple();
+    let (u0, u1) = urange?;
+    let (v0, v1) = vrange?;
+    if !(u1 > u0)
+        || !(v1 > v0)
+        || !u0.is_finite()
+        || !u1.is_finite()
+        || !v0.is_finite()
+        || !v1.is_finite()
+    {
+        return None;
+    }
+    // Dense grid over the declared range.
+    let mut best = (f64::INFINITY, 0.0f64, 0.0f64);
+    for i in 0..=DOMAIN_CONSTRAINED_GRID {
+        let u = u0 + (u1 - u0) * (i as f64 / DOMAIN_CONSTRAINED_GRID as f64);
+        for j in 0..=DOMAIN_CONSTRAINED_GRID {
+            let v = v0 + (v1 - v0) * (j as f64 / DOMAIN_CONSTRAINED_GRID as f64);
+            let evaluated = surface.subs(u, v);
+            if !evaluated.x.is_finite() || !evaluated.y.is_finite() || !evaluated.z.is_finite() {
+                continue;
+            }
+            let residual = evaluated.distance(point);
+            if residual < best.0 {
+                best = (residual, u, v);
+            }
+        }
+    }
+    if !best.0.is_finite() {
+        return None;
+    }
+    // Clamped Newton refinement from the best cell, pinned to the box.
+    let mut u = best.1;
+    let mut v = best.2;
+    let mut best_ref = (best.0, u, v);
+    for _ in 0..DOMAIN_CONSTRAINED_ITERS {
+        let diff = surface.subs(u, v) - point;
+        let uder = surface.uder(u, v);
+        let vder = surface.vder(u, v);
+        let (uu, uv, vv) = (uder.dot(uder), uder.dot(vder), vder.dot(vder));
+        let jac = Matrix2::new(uu, uv, uv, vv);
+        let val = Vector2::new(uder.dot(diff), vder.dot(diff));
+        let Some(step) = jac.invert() else {
+            break;
+        };
+        let next = Vector2::new(u, v) - step * val;
+        u = next.x.clamp(u0, u1);
+        v = next.y.clamp(v0, v1);
+        let evaluated = surface.subs(u, v);
+        if !evaluated.x.is_finite() || !evaluated.y.is_finite() || !evaluated.z.is_finite() {
+            break;
+        }
+        let residual = evaluated.distance(point);
+        if residual < best_ref.0 {
+            best_ref = (residual, u, v);
+        }
+    }
+    let (residual, u, v) = best_ref;
+    if !residual.is_finite() || residual > tol {
+        return None;
+    }
+    Some(((u, v), residual))
+}
+
+/// The Stage D recovery wrapper, gated like the other recovery stages.
+fn constrained_domain_recovery<S: PreMeshableSurface>(
+    surface: &S,
+    point: Point3,
+    tol: f64,
+) -> Option<((f64, f64), f64)> {
+    if !proj_domain_constrained_enabled_cached() {
+        return None;
+    }
+    constrained_domain_inverse(surface, point, tol)
+}
+
+#[cfg(test)]
+mod constrained_domain_inverse_tests {
+    use super::constrained_domain_inverse;
+    use truck_geometry::prelude::{Plane, Point3};
+
+    fn plane() -> Plane {
+        Plane::new(
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        )
+    }
+
+    /// Positive: an on-surface point inside the declared range is found by the
+    /// constrained inverse and returned with a certified residual, pinned to
+    /// the box.
+    #[test]
+    fn in_range_point_is_found() {
+        let s = plane();
+        let p = Point3::new(0.25, 0.75, 0.0);
+        let got = constrained_domain_inverse(&s, p, 1.0e-6);
+        let ((u, v), residual) = got.expect("an on-plane point is found in range");
+        assert!((u - 0.25).abs() < 1.0e-6);
+        assert!((v - 0.75).abs() < 1.0e-6);
+        assert!(residual <= 1.0e-6);
+    }
+
+    /// Positive: a point on the domain boundary (the `u = 1` edge) is found in
+    /// range; the returned coordinate is never pushed outside `D_accept`.
+    #[test]
+    fn boundary_edge_point_is_found_in_range() {
+        let s = plane();
+        let p = Point3::new(1.0, 0.5, 0.0);
+        let got = constrained_domain_inverse(&s, p, 1.0e-6);
+        let ((u, v), residual) = got.expect("a boundary-edge point is found");
+        assert!(u >= 0.0 && u <= 1.0, "u must stay in D_accept, got {u}");
+        assert!(v >= 0.0 && v <= 1.0, "v must stay in D_accept, got {v}");
+        assert!(residual <= 1.0e-6);
+    }
+
+    /// Negative: no in-range solution within tolerance, so the constrained
+    /// inverse refuses and the face stays out of domain.
+    #[test]
+    fn no_in_range_root_refuses() {
+        let s = plane();
+        // 0.5 off the plane in z: no point on the plane is within tol.
+        let p = Point3::new(5.0, 5.0, 0.5);
+        assert!(constrained_domain_inverse(&s, p, 1.0e-6).is_none());
+    }
+
+    /// Negative: an in-range point whose certified residual exceeds the caller
+    /// tolerance is refused (ResidualAboveTolerance semantics preserved).
+    #[test]
+    fn above_tolerance_refuses() {
+        let s = plane();
+        let p = Point3::new(0.5, 0.5, 1.0e-3);
+        assert!(constrained_domain_inverse(&s, p, 1.0e-6).is_none());
     }
 }
 
@@ -1039,10 +1264,10 @@ pub struct MeshedShellOutcome {
     pub shell: MeshedCShell,
     /// Why each face failed, positionally aligned with `shell.faces`.
     pub face_failures: Vec<Option<TessellationFailure>>,
-    /// DIAG-001: structured diagnostic record for each failed face, positionally
-    /// aligned with `shell.faces`. Populated only when `TRUCK_FACE_DIAG_JSONL`
-    /// is set; all `None` otherwise.
-    pub face_diagnoses: Vec<Option<diagnosis::FailedFaceDiagnosis>>,
+    /// DIAG-002: the finalized structured diagnostic record for each failed
+    /// face, positionally aligned with `shell.faces`. `None` for a face that
+    /// tessellated.
+    pub face_diagnoses: Vec<Option<diagnosis::FaceDiagnosticRecord>>,
     /// DIAG-001: what the formal cylinder-band fallback did on each face,
     /// positionally aligned with `shell.faces`. `None` for every face the
     /// fallback was not eligible for, which includes every face when the gate
@@ -1701,6 +1926,7 @@ where
     }
     let tessellate_face = |(declared_face_index, face): (usize, &CompressedFace<S>)| {
         let source_face_id = face.provenance.best_id().map(SourceEntityId::get);
+        let source_use_id = face.provenance.use_id.map(SourceEntityId::get);
         let periodic_rank = u8::from(face.surface.u_period().is_some())
             + u8::from(face.surface.v_period().is_some());
         PROBE_FACE_CONTEXT.with(|context| {
@@ -1712,13 +1938,52 @@ where
         };
         let bound_count = face.boundaries.len();
         let diag = diagnosis::diag_enabled();
-        if diag {
-            diagnosis::clear_sink();
+        // DIAG-002 structural facts, counted from the face's own wires: cheap,
+        // and exactly the source/topology structure the record's contract
+        // demands. `edge_use_count` is the number of source edge uses the
+        // face references; `distinct_vertex_count` the distinct source
+        // vertices behind them.
+        let edge_use_count: usize = face.boundaries.iter().map(|wire| wire.len()).sum();
+        let mut distinct_vertices: Vec<usize> = Vec::new();
+        for wire in &face.boundaries {
+            for edge_idx in wire {
+                let vertices = match edges.get(edge_idx.index) {
+                    Some(EstablishedEdge::Mesh(edge)) => edge.vertices,
+                    Some(EstablishedEdge::Unresolved { vertices, .. }) => *vertices,
+                    None => continue,
+                };
+                if !distinct_vertices.contains(&vertices.0) {
+                    distinct_vertices.push(vertices.0);
+                }
+                if !distinct_vertices.contains(&vertices.1) {
+                    distinct_vertices.push(vertices.1);
+                }
+            }
         }
+        let distinct_vertex_count = distinct_vertices.len();
 
         let boundaries = face.boundaries.clone();
         let surface = &face.surface;
         let lattice = lattice_of(surface);
+        // Whether the lattice certified every periodic axis from
+        // representation-derived evidence, so the record can claim the
+        // source-declared closure honestly.
+        let all_periods_certified = (!periodic_axes.u
+            || matches!(lattice.u, AxisPeriodStatus::Exact { .. }))
+            && (!periodic_axes.v || matches!(lattice.v, AxisPeriodStatus::Exact { .. }));
+        diagnosis::begin_face(
+            diagnosis::document_context(),
+            source_face_id,
+            source_use_id,
+            periodic_axes,
+            bound_count,
+            edge_use_count,
+            distinct_vertex_count,
+            periodic_rank,
+            tol,
+            all_periods_certified,
+            shell.source_geometric_uncertainty,
+        );
         // The structural schema, read before the lattice erases which producer
         // said `NonPeriodic`. Nothing in the legacy chain below reads it.
         let schema = schema_of(surface);
@@ -1768,6 +2033,19 @@ where
                 let edge = match edges.get(edge_idx.index) {
                     Some(EstablishedEdge::Mesh(edge)) => edge,
                     Some(EstablishedEdge::Unresolved { .. }) => {
+                        // DIAG-002: the source-edge traversal refusal witness.
+                        // The failing bound and edge use are in hand here; the
+                        // caller tolerance and the source's declared geometric
+                        // uncertainty are the operative numbers.
+                        diagnosis::record_source_edge_refusal(diagnosis::SourceEdgeWitness {
+                            source_bound: Some(bound_index),
+                            source_edge_use: Some(use_index),
+                            endpoint_residuals: None,
+                            declared_source_uncertainty: shell.source_geometric_uncertainty,
+                            effective_incidence_tolerance: None,
+                            caller_tolerance: Some(tol),
+                            carrier_closure: None,
+                        });
                         return Err(TessellationFailureReason::EdgeTraversalUnresolved);
                     }
                     None => continue,
@@ -1816,11 +2094,10 @@ where
         // below, which runs only on a degenerate initial lift and only when a
         // rank-2 on-surface source interval can be independently certified.
         let mut preboundary = preboundary;
-        let mut validity_certificate: Option<FaceValidityCertificate> =
-            match preboundary.as_ref() {
-                Ok(pieces) => detect_degenerate_trim(pieces, surface),
-                Err(_) => None,
-            };
+        let mut validity_certificate: Option<FaceValidityCertificate> = match preboundary.as_ref() {
+            Ok(pieces) => detect_degenerate_trim(pieces, surface),
+            Err(_) => None,
+        };
         // Certified closed-loop re-lift (recovery workstream). A face whose
         // initial boundary lift degenerated — Detector B above fired — is not
         // automatically rejected: when the source is a topologically closed
@@ -1861,19 +2138,25 @@ where
         // other face it stays `None`.
         let mut parity_retry_boundary: Option<PolyBoundary> = None;
         let (polygon, failure) = match preboundary {
-            Err(reason) => (None, Some(TessellationFailure::from(reason))),
+            Err(reason) => (
+                None,
+                Some(diagnosis::fail(
+                    reason,
+                    diagnosis::failure_stage_for_reason(reason),
+                )),
+            ),
             Ok(_preboundary) if rejected => {
-                // The certificate travels with the diagnosis record; the census
-                // reads it to classify the face as `rejected_intrinsic`.
-                if let Some(cert) = validity_certificate {
-                    diagnosis::record_face_rejection(cert);
-                }
-                (
-                    None,
-                    Some(TessellationFailure::from(
-                        TessellationFailureReason::RejectedDegenerate,
-                    )),
-                )
+                // A certified rejection is terminal: no recovery route may touch
+                // it. The certificate travels inside the record; the census reads
+                // it to classify the face as `rejected_intrinsic`.
+                let failure = diagnosis::reject(
+                    TessellationFailureReason::RejectedDegenerate,
+                    diagnosis::FailureStage::ValidityClassification,
+                    validity_certificate.unwrap_or_else(|| {
+                        FaceValidityCertificate::all_bounds_collapsed(bound_count)
+                    }),
+                );
+                (None, Some(failure))
             }
             Ok(preboundary) => {
                 let retained = deck_join_candidate.then(|| preboundary.clone());
@@ -1956,7 +2239,7 @@ where
             );
         // The legacy verdict, classified here and not later: the cylinder-band
         // fallback admits one loss bucket, the bucket is derived from conflict
-        // witnesses the sink holds, and `build_face_diagnosis` below consumes
+        // witnesses the sink holds, and the terminal finalizer below consumes
         // them. Reading it at the seam where the legacy path finished also
         // makes it unambiguously a statement about *that* result, and not
         // about whatever a formal route replaced it with.
@@ -2422,45 +2705,36 @@ where
             }
             _ => (polygon, failure),
         };
-        let result = CompressedFace {
-            boundaries,
-            orientation: face.orientation,
-            surface: polygon,
-            // Tessellation is the stage most likely to produce nothing, so it
-            // is the stage that most needs to say which face produced nothing.
-            // `polygon` is `None` on failure, and the identity is then the only
-            // thing left that can name what was lost.
-            provenance: face.provenance,
-        };
         PROBE_FACE_CONTEXT.with(|context| context.set((None, usize::MAX, 0)));
-        let face_diagnosis = if diag {
-            if let Some(ref failure) = failure {
-                let all_periods_certified = (!periodic_axes.u
-                    || matches!(lattice.u, AxisPeriodStatus::Exact { .. }))
-                    && (!periodic_axes.v || matches!(lattice.v, AxisPeriodStatus::Exact { .. }));
-                let lift_status = diagnosis::compute_lift_status(
-                    periodic_axes,
-                    failure.reason,
-                    all_periods_certified,
-                );
-                let deck_status = diagnosis::compute_deck_status(periodic_rank);
-                Some(diagnosis::build_face_diagnosis(
-                    source_face_id,
-                    failure.reason,
-                    periodic_rank,
-                    periodic_axes,
-                    bound_count,
-                    lift_status,
-                    deck_status,
-                ))
-            } else {
-                None
+        // The single terminal finalizer: exactly one record per face that ends
+        // this closure without a mesh. A face recovered by a formal route has
+        // `failure == None` here and emits nothing; a face whose legacy attempt
+        // failed and whose every retry also failed emits its legacy record
+        // once. The finalized record rides both inside the returned failure
+        // and in `face_diagnoses` for the census.
+        let (failure, face_diagnosis) = if diag {
+            match failure {
+                Some(failure) => {
+                    let failure = diagnosis::finalize_and_emit(failure);
+                    let record = failure.diagnostic.clone();
+                    (Some(failure), Some(record))
+                }
+                None => (None, None),
             }
         } else {
-            None
+            (failure, None)
         };
         (
-            result,
+            CompressedFace {
+                boundaries,
+                orientation: face.orientation,
+                surface: polygon,
+                // Tessellation is the stage most likely to produce nothing, so
+                // it is the stage that most needs to say which face produced
+                // nothing. `polygon` is `None` on failure, and the identity is
+                // then the only thing left that can name what was lost.
+                provenance: face.provenance,
+            },
             failure,
             face_diagnosis,
             band_attempt,
@@ -4238,27 +4512,36 @@ fn reconcile_singular_transition<S: ParametricSurface3D>(
     tolerance: f64,
     output: &mut Vec<SurfacePoint>,
 ) {
+    let ctx = ToleranceCtx::unscaled_legacy();
     let represents =
         |uv: Point2, point: Point3| surface.subs(uv.x, uv.y).distance(point) <= tolerance;
-    if !previous_uv.x.near(&current_uv.x) && surface.uder(current_uv.x, current_uv.y).so_small() {
+    let cur_uder = surface.uder(current_uv.x, current_uv.y).magnitude();
+    let cur_vder = surface.vder(current_uv.x, current_uv.y).magnitude();
+    let prev_uder = surface.uder(previous_uv.x, previous_uv.y).magnitude();
+    let prev_vder = surface.vder(previous_uv.x, previous_uv.y).magnitude();
+    if !ctx.is_small_ratio(previous_uv.x - current_uv.x) && ctx.is_small_len(cur_uder) {
+        // BG-TOL-001: param+model
         let candidate = Point2::new(previous_uv.x, current_uv.y);
         if represents(candidate, current_point) {
             current_uv.x = previous_uv.x;
         }
     }
-    if !previous_uv.y.near(&current_uv.y) && surface.vder(current_uv.x, current_uv.y).so_small() {
+    if !ctx.is_small_ratio(previous_uv.y - current_uv.y) && ctx.is_small_len(cur_vder) {
+        // BG-TOL-001: param+model
         let candidate = Point2::new(current_uv.x, previous_uv.y);
         if represents(candidate, current_point) {
             current_uv.y = previous_uv.y;
         }
     }
-    if !previous_uv.x.near(&current_uv.x) && surface.uder(previous_uv.x, previous_uv.y).so_small() {
+    if !ctx.is_small_ratio(previous_uv.x - current_uv.x) && ctx.is_small_len(prev_uder) {
+        // BG-TOL-001: param+model
         let candidate = Point2::new(current_uv.x, previous_uv.y);
         if represents(candidate, previous_point) {
             output.push((candidate, previous_point).into());
         }
     }
-    if !previous_uv.y.near(&current_uv.y) && surface.vder(previous_uv.x, previous_uv.y).so_small() {
+    if !ctx.is_small_ratio(previous_uv.y - current_uv.y) && ctx.is_small_len(prev_vder) {
+        // BG-TOL-001: param+model
         let candidate = Point2::new(previous_uv.x, current_uv.y);
         if represents(candidate, previous_point) {
             output.push((candidate, previous_point).into());
@@ -4316,6 +4599,7 @@ impl PolyBoundaryPiece {
         tol: f64,
         lattice: &CertifiedLattice,
     ) -> std::result::Result<Self, TessellationFailureReason> {
+        let ctx = ToleranceCtx::unscaled_legacy();
         // Audit A-ambient: periodicity now arrives as a descriptor whose type
         // distinguishes exact from accessor-only evidence. `declared_period`
         // is what this path read before, so the boundary is introduced with no
@@ -4361,6 +4645,17 @@ impl PolyBoundaryPiece {
         // boundary by indexing a vector that is empty. Real exports do produce
         // such wires, and panicking here aborts the whole model.
         if bdry3d.is_empty() {
+            // DIAG-002: the boundary-construction refusal witness. The wire
+            // carried polylines but every one of them contributed no points.
+            diagnosis::record_boundary_refusal(diagnosis::BoundaryWitness {
+                bound: None,
+                edge_or_piece: None,
+                pieces_attempted: piece_lengths.len(),
+                pieces_accepted: 0,
+                point_counts: piece_lengths.clone(),
+                constraints_that_would_be_presented: 0,
+                refusal: Some("wire_empty"),
+            });
             return Err(TessellationFailureReason::BoundaryWireEmpty);
         }
         bdry3d.push(bdry3d[0]);
@@ -4404,6 +4699,11 @@ impl PolyBoundaryPiece {
         let mut recovered_c_residual_max = 0.0f64;
         let mut domain_class_counts: rustc_hash::FxHashMap<diagnosis::DomainRecoveryClass, usize> =
             rustc_hash::FxHashMap::default();
+        // PROJ-003 Stage D per-face accumulators: constrained-inverse
+        // admissions and the certified residual spread across them.
+        let mut recovered_d_points = 0usize;
+        let mut recovered_d_residual_min = f64::INFINITY;
+        let mut recovered_d_residual_max = 0.0f64;
         // PROJ-002 per-face accumulators.
         let mut deep_probed = 0usize;
         let mut deep_point_cap_hit = false;
@@ -4499,6 +4799,19 @@ impl PolyBoundaryPiece {
                             recovered_c_residual_max = recovered_c_residual_max.max(residual);
                             *domain_class_counts.entry(class).or_insert(0) += 1;
                             uv
+                        } else if let Some((uv, residual)) =
+                            // PROJ-003 Stage D: the constrained inverse over the
+                            // declared range. Runs only after the whole legacy
+                            // chain and Stages A-C refused the point, so an
+                            // in-range root that the unconstrained Newton
+                            // iterate missed is preferred over the extrapolated
+                            // branch that left the declared range.
+                            constrained_domain_recovery(surface, pt, tol)
+                        {
+                            recovered_d_points += 1;
+                            recovered_d_residual_min = recovered_d_residual_min.min(residual);
+                            recovered_d_residual_max = recovered_d_residual_max.max(residual);
+                            uv
                         } else if proj_probe {
                             failed_points += 1;
                             failed_links[usize::from(attempt.link).min(5)] += 1;
@@ -4555,6 +4868,14 @@ impl PolyBoundaryPiece {
                             }
                             continue;
                         } else {
+                            record_projection_refusal_witness(
+                                &attempt,
+                                pt,
+                                tol,
+                                bdry3d.len(),
+                                vec.len(),
+                                None,
+                            );
                             return Err(TessellationFailureReason::BoundaryProjectionFailed);
                         }
                     }
@@ -4591,6 +4912,24 @@ impl PolyBoundaryPiece {
                                 residual / tol,
                             );
                         }
+                        // DIAG-002: the projection refusal witness. The
+                        // candidate was admitted but lies further from the
+                        // surface than the compatibility policy permits.
+                        diagnosis::record_compatibility_factor(compatibility_factor());
+                        diagnosis::record_projection_refusal(diagnosis::ProjectionRefusalWitness {
+                            kind: diagnosis::ProjectionFailureKind::ResidualAboveTolerance,
+                            attempted_samples: bdry3d.len(),
+                            successful_samples: vec.len(),
+                            failed_samples: 1,
+                            first_failed_sample: None,
+                            min_residual: Some(residual),
+                            max_residual: Some(residual),
+                            acceptance_tolerance: Some(tol * compatibility_factor()),
+                            source_parameter: None,
+                            candidate_uv: Some([u, v]),
+                            world_point: pt.is_finite().then_some([pt.x, pt.y, pt.z]),
+                            periodic_candidate_count: None,
+                        });
                         return Err(TessellationFailureReason::BoundaryPointOffSurface);
                     }
                 }
@@ -4773,7 +5112,59 @@ impl PolyBoundaryPiece {
                                 }
                             }
                         }
-                        return Err(TessellationFailureReason::AmbiguousLift);
+                        // The two candidate deck copies are [1, 0] (a one-period
+                        // advance along `u`) and [0, 1] (one along `v`). An
+                        // advance along an axis is structurally legal only when
+                        // that axis is periodic, so the candidate set is
+                        // filtered by the same `periodic_axes` evidence the
+                        // diagnostic reports before any numerical dominance is
+                        // attempted. A step that appears to advance one period
+                        // along a certified-non-periodic axis is an artefact of
+                        // an uncertified declared period, not a real branch.
+                        let periodic_u = surface.u_period().is_some();
+                        let periodic_v = surface.v_period().is_some();
+                        let legal_candidates =
+                            legal_deck_shifts(&[[1, 0], [0, 1]], periodic_u, periodic_v);
+                        match legal_candidates.len() {
+                            // Both axes certified periodic: both deck copies are
+                            // structurally legal and the numerical ambiguity
+                            // stands. DIAG-002: the lift refusal witness.
+                            // Bisection exhausted the step without
+                            // disambiguating the two period copies.
+                            2 => {
+                                diagnosis::record_lift_refusal(diagnosis::LiftWitness {
+                                    candidate_lift_count: legal_candidates.len(),
+                                    periodic_axes: diagnosis::PeriodicAxes {
+                                        u: periodic_u,
+                                        v: periodic_v,
+                                    },
+                                    candidate_deck_shifts: legal_candidates,
+                                    closure_seam_evidence: None,
+                                    dominance_explanation: Some("bisection_exhausted"),
+                                });
+                                return Err(TessellationFailureReason::AmbiguousLift);
+                            }
+                            // Exactly one axis certified periodic: the other
+                            // deck copy is structurally impossible, so the
+                            // ambiguity is resolved by the certified axes, not
+                            // by `get_mindiff` between the candidates. No axis
+                            // certified periodic: neither deck copy is legal and
+                            // the periodic deck resolver must not activate at
+                            // all. Both cases resume the lift from the ordinary
+                            // base sample the alternatives were derived from --
+                            // the originating real boundary point -- exactly as
+                            // the singular tie branch does, discarding the
+                            // synthetic midpoint chain that could not shrink.
+                            _ => {
+                                if let Some((ou, ov, opt_pt, origin_tag)) = origin {
+                                    vec.push((Point2::new(ou, ov), opt_pt).into());
+                                    lifted_tags.push(origin_tag);
+                                    previous = Some((ou, ov));
+                                    previous_pt = Some(opt_pt);
+                                }
+                                break;
+                            }
+                        }
                     }
                 }
                 vec.push((Point2::new(u, v), pt).into());
@@ -4887,6 +5278,23 @@ impl PolyBoundaryPiece {
                 p.y,
                 p.z,
             );
+            // Probe mode walked the whole boundary and failed a subset; the
+            // refusal is partial by construction.
+            let p = first_failed_point.unwrap_or_else(Point3::origin);
+            diagnosis::record_projection_refusal(diagnosis::ProjectionRefusalWitness {
+                kind: diagnosis::ProjectionFailureKind::PartialProjection,
+                attempted_samples: bdry3d.len(),
+                successful_samples: bdry3d.len().saturating_sub(failed_points),
+                failed_samples: failed_points,
+                first_failed_sample: None,
+                min_residual: best_residual.is_finite().then_some(best_residual),
+                max_residual: None,
+                acceptance_tolerance: Some(tol),
+                source_parameter: None,
+                candidate_uv: None,
+                world_point: p.is_finite().then_some([p.x, p.y, p.z]),
+                periodic_candidate_count: None,
+            });
             return Err(TessellationFailureReason::BoundaryProjectionFailed);
         }
         if (bdry3d.len() <= 2 || bdry3d[0].distance(bdry3d[bdry3d.len() - 1]) < 1e-4)
@@ -5122,9 +5530,13 @@ impl PolyBoundaryPiece {
             );
         }
         let last = *vec.last().unwrap();
-        if !vec[0].near(&last) {
+        if !ctx.is_small_ratio(vec[0].uv.distance(last.uv)) {
+            // BG-TOL-001: param
             let Point2 { x: u0, y: v0 } = last.uv;
-            if surface.uder(u0, v0).so_small() || surface.vder(u0, v0).so_small() {
+            let u_der = surface.uder(u0, v0).magnitude();
+            let v_der = surface.vder(u0, v0).magnitude();
+            if ctx.is_small_len(u_der) || ctx.is_small_len(v_der) {
+                // BG-TOL-001: model
                 vec.push(vec[0]);
                 lifted_tags.push(lifted_tags[0]);
             }
@@ -5502,7 +5914,8 @@ mod closed_loop_relift {
             let pts: Vec<Point3> = (0..=MIN_RELIFT_POINTS)
                 .map(|i| {
                     curve.subs(
-                        interval.0 + (interval.1 - interval.0) * i as f64 / MIN_RELIFT_POINTS as f64,
+                        interval.0
+                            + (interval.1 - interval.0) * i as f64 / MIN_RELIFT_POINTS as f64,
                     )
                 })
                 .collect();
@@ -5557,7 +5970,8 @@ mod closed_loop_relift {
         SP: super::SP<S>,
     {
         let probe = relift_probe();
-        let (source_face_id, declared_face_index, _) = PROBE_FACE_CONTEXT.with(std::cell::Cell::get);
+        let (source_face_id, declared_face_index, _) =
+            PROBE_FACE_CONTEXT.with(std::cell::Cell::get);
         if probe {
             eprintln!(
                 "RELIFT_ENTER source_face_id={:?} pieces={} bounds={} piece_lens={:?}",
@@ -5582,8 +5996,7 @@ mod closed_loop_relift {
         // what separate the recoverable closed loop from the rest.
         let mut rebuilt = Vec::with_capacity(boundaries.len());
         for (bound_index, wire) in boundaries.iter().enumerate() {
-            let Some(relifted) =
-                relift_wire(shell, surface, bound_index, wire, edges, sp, tol)
+            let Some(relifted) = relift_wire(shell, surface, bound_index, wire, edges, sp, tol)
             else {
                 if probe {
                     eprintln!(
@@ -5593,8 +6006,8 @@ mod closed_loop_relift {
                 }
                 return None;
             };
-            let piece = PolyBoundaryPiece::try_new(surface, relifted.into_iter(), sp, tol, lattice)
-                .ok()?;
+            let piece =
+                PolyBoundaryPiece::try_new(surface, relifted.into_iter(), sp, tol, lattice).ok()?;
             if piece.0.len() <= 2 {
                 if probe {
                     eprintln!(
@@ -5660,10 +6073,7 @@ mod closed_loop_relift {
         }
 
         fn line() -> PolylineCurve {
-            PolylineCurve::from(vec![
-                Point3::new(0.0, 0.0, 0.0),
-                Point3::new(0.0, 1.0, 0.0),
-            ])
+            PolylineCurve::from(vec![Point3::new(0.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0)])
         }
 
         fn tol() -> f64 {
@@ -5683,8 +6093,13 @@ mod closed_loop_relift {
         #[test]
         fn certify_accepts_closed_full_loop() {
             let sp = by_search_nearest_parameter;
-            let interval =
-                certify_closed_on_surface_interval(&square_loop(), (0.0, 4.0), &plane(), &sp, tol());
+            let interval = certify_closed_on_surface_interval(
+                &square_loop(),
+                (0.0, 4.0),
+                &plane(),
+                &sp,
+                tol(),
+            );
             let (a, b) = interval.expect("a closed on-surface square is certifiable");
             assert!(b > a);
             assert!((a - 0.0).abs() < 1.0e-6);
@@ -5710,7 +6125,8 @@ mod closed_loop_relift {
                 (Point2::new(x, y), Point3::new(x, y, 0.0)).into()
             };
             let slit = vec![corner(0.0, 0.0), corner(1.0, 0.0), corner(0.0, 0.0)];
-            let certificate = detect_degenerate_trim(&[PolyBoundaryPiece::untagged(slit)], &plane());
+            let certificate =
+                detect_degenerate_trim(&[PolyBoundaryPiece::untagged(slit)], &plane());
             let certificate = certificate.expect("an out-and-back slit is degenerate");
             assert_eq!(
                 certificate.reason,
@@ -5733,7 +6149,8 @@ mod closed_loop_relift {
                 corner(0.0, 1.0),
                 corner(0.0, 0.0),
             ];
-            let certificate = detect_degenerate_trim(&[PolyBoundaryPiece::untagged(rect)], &plane());
+            let certificate =
+                detect_degenerate_trim(&[PolyBoundaryPiece::untagged(rect)], &plane());
             assert!(certificate.is_none(), "a real rank-2 region must survive");
         }
     }
@@ -5745,6 +6162,73 @@ fn get_mindiff(u: f64, u0: f64, up: f64) -> f64 {
     // wrapped further was silently pulled back; rounding has no such bound and
     // is cheaper.
     u + f64::round((u0 - u) / up) * up
+}
+
+/// Filter periodic deck-candidate shifts by the certified periodicity of the
+/// two parameter axes.
+///
+/// A deck shift `(ku, kv)` advances `ku` full periods along `u` and `kv` along
+/// `v`. An advance along an axis is legal only when that axis is periodic, so a
+/// shift is retained iff `ku != 0 ⇒ periodic_u` and `kv != 0 ⇒ periodic_v`.
+///
+/// This is the structural filter applied to a bisection-exhausted lift step
+/// before any numerical dominance ([`get_mindiff`]) is attempted: an advance
+/// along a certified-non-periodic axis is impossible however close the
+/// numerical copies are. `periodic_u`/`periodic_v` are the same accessor facts
+/// the diagnostic records as `periodic_axes`.
+fn legal_deck_shifts(candidates: &[[i64; 2]], periodic_u: bool, periodic_v: bool) -> Vec<[i64; 2]> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|&[ku, kv]| (ku == 0 || periodic_u) && (kv == 0 || periodic_v))
+        .collect()
+}
+
+#[cfg(test)]
+mod legal_deck_shift_tests {
+    use super::legal_deck_shifts;
+
+    /// U-periodic only: the `v` deck copy is structurally illegal, so
+    /// `[1, 0], [0, 1]` reduces to `[1, 0]` and no numerical dominance
+    /// (`get_mindiff`) is run between the candidates.
+    #[test]
+    fn u_periodic_only_retains_u_copy() {
+        assert_eq!(
+            legal_deck_shifts(&[[1, 0], [0, 1]], true, false),
+            vec![[1, 0]]
+        );
+    }
+
+    /// V-periodic only: `[1, 0], [0, 1]` reduces to `[0, 1]`.
+    #[test]
+    fn v_periodic_only_retains_v_copy() {
+        assert_eq!(
+            legal_deck_shifts(&[[1, 0], [0, 1]], false, true),
+            vec![[0, 1]]
+        );
+    }
+
+    /// Neither axis certified periodic: no deck candidate is legal, so the
+    /// periodic deck resolver must not activate and the ordinary base lift is
+    /// preserved.
+    #[test]
+    fn nonperiodic_retains_no_deck_candidate() {
+        assert_eq!(
+            legal_deck_shifts(&[[1, 0], [0, 1]], false, false),
+            Vec::<[i64; 2]>::new()
+        );
+    }
+
+    /// Both axes certified periodic: both deck copies may remain, and the
+    /// numerical dominance decision (`get_mindiff`; `AmbiguousLift` when it
+    /// cannot prove dominance) is the only arbiter left.
+    #[test]
+    fn doubly_periodic_retains_both_candidates() {
+        assert_eq!(
+            legal_deck_shifts(&[[1, 0], [0, 1]], true, true),
+            vec![[1, 0], [0, 1]]
+        );
+    }
 }
 
 /// How far a boundary point may sit from its own surface, as a multiple of the
@@ -5900,15 +6384,18 @@ fn singular_transition_branch<S>(
 where
     S: PreMeshableSurface,
 {
+    let ctx = ToleranceCtx::unscaled_legacy();
     // The pole is a chart point where the *periodic* axis's partial collapses
     // (at a sphere pole the longitude is undefined, so moving in it moves
     // nothing). Detecting the collapse on the periodic axis is what separates
     // this from a regular half-period step: a cylinder never reaches here, a
     // cone apex and sphere pole do.
     let collapsed_axis = |u: f64, v: f64| -> Option<LongitudeAxis> {
-        if vp.is_some() && surface.vder(u, v).so_small() {
+        if vp.is_some() && ctx.is_small_len(surface.vder(u, v).magnitude()) {
+            // BG-TOL-001: model
             Some(LongitudeAxis::V)
-        } else if up.is_some() && surface.uder(u, v).so_small() {
+        } else if up.is_some() && ctx.is_small_len(surface.uder(u, v).magnitude()) {
+            // BG-TOL-001: model
             Some(LongitudeAxis::U)
         } else {
             None
@@ -6724,7 +7211,18 @@ fn working_range(
     pieces: &[PolyBoundaryPiece],
     surface: &impl PreMeshableSurface,
 ) -> (Option<(f64, f64)>, Option<(f64, f64)>) {
+    let ctx = ToleranceCtx::unscaled_legacy();
     let (udeclared, vdeclared) = surface.try_range_tuple();
+    // A face with no boundary at all takes its domain from the surface — the
+    // closure rectangle `new_with_join` synthesises is that declared domain,
+    // never a piece-derived interval (there are no pieces). This is the ball:
+    // a full closed sphere trimmed by a vertex loop, admitted only by the
+    // converter's closed-surface gate. Returning `None` here would leave
+    // `closed` empty and the face would reach the CDT with no boundary at
+    // all, which the parity flood cannot turn into material.
+    if pieces.is_empty() {
+        return (udeclared, vdeclared);
+    }
     let axis = |idx: usize, period: Option<f64>, declared: Option<(f64, f64)>| {
         // A period determines the extent; the bounds do not get a say.
         if period.is_some() {
@@ -6737,7 +7235,7 @@ fn working_range(
                 hi = f64::max(hi, p[idx]);
             })
         });
-        (hi - lo > TOLERANCE).then_some((lo, hi))
+        (!ctx.is_small_ratio(hi - lo)).then_some((lo, hi)) // BG-TOL-001: param
     };
     (
         axis(0, surface.u_period(), udeclared),
@@ -7329,16 +7827,23 @@ impl PolyBoundary {
         lattice: &CertifiedLattice,
         join_policy: TwoLoopJoinPolicy,
     ) -> (Self, TwoLoopJoinOutcome) {
+        let ctx = ToleranceCtx::unscaled_legacy();
         let mut join_outcome = TwoLoopJoinOutcome::NotAttempted;
         let probe = std::env::var_os("TRUCK_PROBE_BOUNDARY").is_some();
         let had_source_pieces = !pieces.is_empty();
-        // EXPERIMENT (TRUCK_FACE_DOMAIN): take the working rectangle from the
-        // face's own bounds rather than from the supporting primitive's
-        // declared range. Default off until swept.
-        let range = match std::env::var_os("TRUCK_FACE_DOMAIN").is_some() {
-            true => working_range(&pieces, surface),
-            false => surface.try_range_tuple(),
-        };
+        // The synthetic closure rectangle comes from the face's own bounds,
+        // never from the supporting primitive's declared parameter range. A
+        // surface's declared range is a property of the primitive it was
+        // constructed from, not of any face that references it (a
+        // `RevolutedCurve` inherits `Line::parameter_range` = `[0, 1]`); a
+        // trimmed face's material interval can sit far inside it, and closing
+        // an open boundary piece against the full declared rectangle walks an
+        // artificial parameter span unrelated to the face. That inflated
+        // closure expands the interior sampling domain `insert_surface`
+        // subdivides and hands the CDT pathological constraint geometry. The
+        // face-derived `working_range` bounds synthetic closure by the boundary
+        // evidence this face already carries.
+        let range = working_range(&pieces, surface);
         let (mut closed, mut open) = (Vec::new(), Vec::new());
         // The lattice displacement of each closed loop, parallel to `closed`.
         // The `BoundaryLoop` the classification produces does not retain it,
@@ -7352,8 +7857,32 @@ impl PolyBoundary {
         // the displacement written down is the one the pipeline acted on rather
         // than one recovered later from already-normalised points.
         let diag = diagnosis::diag_enabled();
+        // DIAG-002 realized-extent accumulation. A small O(boundary) min/max
+        // pass over samples the pipeline already materialized; nothing extra is
+        // evaluated. `world_seen` distinguishes "a face with no extent" from
+        // "no boundary at all".
+        let mut world_lo = [f64::INFINITY; 3];
+        let mut world_hi = [f64::NEG_INFINITY; 3];
+        let mut uv_lo = [f64::INFINITY; 2];
+        let mut uv_hi = [f64::NEG_INFINITY; 2];
+        let mut world_seen = false;
         pieces.into_iter().enumerate().for_each(
             |(piece_index, PolyBoundaryPiece(mut vec, mut sources))| {
+                if diag {
+                    for p in &vec {
+                        world_lo[0] = world_lo[0].min(p.point.x);
+                        world_hi[0] = world_hi[0].max(p.point.x);
+                        world_lo[1] = world_lo[1].min(p.point.y);
+                        world_hi[1] = world_hi[1].max(p.point.y);
+                        world_lo[2] = world_lo[2].min(p.point.z);
+                        world_hi[2] = world_hi[2].max(p.point.z);
+                        uv_lo[0] = uv_lo[0].min(p.uv.x);
+                        uv_hi[0] = uv_hi[0].max(p.uv.x);
+                        uv_lo[1] = uv_lo[1].min(p.uv.y);
+                        uv_hi[1] = uv_hi[1].max(p.uv.y);
+                        world_seen = true;
+                    }
+                }
                 let p0 = vec[0].uv;
                 let p1 = vec[vec.len() - 1].uv;
 
@@ -7457,6 +7986,18 @@ impl PolyBoundary {
                 }
             },
         );
+        if diag && world_seen {
+            diagnosis::record_world_uv_extents(
+                diagnosis::DiagnosticBBox3 {
+                    lo: world_lo,
+                    hi: world_hi,
+                },
+                diagnosis::DiagnosticBBox2 {
+                    lo: uv_lo,
+                    hi: uv_hi,
+                },
+            );
+        }
         if let Some(cap) = match closed.as_slice() {
             // P3b: a single 1D periodic walk that winds once around the
             // periodic axis is a spherical-cap boundary, not a degenerate
@@ -7679,7 +8220,8 @@ impl PolyBoundary {
                 let p = curve[0];
                 let q = curve[curve.len() - 1];
                 if let (Some((u0, u1)), Some((v0, v1))) = range {
-                    if p.x < q.x - TOLERANCE {
+                    if p.x < q.x - ctx.ratio_margin() {
+                        // BG-TOL-001: param
                         normalize_range(&mut curve, &mut curve_sources, 0, (u0, u1));
                         let p = curve[0];
                         let q = curve[curve.len() - 1];
@@ -7695,7 +8237,8 @@ impl PolyBoundary {
                             (vec2, untagged_sources(n2), SegmentOrigin::SyntheticClosure),
                             (curve, curve_sources, SegmentOrigin::Source),
                         ]));
-                    } else if q.x < p.x - TOLERANCE {
+                    } else if q.x < p.x - ctx.ratio_margin() {
+                        // BG-TOL-001: param
                         normalize_range(&mut curve, &mut curve_sources, 0, (u0, u1));
                         let p = curve[0];
                         let q = curve[curve.len() - 1];
@@ -7711,7 +8254,8 @@ impl PolyBoundary {
                             (vec2, untagged_sources(n2), SegmentOrigin::SyntheticClosure),
                             (curve, curve_sources, SegmentOrigin::Source),
                         ]));
-                    } else if p.y < q.y - TOLERANCE {
+                    } else if p.y < q.y - ctx.ratio_margin() {
+                        // BG-TOL-001: param
                         normalize_range(&mut curve, &mut curve_sources, 1, (v0, v1));
                         let p = curve[0];
                         let q = curve[curve.len() - 1];
@@ -7727,7 +8271,8 @@ impl PolyBoundary {
                             (vec2, untagged_sources(n2), SegmentOrigin::SyntheticClosure),
                             (curve, curve_sources, SegmentOrigin::Source),
                         ]));
-                    } else if q.y < p.y - TOLERANCE {
+                    } else if q.y < p.y - ctx.ratio_margin() {
+                        // BG-TOL-001: param
                         normalize_range(&mut curve, &mut curve_sources, 1, (v0, v1));
                         let p = curve[0];
                         let q = curve[curve.len() - 1];
@@ -7753,12 +8298,14 @@ impl PolyBoundary {
                     (vec[0], vec[vec.len() - 1])
                 }
                 let ((p0, p1), (q0, q1)) = (end_pts(&curve0), end_pts(&curve1));
-                if !p0.x.near(&p1.x) && !q0.x.near(&q1.x) {
+                if !ctx.is_small_ratio(p0.x - p1.x) && !ctx.is_small_ratio(q0.x - q1.x) {
+                    // BG-TOL-001: param
                     if let (Some(urange), _) = range {
                         normalize_range(&mut curve0, &mut curve0_sources, 0, urange);
                         normalize_range(&mut curve1, &mut curve1_sources, 0, urange);
                     }
-                } else if !p0.y.near(&p1.y) && !q0.y.near(&q1.y) {
+                } else if !ctx.is_small_ratio(p0.y - p1.y) && !ctx.is_small_ratio(q0.y - q1.y) {
+                    // BG-TOL-001: param
                     if let (_, Some(vrange)) = range {
                         normalize_range(&mut curve0, &mut curve0_sources, 1, vrange);
                         normalize_range(&mut curve1, &mut curve1_sources, 1, vrange);
@@ -7862,6 +8409,7 @@ impl PolyBoundary {
     /// computed and compared to `c`. This is what entitles [`Self::locate`] to
     /// report `Boundary` as a fact rather than as "the rays gave up".
     fn on_boundary(&self, c: Point2) -> bool {
+        let ctx = ToleranceCtx::unscaled_legacy();
         self.0
             .iter()
             .flat_map(|loop_| loop_.points.iter().circular_tuple_windows())
@@ -7873,12 +8421,13 @@ impl PolyBoundary {
                     true => 0.0,
                     false => ((c - a).dot(ab) / len2).clamp(0.0, 1.0),
                 };
-                (a + ab * t).distance2(c) <= TOLERANCE * TOLERANCE
+                ctx.is_small_ratio((a + ab * t).distance(c)) // BG-TOL-001: param
             })
     }
 
     /// One ray cast. `None` when this ray is degenerate against the boundary.
     fn include_along_ray(&self, c: Point2, attempt: u32) -> Option<bool> {
+        let ctx = ToleranceCtx::unscaled_legacy();
         // Offsetting the seed per attempt keeps successive rays unrelated
         // rather than merely rotated by a fixed step, which a boundary with
         // regularly spaced vertices could otherwise defeat repeatedly.
@@ -7895,7 +8444,8 @@ impl PolyBoundary {
                 let s1 = r.x * b.y - r.y * b.x; // v times b
                 let s2 = a.x * b.y - a.y * b.x; // a times b
                 let x = s2 / (s1 - s0);
-                if x.so_small() && s0 * s1 < 0.0 {
+                if ctx.is_small_ratio(x) && s0 * s1 < 0.0 {
+                    // BG-TOL-001: param
                     None
                 } else if x > 0.0 && ((s0 <= 0.0 && s1 > 0.0) || (s0 >= 0.0 && s1 < 0.0)) {
                     Some(crossings + 1)
@@ -9049,34 +9599,20 @@ pub enum TessellationFailureReason {
     NoFiniteTrianglesAfterParity,
 }
 
-/// Why one face failed to tessellate, and where.
+/// A terminal failure of one face, carrying its finalized diagnostic record.
 ///
-/// The locating fields are best-effort and mostly unpopulated today; the
-/// `reason` is the load-bearing part.
+/// The single terminal representation of a face that did not render. The
+/// `diagnostic` field is the production contract: a bare reason cannot become a
+/// terminal failure without finalizing a [`FaceDiagnosticRecord`], so a future
+/// refusal path cannot bypass diagnostic emission by forgetting to record.
+///
+/// Constructed exclusively through `diagnosis::fail` / `diagnosis::reject`.
 #[derive(Clone, Debug)]
 pub struct TessellationFailure {
     /// What went wrong.
     pub reason: TessellationFailureReason,
-    /// Which of the face's bounds, when known.
-    pub source_bound: Option<usize>,
-    /// Which edge use within that bound, when known.
-    pub source_edge_use: Option<usize>,
-    /// Constraint identifiers implicated, when known.
-    pub constraint_ids: Vec<usize>,
-    /// Where in parameter space, when known.
-    pub uv_location: Option<Point2>,
-}
-
-impl From<TessellationFailureReason> for TessellationFailure {
-    fn from(reason: TessellationFailureReason) -> Self {
-        Self {
-            reason,
-            source_bound: None,
-            source_edge_use: None,
-            constraint_ids: Vec::new(),
-            uv_location: None,
-        }
-    }
+    /// The finalized machine-readable diagnostic record for this face.
+    pub diagnostic: diagnosis::FaceDiagnosticRecord,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -9224,7 +9760,10 @@ where
             &mut roles,
             &mut vertex_sources,
         ) {
-            return TessellationOutcome::Failed(reason.into());
+            return TessellationOutcome::Failed(diagnosis::fail(
+                reason,
+                diagnosis::failure_stage_for_reason(reason),
+            ));
         }
         REFINE_SUPPORT_CELL.with(|cell| cell.borrow_mut().clear());
         REFINE_TRAJECTORY.with(|cell| cell.borrow_mut().clear());
@@ -9376,7 +9915,10 @@ where
         }
     }
     best_outcome.unwrap_or_else(|| {
-        TessellationOutcome::Failed(TessellationFailureReason::BoundaryConstructionFailed.into())
+        TessellationOutcome::Failed(diagnosis::fail(
+            TessellationFailureReason::BoundaryConstructionFailed,
+            diagnosis::FailureStage::BoundaryConstruction,
+        ))
     })
 }
 
@@ -10021,6 +10563,7 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
     tol: f64,
     refine: bool,
 ) -> TessellationOutcome {
+    let ctx = ToleranceCtx::unscaled_legacy();
     use std::collections::HashMap as StdHashMap;
 
     // 1. Parity-labeled CDT dual traversal across domain-boundary constraint
@@ -10052,7 +10595,12 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
     }
     let face_parity = match flooded {
         Ok(parity) => parity,
-        Err(reason) => return TessellationOutcome::Failed(reason.into()),
+        Err(reason) => {
+            return TessellationOutcome::Failed(diagnosis::fail(
+                reason,
+                diagnosis::failure_stage_for_reason(reason),
+            ))
+        }
     };
 
     // 2. Vertex positions, parameter coordinates, and roles
@@ -10148,7 +10696,10 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
         .collect();
 
     if vmap.values().any(|&i| i == usize::MAX) {
-        return TessellationOutcome::Failed(TessellationFailureReason::NonFinitePosition.into());
+        return TessellationOutcome::Failed(diagnosis::fail(
+            TessellationFailureReason::NonFinitePosition,
+            diagnosis::FailureStage::SurfaceEvaluation,
+        ));
     }
 
     // 3. Material triangles selection (odd parity = 1)
@@ -10344,10 +10895,16 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
                 stage_material_selected,
                 max_realized_area,
             );
-            diagnosis::record_face_rejection(certificate);
-            return TessellationOutcome::Failed(TessellationFailureReason::RejectedDegenerate.into());
+            return TessellationOutcome::Failed(diagnosis::reject(
+                TessellationFailureReason::RejectedDegenerate,
+                diagnosis::FailureStage::ValidityClassification,
+                certificate,
+            ));
         }
-        return TessellationOutcome::Failed(TessellationFailureReason::NoOddParityRegion.into());
+        return TessellationOutcome::Failed(diagnosis::fail(
+            TessellationFailureReason::NoOddParityRegion,
+            diagnosis::FailureStage::MaterialSelection,
+        ));
     }
 
     // 4. Singular Vertex Normal Repair
@@ -10367,7 +10924,8 @@ fn triangulation_into_polymesh_outcome<S: ParametricSurface3D>(
     }
 
     for (i, norm) in normals.iter_mut().enumerate() {
-        if norm.so_small() || !norm.x.is_finite() {
+        if ctx.is_small_ratio(norm.magnitude()) || !norm.x.is_finite() {
+            // BG-TOL-001: param
             let inc = vertex_incident_normals[i];
             if inc.magnitude2() > 1e-12 {
                 *norm = inc.normalize();
@@ -11211,6 +11769,96 @@ mod cone_topology_tests {
             TwoLoopJoinPolicy::DeckConsistent,
         );
         assert_eq!(outcome, TwoLoopJoinOutcome::LegacyDeckConsistent);
+    }
+
+    /// The synthetic closure of an open boundary piece is bounded by the
+    /// face-local working range, never by the carrier surface's declared
+    /// parameter range.
+    ///
+    /// A trimmed face can present one open piece plus one Euclidean-closed loop
+    /// while the supporting surface's declared range is materially larger than
+    /// the face's own extent. Closing the open piece against the declared
+    /// rectangle walks synthetic segments to corners no face boundary point
+    /// approaches; that inflated closure expands the interior sampling domain
+    /// `insert_surface` subdivides and hands the CDT pathological constraint
+    /// geometry (the UR10 `#88144`/`#89705` mechanism).
+    #[test]
+    fn open_piece_closure_uses_face_local_range_not_declared_range() {
+        use truck_geometry::prelude::*;
+        // Declared range is `[0, 1] × [0, 1]` (Plane::parameter_range), which is
+        // materially larger than the face-local extent `[0.2, 0.8] × [0.2, 0.8]`
+        // the two pieces below actually span.
+        let plane = Plane::new(
+            Point3::origin(),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        );
+        let tol = 0.01;
+        let lattice = unevidenced_lattice(&plane);
+        // Open piece: a diagonal run whose UV endpoints do not coincide, so it
+        // is classified `Open` and must be closed synthetically.
+        let open_piece = PolyBoundaryPiece::untagged(vec![
+            (Point2::new(0.2, 0.2), Point3::new(0.2, 0.2, 0.0)).into(),
+            (Point2::new(0.5, 0.5), Point3::new(0.5, 0.5, 0.0)).into(),
+            (Point2::new(0.8, 0.8), Point3::new(0.8, 0.8, 0.0)).into(),
+        ]);
+        // Euclidean-closed piece: a small loop whose first UV equals its last,
+        // so it is classified `EuclideanClosed` and needs no synthetic closure.
+        let closed_piece = PolyBoundaryPiece::untagged(vec![
+            (Point2::new(0.3, 0.3), Point3::new(0.3, 0.3, 0.0)).into(),
+            (Point2::new(0.7, 0.3), Point3::new(0.7, 0.3, 0.0)).into(),
+            (Point2::new(0.7, 0.7), Point3::new(0.7, 0.7, 0.0)).into(),
+            (Point2::new(0.3, 0.7), Point3::new(0.3, 0.7, 0.0)).into(),
+            (Point2::new(0.3, 0.3), Point3::new(0.3, 0.3, 0.0)).into(),
+        ]);
+        let boundary = PolyBoundary::new(vec![open_piece, closed_piece], &plane, tol, &lattice);
+        // The open piece must have been closed synthetically: exactly two loops
+        // result, and the merged one carries SyntheticClosure segments.
+        assert_eq!(
+            boundary.0.len(),
+            2,
+            "the open piece is closed into a second loop",
+        );
+        let merged = boundary
+            .0
+            .iter()
+            .find(|loop_| {
+                loop_
+                    .origins
+                    .iter()
+                    .any(|o| *o == SegmentOrigin::SyntheticClosure)
+            })
+            .expect("the open piece's closure is synthetic");
+        assert!(
+            merged.origins.iter().any(|o| *o == SegmentOrigin::Source),
+            "the open piece's own segments keep their Source role",
+        );
+        // Every loop satisfies the BoundaryLoop equal-length invariant.
+        for loop_ in &boundary.0 {
+            assert_eq!(
+                loop_.points.len(),
+                loop_.origins.len(),
+                "every boundary segment carries exactly one origin",
+            );
+            assert_eq!(
+                loop_.points.len(),
+                loop_.source_uses.len(),
+                "every boundary segment carries exactly one provenance entry",
+            );
+        }
+        // No synthetic closure vertex may leave the face-derived working extent
+        // [0.2, 0.8] × [0.2, 0.8]. Walking the declared-range rectangle would
+        // place vertices at the corners (0, 0), (0, 1), (1, 0), (1, 1) that no
+        // face boundary point approaches.
+        for loop_ in &boundary.0 {
+            for p in &loop_.points {
+                let (u, v) = (p.uv.x, p.uv.y);
+                assert!(
+                    u >= 0.1 && u <= 0.9 && v >= 0.1 && v <= 0.9,
+                    "synthetic closure escapes the face-local extent: uv=({u}, {v})",
+                );
+            }
+        }
     }
 
     #[test]
@@ -16112,5 +16760,474 @@ mod cdt_refinement_tests {
             refined_dev <= base_dev + 1e-9,
             "refinement must never increase max deviation: {base_dev:.6} -> {refined_dev:.6}"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DIAG-002: constitutive failure-diagnostic contract tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod diag002_contract_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    /// Serialize with the other environment-sensitive diagnostic tests so the
+    /// process-global `TRUCK_FACE_DIAG` / `TRUCK_FORMAL_RECOVERY` variables are
+    /// not mutated concurrently. Poison-recovering: a panic in one test must
+    /// not knock out the rest.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        diagnosis::DIAG_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "look_diag002_{}_{}.jsonl",
+            std::process::id(),
+            name
+        ))
+    }
+
+    fn read_jsonl(path: &Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    }
+
+    fn clean_env() {
+        std::env::remove_var("TRUCK_FACE_DIAG");
+        std::env::remove_var("TRUCK_FACE_DIAG_JSONL");
+        std::env::remove_var("TRUCK_FORMAL_RECOVERY");
+        diagnosis::set_document_context(None);
+        diagnosis::set_test_sink(None);
+        diagnosis::reset_file_sink_for_tests();
+        diagnosis::clear_emission_capture();
+    }
+
+    /// The diagnosis-level terminal cycle exactly as `tessellate_face` runs it:
+    /// begin the face, let the pipeline body produce the terminal failure,
+    /// finalize once.
+    fn run_terminal(
+        doc: &str,
+        face_id: u64,
+        terminal: impl FnOnce() -> TessellationFailure,
+    ) -> TessellationFailure {
+        diagnosis::set_document_context(Some(doc.to_string()));
+        diagnosis::begin_face(
+            diagnosis::document_context(),
+            Some(face_id),
+            None,
+            diagnosis::PeriodicAxes { u: false, v: false },
+            1,
+            4,
+            4,
+            0,
+            0.01,
+            true,
+            None,
+        );
+        diagnosis::finalize_and_emit(terminal())
+    }
+
+    /// Drive the real lift path until it refuses a boundary whose points sit at
+    /// the centre of a sphere, where no nearest parameter exists.
+    fn sphere_projection_refusal() -> TessellationFailureReason {
+        let sphere = truck_geometry::prelude::Sphere::new(Point3::origin(), 10.0);
+        let tol = 0.01;
+        let lattice = unevidenced_lattice(&sphere);
+        let use_ = SourceEdgeUse {
+            bound: BoundId(0),
+            index: 0,
+            orientation: true,
+        };
+        let curve = PolylineCurve(vec![Point3::origin(), Point3::origin()]);
+        let wire = [SourcePolyline {
+            curve,
+            source: use_,
+        }];
+        match PolyBoundaryPiece::try_new(
+            &sphere,
+            wire.into_iter(),
+            by_search_parameter,
+            tol,
+            &lattice,
+        ) {
+            Err(reason) => reason,
+            Ok(_) => TessellationFailureReason::BoundaryProjectionFailed,
+        }
+    }
+
+    /// A deterministic terminal failure: a fully-doubled boundary cancels to no
+    /// material (`NoOddParityRegion`).
+    fn doubled_boundary_failure() -> TessellationFailureReason {
+        let plane = plane_surface();
+        let tol = 0.01;
+        let lattice = unevidenced_lattice(&plane);
+        let boundary = PolyBoundary::new(
+            vec![PolyBoundaryPiece::untagged(square_loop(2))],
+            &plane,
+            tol,
+            &lattice,
+        );
+        trimming_tessellation_result(&plane, &boundary, tol, &lattice)
+            .err()
+            .map(|failure| failure.reason)
+            .expect("the doubled boundary must fail")
+    }
+
+    fn plane_surface() -> truck_geometry::prelude::Plane {
+        truck_geometry::prelude::Plane::new(
+            Point3::origin(),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        )
+    }
+
+    fn square_loop(visits: u32) -> Vec<SurfacePoint> {
+        let corner =
+            |x: f64, y: f64| -> SurfacePoint { (Point2::new(x, y), Point3::new(x, y, 0.0)).into() };
+        (0..visits)
+            .flat_map(|_| {
+                [
+                    corner(0.0, 0.0),
+                    corner(10.0, 0.0),
+                    corner(10.0, 10.0),
+                    corner(0.0, 10.0),
+                ]
+            })
+            .chain([corner(0.0, 0.0)])
+            .collect()
+    }
+
+    /// D1: a terminal failure emits exactly one structured record by default.
+    #[test]
+    fn d1_every_failure_emits_exactly_one_record() {
+        let _guard = env_guard();
+        clean_env();
+        let path = scratch("d1");
+        let _ = std::fs::remove_file(&path);
+        diagnosis::set_test_sink(Some(path.clone()));
+        std::env::remove_var("TRUCK_FACE_DIAG");
+
+        let failure = run_terminal("d1.step", 7, || {
+            let reason = sphere_projection_refusal();
+            diagnosis::fail(reason, diagnosis::failure_stage_for_reason(reason))
+        });
+
+        let rows = read_jsonl(&path);
+        assert_eq!(rows.len(), 1, "exactly one record per terminal face");
+        let row = &rows[0];
+        assert_eq!(row["terminal_reason"], "BoundaryProjectionFailed");
+        assert_eq!(row["disposition"], "Failed");
+        assert_eq!(row["document_id"], "d1.step");
+        assert_eq!(row["source_face_id"], 7);
+        assert_eq!(row["schema_version"], 1);
+        assert!(
+            row["projection"].is_object(),
+            "a projection refusal must carry its witness"
+        );
+        assert_eq!(
+            failure.reason,
+            TessellationFailureReason::BoundaryProjectionFailed
+        );
+        diagnosis::set_test_sink(None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// D2: a certified intrinsic rejection emits exactly one record with
+    /// `disposition = RejectedIntrinsic`.
+    #[test]
+    fn d2_rejection_emits_with_intrinsic_disposition() {
+        let _guard = env_guard();
+        clean_env();
+        let path = scratch("d2");
+        let _ = std::fs::remove_file(&path);
+        diagnosis::set_test_sink(Some(path.clone()));
+        std::env::remove_var("TRUCK_FACE_DIAG");
+
+        let failure = run_terminal("d2.step", 3, || {
+            diagnosis::reject(
+                TessellationFailureReason::RejectedDegenerate,
+                diagnosis::FailureStage::ValidityClassification,
+                crate::tessellation::validity::FaceValidityCertificate::all_bounds_collapsed(0),
+            )
+        });
+
+        let rows = read_jsonl(&path);
+        assert_eq!(rows.len(), 1, "exactly one record per rejection");
+        assert_eq!(rows[0]["terminal_reason"], "RejectedDegenerate");
+        assert_eq!(rows[0]["disposition"], "RejectedIntrinsic");
+        assert_eq!(rows[0]["failure_stage"], "ValidityClassification");
+        assert_eq!(rows[0]["document_id"], "d2.step");
+        assert_eq!(
+            failure.reason,
+            TessellationFailureReason::RejectedDegenerate
+        );
+        diagnosis::set_test_sink(None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// D3: a face that tessellates emits no failure record.
+    #[test]
+    fn d3_success_emits_nothing() {
+        let _guard = env_guard();
+        clean_env();
+        let path = scratch("d3");
+        let _ = std::fs::remove_file(&path);
+        diagnosis::set_test_sink(Some(path.clone()));
+        std::env::remove_var("TRUCK_FACE_DIAG");
+
+        let plane = plane_surface();
+        let tol = 0.01;
+        let lattice = unevidenced_lattice(&plane);
+        let boundary = PolyBoundary::new(
+            vec![PolyBoundaryPiece::untagged(square_loop(1))],
+            &plane,
+            tol,
+            &lattice,
+        );
+        let mesh = trimming_tessellation_result(&plane, &boundary, tol, &lattice)
+            .expect("the single square tessellates");
+        assert!(!mesh.faces().is_empty());
+
+        let rows = read_jsonl(&path);
+        assert!(rows.is_empty(), "a successful face emits no failure record");
+        diagnosis::set_test_sink(None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// D4: a refusal that propagates through several layers emits exactly one
+    /// terminal record — stage functions record witnesses, only the terminal
+    /// finalizer emits.
+    #[test]
+    fn d4_exactly_once_through_multi_layer_refusal() {
+        let _guard = env_guard();
+        clean_env();
+        let path = scratch("d4");
+        let _ = std::fs::remove_file(&path);
+        diagnosis::set_test_sink(Some(path.clone()));
+        std::env::remove_var("TRUCK_FACE_DIAG");
+
+        let failure = run_terminal("d4.step", 9, || {
+            // Simulate an inner stage refusing, an intermediate layer
+            // propagating it (as `trimming_tessellation_result` does), and a
+            // second tessellation attempt that also refuses under suspension —
+            // only the outer terminal finalizer emits.
+            let inner = diagnosis::fail(
+                TessellationFailureReason::BoundaryProjectionFailed,
+                diagnosis::FailureStage::BoundaryProjection,
+            );
+            let _suspension = diagnosis::SinkSuspension::new();
+            let _retried = diagnosis::fail(
+                TessellationFailureReason::NoOddParityRegion,
+                diagnosis::FailureStage::MaterialSelection,
+            );
+            drop(_suspension);
+            inner
+        });
+
+        assert_eq!(
+            failure.reason,
+            TessellationFailureReason::BoundaryProjectionFailed
+        );
+        let rows = read_jsonl(&path);
+        assert_eq!(
+            rows.len(),
+            1,
+            "exactly one terminal record despite two attempted layers"
+        );
+        assert_eq!(rows[0]["terminal_reason"], "BoundaryProjectionFailed");
+        diagnosis::set_test_sink(None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// D5: with no diagnostic-related environment variables, a failure still
+    /// emits (the default sink).
+    #[test]
+    fn d5_diagnostics_default_on() {
+        let _guard = env_guard();
+        clean_env();
+        std::env::remove_var("TRUCK_FACE_DIAG");
+        std::env::remove_var("TRUCK_FACE_DIAG_JSONL");
+        std::env::remove_var("TRUCK_FORMAL_RECOVERY");
+        let capture = diagnosis::capture_emissions();
+
+        let failure = run_terminal("d5.step", 5, || {
+            diagnosis::fail(
+                TessellationFailureReason::ConstraintInsertionIncomplete,
+                diagnosis::FailureStage::ConstraintInsertion,
+            )
+        });
+        assert_eq!(
+            failure.reason,
+            TessellationFailureReason::ConstraintInsertionIncomplete
+        );
+
+        let emitted = capture.lock().unwrap().clone();
+        assert_eq!(
+            emitted.len(),
+            1,
+            "default emission is on without any env flag"
+        );
+        let row: serde_json::Value = serde_json::from_str(&emitted[0]).unwrap();
+        assert_eq!(row["document_id"], "d5.step");
+        diagnosis::clear_emission_capture();
+    }
+
+    /// D6: explicit opt-out suppresses external emission without changing the
+    /// returned failure.
+    #[test]
+    fn d6_explicit_opt_out_suppresses_emission() {
+        let _guard = env_guard();
+        clean_env();
+        let path = scratch("d6");
+        let _ = std::fs::remove_file(&path);
+        diagnosis::set_test_sink(Some(path.clone()));
+        std::env::set_var("TRUCK_FACE_DIAG", "off");
+
+        let failure = run_terminal("d6.step", 6, || {
+            diagnosis::fail(
+                TessellationFailureReason::NoOddParityRegion,
+                diagnosis::FailureStage::MaterialSelection,
+            )
+        });
+        assert_eq!(failure.reason, TessellationFailureReason::NoOddParityRegion);
+
+        let rows = read_jsonl(&path);
+        assert!(
+            rows.is_empty(),
+            "TRUCK_FACE_DIAG=off suppresses external emission"
+        );
+        diagnosis::set_test_sink(None);
+        std::env::remove_var("TRUCK_FACE_DIAG");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// D7: a broken output sink is non-fatal and does not change the
+    /// tessellation result.
+    #[test]
+    fn d7_sink_failure_is_non_fatal() {
+        let _guard = env_guard();
+        clean_env();
+        std::env::remove_var("TRUCK_FACE_DIAG");
+        // A path whose parent does not exist cannot be opened.
+        std::env::set_var(
+            "TRUCK_FACE_DIAG_JSONL",
+            std::env::temp_dir()
+                .join("look_diag002_no_such_parent_dir")
+                .join("broken.jsonl"),
+        );
+        let capture = diagnosis::capture_emissions();
+
+        let failure = run_terminal("d7.step", 4, || {
+            diagnosis::fail(
+                TessellationFailureReason::ConstraintInsertionIncomplete,
+                diagnosis::FailureStage::ConstraintInsertion,
+            )
+        });
+        assert_eq!(
+            failure.reason,
+            TessellationFailureReason::ConstraintInsertionIncomplete,
+            "a broken sink must not change the failure",
+        );
+        // The fallback wrote the record to the default (captured) sink.
+        let emitted = capture.lock().unwrap().clone();
+        assert_eq!(
+            emitted.len(),
+            1,
+            "record falls back to stderr and is not lost"
+        );
+        std::env::remove_var("TRUCK_FACE_DIAG_JSONL");
+        diagnosis::clear_emission_capture();
+    }
+
+    /// D8: concurrent failed faces keep their own identity and witnesses.
+    #[test]
+    fn d8_parallel_faces_stay_isolated() {
+        let _guard = env_guard();
+        clean_env();
+        let path = scratch("d8");
+        let _ = std::fs::remove_file(&path);
+        diagnosis::set_test_sink(Some(path.clone()));
+        std::env::remove_var("TRUCK_FACE_DIAG");
+
+        std::thread::scope(|scope| {
+            for face_id in 0..8u64 {
+                scope.spawn(move || {
+                    let _ = run_terminal("d8.step", face_id, || {
+                        diagnosis::fail(
+                            TessellationFailureReason::BoundaryProjectionFailed,
+                            diagnosis::FailureStage::BoundaryProjection,
+                        )
+                    });
+                });
+            }
+        });
+
+        let rows = read_jsonl(&path);
+        assert_eq!(rows.len(), 8, "one record per concurrent failed face");
+        let mut ids: Vec<u64> = rows
+            .iter()
+            .map(|row| row["source_face_id"].as_u64().unwrap())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            (0..8).collect::<Vec<u64>>(),
+            "each face keeps its own id"
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row["terminal_reason"] == "BoundaryProjectionFailed"),
+            "each face keeps its own terminal reason"
+        );
+        diagnosis::set_test_sink(None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// D10: diagnostics enabled vs explicitly disabled produce identical
+    /// terminal outcomes and identical records.
+    #[test]
+    fn d10_opt_out_does_not_change_geometry() {
+        let _guard = env_guard();
+        clean_env();
+        let path = scratch("d10");
+        let _ = std::fs::remove_file(&path);
+
+        // Enabled: record emitted to the file.
+        diagnosis::set_test_sink(Some(path.clone()));
+        std::env::remove_var("TRUCK_FACE_DIAG");
+        let enabled = run_terminal("d10.step", 2, || {
+            let reason = doubled_boundary_failure();
+            diagnosis::fail(reason, diagnosis::failure_stage_for_reason(reason))
+        });
+        let enabled_json = serde_json::to_string(&enabled.diagnostic).unwrap();
+
+        // Disabled: same pipeline, record built identically but not emitted.
+        std::env::set_var("TRUCK_FACE_DIAG", "off");
+        diagnosis::set_test_sink(None);
+        let _ = std::fs::remove_file(&path);
+        let disabled = run_terminal("d10.step", 2, || {
+            let reason = doubled_boundary_failure();
+            diagnosis::fail(reason, diagnosis::failure_stage_for_reason(reason))
+        });
+        let disabled_json = serde_json::to_string(&disabled.diagnostic).unwrap();
+
+        assert_eq!(enabled.reason, disabled.reason);
+        assert_eq!(
+            enabled_json, disabled_json,
+            "opt-out must not change the diagnostic content, only its emission"
+        );
+        assert!(
+            read_jsonl(&path).is_empty(),
+            "nothing emitted under opt-out"
+        );
+        std::env::remove_var("TRUCK_FACE_DIAG");
+        let _ = std::fs::remove_file(&path);
     }
 }

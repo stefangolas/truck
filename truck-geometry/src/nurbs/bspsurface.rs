@@ -3,6 +3,9 @@ use crate::errors::Error;
 use algo::surface::{SsnpVector, SspVector};
 use std::iter::FusedIterator;
 use std::ops::*;
+use truck_base::evidence::{
+    Budget, Certificate, Certified, Margin, Method, Modulus, Outcome, PropMap,
+};
 
 impl<P> BSplineSurface<P> {
     /// constructor.
@@ -33,6 +36,7 @@ impl<P> BSplineSurface<P> {
         knot_vecs: (KnotVec, KnotVec),
         control_points: Vec<Vec<P>>,
     ) -> Result<BSplineSurface<P>> {
+        let ctx = ToleranceCtx::unscaled_legacy();
         if control_points.is_empty() || control_points[0].is_empty() {
             Err(Error::EmptyControlPoints)
         } else if knot_vecs.0.len() <= control_points.len() {
@@ -45,7 +49,10 @@ impl<P> BSplineSurface<P> {
                 knot_vecs.1.len(),
                 control_points[0].len(),
             ))
-        } else if knot_vecs.0.range_length().so_small() || knot_vecs.1.range_length().so_small() {
+        } else if ctx.is_small_ratio(knot_vecs.0.range_length()) // BG-TOL-001: param
+            || ctx.is_small_ratio(knot_vecs.1.range_length())
+        // BG-TOL-001: param
+        {
             Err(Error::ZeroRange)
         } else {
             let len = control_points[0].len();
@@ -503,6 +510,7 @@ impl<P: ControlPoint<f64>> BSplineSurface<P> {
         div_coef: usize,
         ord: F,
     ) -> bool {
+        let ctx = ToleranceCtx::unscaled_legacy();
         if !self.knot_vecs.0.same_range(&other.knot_vecs.0) {
             return false;
         }
@@ -517,14 +525,16 @@ impl<P: ControlPoint<f64>> BSplineSurface<P> {
 
         for i0 in 1..self.knot_vecs.0.len() {
             let delta0 = self.knot_vecs.0[i0] - self.knot_vecs.0[i0 - 1];
-            if delta0.so_small() {
+            if ctx.is_small_ratio(delta0) {
+                // BG-TOL-001: param
                 continue;
             }
             for j0 in 0..division0 {
                 let u = self.knot_vecs.0[i0 - 1] + delta0 * (j0 as f64) / (division0 as f64);
                 for i1 in 1..self.knot_vecs.1.len() {
                     let delta1 = self.knot_vecs.1[i1] - self.knot_vecs.1[i1 - 1];
-                    if delta1.so_small() {
+                    if ctx.is_small_ratio(delta1) {
+                        // BG-TOL-001: param
                         continue;
                     }
                     for j1 in 0..division1 {
@@ -645,6 +655,7 @@ impl<V: Tolerance> BSplineSurface<V> {
     /// ```
     #[inline(always)]
     pub fn is_const(&self) -> bool {
+        // FIXME(BG-TOL-001, GENERIC_BOUND) — ctx.near_points<P> is bounded P: MetricSpace<Metric = f64> and this impl does not supply it. Widening a public generic bound is cross-crate and is Stage B, so the site is left exactly as it is. Enclosing impl: `impl<V: Tolerance> BSplineSurface<V> -- not even ControlPoint`.
         for vec in self.control_points.iter().flat_map(|pts| pts.iter()) {
             if !vec.near(&self.control_points[0][0]) {
                 return false;
@@ -784,6 +795,7 @@ impl<P: ControlPoint<f64> + Tolerance> BSplineSurface<P> {
     /// assert!(bspsurface.near2_as_surface(&org_surface));
     /// ```
     pub fn try_remove_uknot(&mut self, idx: usize) -> Result<&mut Self> {
+        let ctx = ToleranceCtx::unscaled_legacy();
         let k = self.udegree();
         let knot_vec = self.uknot_vec();
         let n = self.control_points.len();
@@ -801,7 +813,8 @@ impl<P: ControlPoint<f64> + Tolerance> BSplineSurface<P> {
         for i in (idx - k)..idx {
             let delta = knot_vec[i + k + 1] - knot_vec[i];
             let a = inv_or_zero(delta) * (knot_vec[idx] - knot_vec[i]);
-            if a.so_small() {
+            if ctx.is_small_ratio(a) {
+                // BG-TOL-001: param
                 break;
             } else {
                 let vec = self
@@ -813,6 +826,7 @@ impl<P: ControlPoint<f64> + Tolerance> BSplineSurface<P> {
             }
         }
 
+        // FIXME(BG-TOL-001, GENERIC_BOUND) — ctx.near_points<P> is bounded P: MetricSpace<Metric = f64> and this impl does not supply it. Widening a public generic bound is cross-crate and is Stage B, so the site is left exactly as it is. Enclosing impl: `impl<P: ControlPoint<f64> + Tolerance> BSplineSurface<P>`.
         for (pt0, pt1) in self
             .ctrl_pts_column_iter(idx)
             .zip(new_points.last().unwrap())
@@ -882,6 +896,7 @@ impl<P: ControlPoint<f64> + Tolerance> BSplineSurface<P> {
     /// assert_eq!(bspsurface.vknot_vec().len(), org_surface.vknot_vec().len() + 1);
     /// ```
     pub fn try_remove_vknot(&mut self, idx: usize) -> Result<&mut Self> {
+        let ctx = ToleranceCtx::unscaled_legacy();
         let (_, k) = self.degrees();
         let knot_vec = self.vknot_vec();
         let n = self.control_points[0].len();
@@ -899,7 +914,8 @@ impl<P: ControlPoint<f64> + Tolerance> BSplineSurface<P> {
         for i in (idx - k)..idx {
             let delta = knot_vec[i + k + 1] - knot_vec[i];
             let a = inv_or_zero(delta) * (knot_vec[idx] - knot_vec[i]);
-            if a.so_small() {
+            if ctx.is_small_ratio(a) {
+                // BG-TOL-001: param
                 break;
             } else {
                 let vec = self
@@ -911,6 +927,7 @@ impl<P: ControlPoint<f64> + Tolerance> BSplineSurface<P> {
             }
         }
 
+        // FIXME(BG-TOL-001, GENERIC_BOUND) — ctx.near_points<P> is bounded P: MetricSpace<Metric = f64> and this impl does not supply it. Widening a public generic bound is cross-crate and is Stage B, so the site is left exactly as it is. Enclosing impl: `impl<P: ControlPoint<f64> + Tolerance> BSplineSurface<P>`.
         for (pt0, pt1) in self.ctrl_pts_row_iter(idx).zip(new_points.last().unwrap()) {
             if !pt0.near(pt1) {
                 return Err(Error::CannotRemoveKnot(idx));
@@ -1072,14 +1089,17 @@ impl<P: ControlPoint<f64> + Tolerance> BSplineSurface<P> {
     /// assert!(bspsurface.near2_as_surface(&org_surface));
     /// ```
     pub fn syncro_uvknots(&mut self) -> &mut Self {
+        let ctx = ToleranceCtx::unscaled_legacy();
         self.knot_vecs.0.normalize();
         self.knot_vecs.1.normalize();
         let mut i = 0;
         let mut j = 0;
         while !self.uknot(i).near2(&1.0) || !self.vknot(j).near2(&1.0) {
-            if self.uknot(i) - self.vknot(j) > TOLERANCE {
+            if self.uknot(i) - self.vknot(j) > ctx.ratio_margin() {
+                // BG-TOL-001: param
                 self.add_uknot(self.vknot(j));
-            } else if self.vknot(j) - self.uknot(i) > TOLERANCE {
+            } else if self.vknot(j) - self.uknot(i) > ctx.ratio_margin() {
+                // BG-TOL-001: param
                 self.add_vknot(self.uknot(i));
             }
             i += 1;
@@ -1146,6 +1166,7 @@ impl<P: ControlPoint<f64> + Tolerance> BSplineSurface<P> {
     /// }
     /// ```
     pub fn ucut(&mut self, mut u: f64) -> BSplineSurface<P> {
+        let ctx = ToleranceCtx::unscaled_legacy();
         let degree = self.udegree();
 
         let idx = match self.uknot_vec().floor(u) {
@@ -1159,7 +1180,8 @@ impl<P: ControlPoint<f64> + Tolerance> BSplineSurface<P> {
                 return bspline;
             }
         };
-        let s = if u.near(&self.uknot_vec()[idx]) {
+        let s = if ctx.is_small_ratio(u - self.uknot_vec()[idx]) {
+            // BG-TOL-001: param
             u = self.uknot_vec()[idx];
             self.uknot_vec().multiplicity(idx)
         } else {
@@ -1262,19 +1284,24 @@ impl<P: ControlPoint<f64> + Tolerance> BSplineSurface<P> {
     /// }
     /// ```
     pub fn sectional_curve(&self, bnd_box: BoundingBox<Vector2>) -> BSplineCurve<P> {
+        let ctx = ToleranceCtx::unscaled_legacy();
         let p = bnd_box.min();
         let q = bnd_box.max();
         let mut bspsurface = self.clone();
-        if !p[0].near(&bspsurface.uknot(0)) {
+        if !ctx.is_small_ratio(p[0] - bspsurface.uknot(0)) {
+            // BG-TOL-001: param
             bspsurface = bspsurface.ucut(p[0]);
         }
-        if !q[0].near(&bspsurface.uknot(bspsurface.uknot_vec().len() - 1)) {
+        if !ctx.is_small_ratio(q[0] - bspsurface.uknot(bspsurface.uknot_vec().len() - 1)) {
+            // BG-TOL-001: param
             bspsurface.ucut(q[0]);
         }
-        if !p[0].near(&bspsurface.vknot(0)) {
+        if !ctx.is_small_ratio(p[1] - bspsurface.vknot(0)) {
+            // BG-TOL-001: param
             bspsurface = bspsurface.vcut(p[1]);
         }
-        if !q[0].near(&bspsurface.vknot(bspsurface.vknot_vec().len() - 1)) {
+        if !ctx.is_small_ratio(q[1] - bspsurface.vknot(bspsurface.vknot_vec().len() - 1)) {
+            // BG-TOL-001: param
             bspsurface.vcut(q[1]);
         }
         bspsurface.syncro_uvdegrees();
@@ -1575,6 +1602,7 @@ impl<P: ControlPoint<f64> + Tolerance> BSplineSurface<P> {
     /// ```
     #[inline(always)]
     pub fn near_as_surface(&self, other: &BSplineSurface<P>) -> bool {
+        // FIXME(BG-TOL-001, GENERIC_BOUND) — ctx.near_points<P> is bounded P: MetricSpace<Metric = f64> and this impl does not supply it. Widening a public generic bound is cross-crate and is Stage B, so the site is left exactly as it is. Enclosing impl: `impl<P: ControlPoint<f64> + Tolerance> BSplineSurface<P>`.
         self.sub_near_as_surface(other, 1, |x, y| x.near(y))
     }
     /// Determines whether `self` and `other` is near in square order as the B-spline surfaces or not.
@@ -1632,7 +1660,10 @@ where
 
 impl ParametricSurface3D for BSplineSurface<Point3> {}
 
-impl<V> BoundedSurface for BSplineSurface<V> where BSplineSurface<V>: ParametricSurface {
+impl<V> BoundedSurface for BSplineSurface<V>
+where
+    BSplineSurface<V>: ParametricSurface,
+{
     #[inline(always)]
     fn evaluation_range(&self) -> ((f64, f64), (f64, f64)) {
         surface_knot_domain(
@@ -1713,10 +1744,7 @@ pub(super) fn surface_knot_domain(
             (knots[0], knots[n - 1])
         }
     };
-    (
-        axis(uknots, udegree),
-        axis(vknots, vdegree),
-    )
+    (axis(uknots, udegree), axis(vknots, vdegree))
 }
 
 /// The midpoints of the cells two knot vectors cut a domain into.
@@ -1786,6 +1814,42 @@ mod seed_tests {
     }
 }
 
+#[cfg(test)]
+mod section_tests {
+    use super::*;
+
+    fn half_box_surface() -> BSplineSurface<Point3> {
+        let uknots = KnotVec::from(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+        let vknots = KnotVec::from(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+        let ctrl_pts = (0..3)
+            .map(|i| {
+                (0..3)
+                    .map(|j| Point3::new(i as f64, j as f64, (i * j) as f64))
+                    .collect()
+            })
+            .collect();
+        BSplineSurface::new((uknots, vknots), ctrl_pts)
+    }
+
+    #[test]
+    fn sectional_curve_vcut_u_half_box_does_not_panic() {
+        let surface = half_box_surface();
+        let bnd = BoundingBox::from_iter(&[Vector2::new(0.0, 0.0), Vector2::new(0.5, 1.0)]);
+        let curve = surface.sectional_curve(bnd);
+        assert_near2!(curve.subs(0.0), surface.subs(0.0, 0.0));
+        assert_near2!(curve.subs(1.0), surface.subs(0.5, 1.0));
+    }
+
+    #[test]
+    fn sectional_curve_vcut_returns_half_v_section() {
+        let surface = half_box_surface();
+        let bnd = BoundingBox::from_iter(&[Vector2::new(0.0, 0.0), Vector2::new(1.0, 0.5)]);
+        let curve = surface.sectional_curve(bnd);
+        assert_near2!(curve.subs(0.0), surface.subs(0.0, 0.0));
+        assert_near2!(curve.subs(1.0), surface.subs(1.0, 0.5));
+    }
+}
+
 impl<P> SearchNearestParameter<D2> for BSplineSurface<P>
 where
     P: ControlPoint<f64>
@@ -1814,107 +1878,161 @@ where
 }
 
 impl IncludeCurve<BSplineCurve<Point2>> for BSplineSurface<Point2> {
-    fn include(&self, curve: &BSplineCurve<Point2>) -> bool {
-        let pt = curve.front();
-        let mut hint = algo::surface::presearch(self, pt, self.evaluation_range(), PRESEARCH_DIVISION);
-        hint = match algo::surface::search_parameter(self, pt, hint, INCLUDE_CURVE_TRIALS) {
-            Some(got) => got,
-            None => return false,
-        };
-        let uknot_vec = self.uknot_vec();
-        let vknot_vec = self.vknot_vec();
-        let degree = curve.degree() * 6;
-        let (knots, _) = curve.knot_vec().to_single_multi();
-        for i in 1..knots.len() {
-            for j in 1..=degree {
-                let p = j as f64 / degree as f64;
-                let t = knots[i - 1] * (1.0 - p) + knots[i] * p;
-                let pt = ParametricCurve::subs(curve, t);
-                hint = match algo::surface::search_parameter(self, pt, hint, INCLUDE_CURVE_TRIALS) {
-                    Some(got) => got,
-                    None => return false,
-                };
-                if !ParametricSurface::subs(self, hint.0, hint.1).near(&pt)
-                    || hint.0 < uknot_vec[0] - TOLERANCE
-                    || hint.0 - uknot_vec[0] > uknot_vec.range_length() + TOLERANCE
-                    || hint.1 < vknot_vec[0] - TOLERANCE
-                    || hint.1 - vknot_vec[0] > vknot_vec.range_length() + TOLERANCE
-                {
-                    return false;
+    fn include(&self, curve: &BSplineCurve<Point2>) -> Outcome<bool> {
+        let ctx = ToleranceCtx::unscaled_legacy();
+        let value = (|| {
+            let pt = curve.front();
+            let mut hint =
+                algo::surface::presearch(self, pt, self.evaluation_range(), PRESEARCH_DIVISION);
+            hint = match algo::surface::search_parameter(self, pt, hint, INCLUDE_CURVE_TRIALS) {
+                Some(got) => got,
+                None => return false,
+            };
+            let uknot_vec = self.uknot_vec();
+            let vknot_vec = self.vknot_vec();
+            let degree = curve.degree() * 6;
+            let (knots, _) = curve.knot_vec().to_single_multi();
+            for i in 1..knots.len() {
+                for j in 1..=degree {
+                    let p = j as f64 / degree as f64;
+                    let t = knots[i - 1] * (1.0 - p) + knots[i] * p;
+                    let pt = ParametricCurve::subs(curve, t);
+                    hint =
+                        match algo::surface::search_parameter(self, pt, hint, INCLUDE_CURVE_TRIALS)
+                        {
+                            Some(got) => got,
+                            None => return false,
+                        };
+                    if !ctx.near_points(ParametricSurface::subs(self, hint.0, hint.1), pt)
+                        // BG-TOL-001: model
+                        || hint.0 < uknot_vec[0] - ctx.ratio_margin() // BG-TOL-001: param
+                        || hint.0 - uknot_vec[0] > uknot_vec.range_length() + ctx.ratio_margin() // BG-TOL-001: param
+                        || hint.1 < vknot_vec[0] - ctx.ratio_margin() // BG-TOL-001: param
+                        || hint.1 - vknot_vec[0] > vknot_vec.range_length() + ctx.ratio_margin()
+                    // BG-TOL-001: param
+                    {
+                        return false;
+                    }
                 }
             }
-        }
-        true
+            true
+        })();
+        Ok(Certified::new(
+            value,
+            Certificate {
+                props: PropMap::new(),
+                method: Method::Float,
+                budget_left: Budget::new(0, 0, 0),
+                margin: Margin::UNBOUNDED,
+                modulus: Modulus::Unbounded,
+            },
+        ))
     }
 }
 
 impl IncludeCurve<BSplineCurve<Point3>> for BSplineSurface<Point3> {
-    fn include(&self, curve: &BSplineCurve<Point3>) -> bool {
-        let pt = curve.front();
-        let mut hint = algo::surface::presearch(self, pt, self.evaluation_range(), PRESEARCH_DIVISION);
-        hint = match algo::surface::search_parameter(self, pt, hint, INCLUDE_CURVE_TRIALS) {
-            Some(got) => got,
-            None => return false,
-        };
-        let uknot_vec = self.uknot_vec();
-        let vknot_vec = self.vknot_vec();
-        let degree = curve.degree() * 6;
-        let (knots, _) = curve.knot_vec().to_single_multi();
-        for i in 1..knots.len() {
-            for j in 1..=degree {
-                let p = j as f64 / degree as f64;
-                let t = knots[i - 1] * (1.0 - p) + knots[i] * p;
-                let pt = ParametricCurve::subs(curve, t);
-                hint = match algo::surface::search_parameter(self, pt, hint, INCLUDE_CURVE_TRIALS) {
-                    Some(got) => got,
-                    None => return false,
-                };
-                if !ParametricSurface::subs(self, hint.0, hint.1).near(&pt)
-                    || hint.0 < uknot_vec[0] - TOLERANCE
-                    || hint.0 - uknot_vec[0] > uknot_vec.range_length() + TOLERANCE
-                    || hint.1 < vknot_vec[0] - TOLERANCE
-                    || hint.1 - vknot_vec[0] > vknot_vec.range_length() + TOLERANCE
-                {
-                    return false;
+    fn include(&self, curve: &BSplineCurve<Point3>) -> Outcome<bool> {
+        let ctx = ToleranceCtx::unscaled_legacy();
+        let value = (|| {
+            let pt = curve.front();
+            let mut hint =
+                algo::surface::presearch(self, pt, self.evaluation_range(), PRESEARCH_DIVISION);
+            hint = match algo::surface::search_parameter(self, pt, hint, INCLUDE_CURVE_TRIALS) {
+                Some(got) => got,
+                None => return false,
+            };
+            let uknot_vec = self.uknot_vec();
+            let vknot_vec = self.vknot_vec();
+            let degree = curve.degree() * 6;
+            let (knots, _) = curve.knot_vec().to_single_multi();
+            for i in 1..knots.len() {
+                for j in 1..=degree {
+                    let p = j as f64 / degree as f64;
+                    let t = knots[i - 1] * (1.0 - p) + knots[i] * p;
+                    let pt = ParametricCurve::subs(curve, t);
+                    hint =
+                        match algo::surface::search_parameter(self, pt, hint, INCLUDE_CURVE_TRIALS)
+                        {
+                            Some(got) => got,
+                            None => return false,
+                        };
+                    if !ctx.near_points(ParametricSurface::subs(self, hint.0, hint.1), pt)
+                        // BG-TOL-001: model
+                        || hint.0 < uknot_vec[0] - ctx.ratio_margin() // BG-TOL-001: param
+                        || hint.0 - uknot_vec[0] > uknot_vec.range_length() + ctx.ratio_margin() // BG-TOL-001: param
+                        || hint.1 < vknot_vec[0] - ctx.ratio_margin() // BG-TOL-001: param
+                        || hint.1 - vknot_vec[0] > vknot_vec.range_length() + ctx.ratio_margin()
+                    // BG-TOL-001: param
+                    {
+                        return false;
+                    }
                 }
             }
-        }
-        true
+            true
+        })();
+        Ok(Certified::new(
+            value,
+            Certificate {
+                props: PropMap::new(),
+                method: Method::Float,
+                budget_left: Budget::new(0, 0, 0),
+                margin: Margin::UNBOUNDED,
+                modulus: Modulus::Unbounded,
+            },
+        ))
     }
 }
 
 impl IncludeCurve<NurbsCurve<Vector4>> for BSplineSurface<Point3> {
-    fn include(&self, curve: &NurbsCurve<Vector4>) -> bool {
-        let pt = curve.subs(curve.knot_vec()[0]);
-        let mut hint = algo::surface::presearch(self, pt, self.evaluation_range(), PRESEARCH_DIVISION);
-        hint = match algo::surface::search_parameter(self, pt, hint, INCLUDE_CURVE_TRIALS) {
-            Some(got) => got,
-            None => return false,
-        };
-        let uknot_vec = self.uknot_vec();
-        let vknot_vec = self.vknot_vec();
-        let degree = curve.degree() * 6;
-        let (knots, _) = curve.knot_vec().to_single_multi();
-        for i in 1..knots.len() {
-            for j in 1..=degree {
-                let p = j as f64 / degree as f64;
-                let t = knots[i - 1] * (1.0 - p) + knots[i] * p;
-                let pt = curve.subs(t);
-                hint = match algo::surface::search_parameter(self, pt, hint, INCLUDE_CURVE_TRIALS) {
-                    Some(got) => got,
-                    None => return false,
-                };
-                if !ParametricSurface::subs(self, hint.0, hint.1).near(&pt)
-                    || hint.0 < uknot_vec[0] - TOLERANCE
-                    || hint.0 - uknot_vec[0] > uknot_vec.range_length() + TOLERANCE
-                    || hint.1 < vknot_vec[0] - TOLERANCE
-                    || hint.1 - vknot_vec[0] > vknot_vec.range_length() + TOLERANCE
-                {
-                    return false;
+    fn include(&self, curve: &NurbsCurve<Vector4>) -> Outcome<bool> {
+        let ctx = ToleranceCtx::unscaled_legacy();
+        let value = (|| {
+            let pt = curve.subs(curve.knot_vec()[0]);
+            let mut hint =
+                algo::surface::presearch(self, pt, self.evaluation_range(), PRESEARCH_DIVISION);
+            hint = match algo::surface::search_parameter(self, pt, hint, INCLUDE_CURVE_TRIALS) {
+                Some(got) => got,
+                None => return false,
+            };
+            let uknot_vec = self.uknot_vec();
+            let vknot_vec = self.vknot_vec();
+            let degree = curve.degree() * 6;
+            let (knots, _) = curve.knot_vec().to_single_multi();
+            for i in 1..knots.len() {
+                for j in 1..=degree {
+                    let p = j as f64 / degree as f64;
+                    let t = knots[i - 1] * (1.0 - p) + knots[i] * p;
+                    let pt = curve.subs(t);
+                    hint =
+                        match algo::surface::search_parameter(self, pt, hint, INCLUDE_CURVE_TRIALS)
+                        {
+                            Some(got) => got,
+                            None => return false,
+                        };
+                    if !ctx.near_points(ParametricSurface::subs(self, hint.0, hint.1), pt)
+                        // BG-TOL-001: model
+                        || hint.0 < uknot_vec[0] - ctx.ratio_margin() // BG-TOL-001: param
+                        || hint.0 - uknot_vec[0] > uknot_vec.range_length() + ctx.ratio_margin() // BG-TOL-001: param
+                        || hint.1 < vknot_vec[0] - ctx.ratio_margin() // BG-TOL-001: param
+                        || hint.1 - vknot_vec[0] > vknot_vec.range_length() + ctx.ratio_margin()
+                    // BG-TOL-001: param
+                    {
+                        return false;
+                    }
                 }
             }
-        }
-        true
+            true
+        })();
+        Ok(Certified::new(
+            value,
+            Certificate {
+                props: PropMap::new(),
+                method: Method::Float,
+                budget_left: Budget::new(0, 0, 0),
+                margin: Margin::UNBOUNDED,
+                modulus: Modulus::Unbounded,
+            },
+        ))
     }
 }
 
@@ -2056,7 +2174,7 @@ fn test_include_bspcurve2() {
         Point2::new(0.0, 1.0),
     ];
     let curve0 = BSplineCurve::new(knot_vec0, ctrl_pts0);
-    assert!(surface.include(&curve0));
+    assert!(surface.include(&curve0).expect("hand-built witness").value);
 
     let knot_vec1 = KnotVec::bezier_knot(2);
     let ctrl_pts1 = vec![
@@ -2065,7 +2183,7 @@ fn test_include_bspcurve2() {
         Point2::new(0.0, 1.0),
     ];
     let curve1 = BSplineCurve::new(knot_vec1, ctrl_pts1);
-    assert!(!surface.include(&curve1));
+    assert!(!surface.include(&curve1).expect("hand-built witness").value);
 }
 
 #[test]
@@ -2100,7 +2218,7 @@ fn test_include_bspcurve3() {
     let surface = BSplineSurface::new((knot_vec.clone(), knot_vec), ctrl_pts);
     let bnd_box = BoundingBox::from_iter(&[Vector2::new(0.2, 0.3), Vector2::new(0.8, 0.6)]);
     let mut curve = surface.sectional_curve(bnd_box);
-    assert!(surface.include(&curve));
+    assert!(surface.include(&curve).expect("hand-built witness").value);
     *curve.control_point_mut(2) += Vector3::new(0.0, 0.0, 0.001);
-    assert!(!surface.include(&curve));
+    assert!(!surface.include(&curve).expect("hand-built witness").value);
 }

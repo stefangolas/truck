@@ -138,7 +138,12 @@ fn include_curve_normal() {
             Point3::new(-1.0, 1.0, 0.0),
         ],
     );
-    assert!(surface.include(&parabola));
+    assert!(
+        surface
+            .include(&parabola)
+            .expect("hand-built witness")
+            .value
+    );
 }
 
 #[test]
@@ -156,7 +161,12 @@ fn include_curve_abnormal0() {
             Point3::new(-1.0, 1.0, 0.0),
         ],
     );
-    assert!(!surface.include(&parabola));
+    assert!(
+        !surface
+            .include(&parabola)
+            .expect("hand-built witness")
+            .value
+    );
 }
 
 #[test]
@@ -174,5 +184,5 @@ fn include_curve_abnormal1() {
     let pt1 = curve.subs(0.6);
     let surface = RevolutedCurve::by_revolution(curve, Point3::origin(), Vector3::unit_y());
     let line = BSplineCurve::new(KnotVec::bezier_knot(1), vec![pt0, pt1]);
-    assert!(!surface.include(&line));
+    assert!(!surface.include(&line).expect("hand-built witness").value);
 }

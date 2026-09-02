@@ -70,6 +70,7 @@ pub struct Table {
     pub offset_surface: HashMap<u64, OffsetSurfaceHolder>,
     pub cylindrical_surface: HashMap<u64, CylindricalSurfaceHolder>,
     pub toroidal_surface: HashMap<u64, ToroidalSurfaceHolder>,
+    pub degenerate_toroidal_surface: HashMap<u64, DegenerateToroidalSurfaceHolder>,
     pub conical_surface: HashMap<u64, ConicalSurfaceHolder>,
     pub b_spline_surface_with_knots: HashMap<u64, BSplineSurfaceWithKnotsHolder>,
     pub uniform_surface: HashMap<u64, UniformSurfaceHolder>,
@@ -444,6 +445,10 @@ impl Table {
                     }
                     "TOROIDAL_SURFACE" => {
                         self.toroidal_surface
+                            .insert(*id, Deserialize::deserialize(record)?);
+                    }
+                    "DEGENERATE_TOROIDAL_SURFACE" => {
+                        self.degenerate_toroidal_surface
                             .insert(*id, Deserialize::deserialize(record)?);
                     }
                     "CONICAL_SURFACE" => {
@@ -1844,6 +1849,7 @@ impl<P: for<'a> From<&'a CartesianPoint>> TryFrom<&BSplineCurveWithKnots> for BS
     type Error = StepConvertingError;
     #[inline(always)]
     fn try_from(curve: &BSplineCurveWithKnots) -> Result<Self, StepConvertingError> {
+        let ctx = ToleranceCtx::unscaled_legacy();
         let knots = curve.knots.clone();
         let multi = curve
             .knot_multiplicities
@@ -1853,13 +1859,24 @@ impl<P: for<'a> From<&'a CartesianPoint>> TryFrom<&BSplineCurveWithKnots> for BS
         let ctrpts: Vec<P> = curve.control_points_list.iter().map(Into::into).collect();
         let degree = curve.degree as usize;
         let ctrl_count = ctrpts.len();
-        let kv = match ValidatedKnotVector::validate(knots, multi, degree, ctrl_count, None) {
-            Ok(v) => v.into_inner(),
-            Err(e @ truck_geometry::nurbs::SplineConstructionError::UnsortedRawKnots { .. }) => {
-                return Err(e.into())
-            }
-            Err(_) => quasi_uniform_knots(ctrl_count, degree),
-        };
+        let mut kv =
+            ValidatedKnotVector::validate(knots, multi, degree, ctrl_count, None)?.into_inner();
+        // A STEP exporter may parameterize a perfectly valid curve over a tiny,
+        // nonzero knot interval (measured: the six lost core_xy edge curves
+        // span ~2e-8..6e-7). `BSplineCurve::try_new` treats any total range
+        // under `TOLERANCE` (1e-6, absolute) as zero and refuses it, which
+        // would surface here as `EdgeCurveConversionFailed` even though the
+        // source curve is well-formed. Normalizing the knot vector to `[0, 1]`
+        // is an exact, shape-preserving reparameterization of the same curve,
+        // so it is the faithful recovery of the source geometry rather than an
+        // approximation. `ValidatedKnotVector::validate` has already proved
+        // the active domain is nonzero (it rejects `<= 1e-12`), so `transform`
+        // never divides by a zero range here.
+        if ctx.is_small_ratio(kv.range_length()) {
+            // BG-TOL-001: param
+            let range = kv.range_length();
+            kv.transform(1.0 / range, -kv[0] / range);
+        }
         Ok(Self::try_new(kv, ctrpts)?)
     }
 }
@@ -1907,17 +1924,36 @@ impl<P: for<'a> From<&'a CartesianPoint>> TryFrom<&QuasiUniformCurve> for BSplin
     type Error = StepConvertingError;
     #[inline(always)]
     fn try_from(curve: &QuasiUniformCurve) -> Result<Self, StepConvertingError> {
-        let knots = quasi_uniform_knots(curve.control_points_list.len(), curve.degree as usize);
+        let knots = quasi_uniform_knots(curve.control_points_list.len(), curve.degree as usize)?;
         let ctrpts = curve.control_points_list.iter().map(Into::into).collect();
         Ok(Self::try_new(knots, ctrpts)?)
     }
 }
 
-fn quasi_uniform_knots(num_ctrl: usize, degree: usize) -> KnotVec {
+fn quasi_uniform_knots(num_ctrl: usize, degree: usize) -> Result<KnotVec, StepConvertingError> {
+    if num_ctrl <= degree {
+        // The synthesis path has no source knot list to preserve, so the
+        // witness carries the same shape `validate` uses for its
+        // length-mismatch arm: empty raw lists and a zeroed active domain.
+        let witness = truck_geometry::nurbs::SplineSourceWitness {
+            entity_id: None,
+            raw_knots: Vec::new(),
+            raw_multiplicities: Vec::new(),
+            degree,
+            control_point_count: num_ctrl,
+            expanded_knots: Vec::new(),
+            active_domain: (0.0, 0.0),
+            first_inversion_index: None,
+        };
+        return Err(
+            truck_geometry::nurbs::SplineConstructionError::ControlPointCountMismatch { witness }
+                .into(),
+        );
+    }
     let division = num_ctrl - degree;
     let mut knots = KnotVec::uniform_knot(degree, division);
     knots.transform(division as f64, 0.0);
-    knots
+    Ok(knots)
 }
 
 /// `uniform_curve`
@@ -2378,7 +2414,7 @@ impl TryFrom<&SurfaceAny> for Surface {
     fn try_from(x: &SurfaceAny) -> Result<Self, Self::Error> {
         use SurfaceAny::*;
         Ok(match x {
-            ElementarySurface(x) => Self::ElementarySurface(x.as_ref().into()),
+            ElementarySurface(x) => Self::ElementarySurface(x.as_ref().try_into()?),
             BSplineSurface(x) => x.as_ref().try_into()?,
             SweptSurface(x) => Self::SweptCurve(x.as_ref().try_into()?),
             OffsetSurface(x) => Self::OffsetSurface(x.as_ref().try_into()?),
@@ -2400,20 +2436,23 @@ pub enum ElementarySurfaceAny {
     #[holder(use_place_holder)]
     ToroidalSurface(Box<ToroidalSurface>),
     #[holder(use_place_holder)]
+    DegenerateToroidalSurface(Box<DegenerateToroidalSurface>),
+    #[holder(use_place_holder)]
     ConicalSurface(Box<ConicalSurface>),
 }
 
-impl From<&ElementarySurfaceAny> for ElementarySurface {
-    #[inline(always)]
-    fn from(value: &ElementarySurfaceAny) -> Self {
+impl TryFrom<&ElementarySurfaceAny> for ElementarySurface {
+    type Error = StepConvertingError;
+    fn try_from(value: &ElementarySurfaceAny) -> Result<Self, Self::Error> {
         use ElementarySurfaceAny::*;
-        match value {
+        Ok(match value {
             Plane(x) => Self::Plane(x.as_ref().into()),
             SphericalSurface(x) => Self::Sphere(x.as_ref().into()),
             CylindricalSurface(x) => Self::CylindricalSurface(x.as_ref().into()),
             ToroidalSurface(x) => Self::ToroidalSurface(x.as_ref().into()),
+            DegenerateToroidalSurface(x) => Self::DegenerateToroidalSurface(x.as_ref().try_into()?),
             ConicalSurface(x) => Self::ConicalSurface(x.as_ref().into()),
-        }
+        })
     }
 }
 
@@ -2540,6 +2579,51 @@ impl From<&ToroidalSurface> for step_geometry::ToroidalSurface {
         let mat = Matrix4::from(position);
         let torus = Torus::new(Point3::origin(), *major_radius, *minor_radius);
         Processor::new(torus).transformed(mat)
+    }
+}
+
+/// `degenerate_toroidal_surface`
+///
+/// An AP242 subtype of `toroidal_surface` carrying the same carrier geometry
+/// plus a `select_outer` sheet flag. The EXPRESS WHERE clause fixes
+/// `major_radius < minor_radius`, so the carrier is a self-intersecting
+/// (spindle) torus and the face must name which of the two sheets of the
+/// parametrisation it lies on. The conversion preserves that source-defined
+/// sheet as a restricted parameter domain on the existing torus carrier; it is
+/// not a full-`[0, 2π]` torus.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Holder)]
+#[holder(table = Table)]
+#[holder(field = degenerate_toroidal_surface)]
+#[holder(generate_deserialize)]
+pub struct DegenerateToroidalSurface {
+    label: String,
+    #[holder(use_place_holder)]
+    position: Axis2Placement3d,
+    major_radius: f64,
+    minor_radius: f64,
+    select_outer: bool,
+}
+
+impl TryFrom<&DegenerateToroidalSurface> for step_geometry::DegenerateToroidalSurface {
+    type Error = StepConvertingError;
+    fn try_from(
+        DegenerateToroidalSurface {
+            position,
+            major_radius,
+            minor_radius,
+            select_outer,
+            ..
+        }: &DegenerateToroidalSurface,
+    ) -> Result<Self, Self::Error> {
+        let carrier =
+            step_geometry::DegenerateTorus::new(*major_radius, *minor_radius, *select_outer)
+                .ok_or_else(|| {
+                    "degenerate_toroidal_surface: radii must be positive and finite with \
+             major_radius < minor_radius (EXPRESS WHERE)"
+                        .to_string()
+                })?;
+        let mat = Matrix4::from(position);
+        Ok(Processor::new(carrier).transformed(mat))
     }
 }
 
@@ -2693,35 +2777,58 @@ impl TryFrom<&BSplineSurfaceWithKnots> for BSplineSurface<Point3> {
 
         let u_degree = surface.u_degree as usize;
         let u_ctrl_count = ctrls.len();
-        let u_kv = match ValidatedKnotVector::validate(
+        let ctx = ToleranceCtx::unscaled_legacy();
+        let mut u_kv = ValidatedKnotVector::validate(
             uknots.clone(),
             umulti.clone(),
             u_degree,
             u_ctrl_count,
             None,
-        ) {
-            Ok(v) => v.into_inner(),
-            Err(e @ truck_geometry::nurbs::SplineConstructionError::UnsortedRawKnots { .. }) => {
-                return Err(e.into())
-            }
-            Err(_) => quasi_uniform_knots(u_ctrl_count, u_degree),
-        };
+        )?
+        .into_inner();
+        // A STEP exporter may parameterize a perfectly valid surface over a
+        // tiny, nonzero knot interval on the u axis. `BSplineSurface::try_new`
+        // treats any total u-axis range under `TOLERANCE` (absolute) as zero
+        // and refuses it, even though the source surface is well-formed.
+        // Normalizing the u knot vector to `[0, 1]` is an exact,
+        // shape-preserving reparameterization of the same surface, so it is
+        // the faithful recovery of the source geometry rather than an
+        // approximation. `ValidatedKnotVector::validate` has already proved
+        // the active domain exceeds `1e-12`; // H-3: dimensionless parameter-space bound, not a model length
+        // the active domain is a subinterval of the total range, so `range` is
+        // strictly positive and `transform` never divides by zero here.
+        if ctx.is_small_ratio(u_kv.range_length()) {
+            // BG-TOL-001: param
+            let range = u_kv.range_length();
+            u_kv.transform(1.0 / range, -u_kv[0] / range);
+        }
 
         let v_degree = surface.v_degree as usize;
         let v_ctrl_count = if ctrls.is_empty() { 0 } else { ctrls[0].len() };
-        let v_kv = match ValidatedKnotVector::validate(
+        let mut v_kv = ValidatedKnotVector::validate(
             vknots.clone(),
             vmulti.clone(),
             v_degree,
             v_ctrl_count,
             None,
-        ) {
-            Ok(v) => v.into_inner(),
-            Err(e @ truck_geometry::nurbs::SplineConstructionError::UnsortedRawKnots { .. }) => {
-                return Err(e.into())
-            }
-            Err(_) => quasi_uniform_knots(v_ctrl_count, v_degree),
-        };
+        )?
+        .into_inner();
+        // A STEP exporter may parameterize a perfectly valid surface over a
+        // tiny, nonzero knot interval on the v axis. `BSplineSurface::try_new`
+        // treats any total v-axis range under `TOLERANCE` (absolute) as zero
+        // and refuses it, even though the source surface is well-formed.
+        // Normalizing the v knot vector to `[0, 1]` is an exact,
+        // shape-preserving reparameterization of the same surface, so it is
+        // the faithful recovery of the source geometry rather than an
+        // approximation. `ValidatedKnotVector::validate` has already proved
+        // the active domain exceeds `1e-12`; // H-3: dimensionless parameter-space bound, not a model length
+        // the active domain is a subinterval of the total range, so `range` is
+        // strictly positive and `transform` never divides by zero here.
+        if ctx.is_small_ratio(v_kv.range_length()) {
+            // BG-TOL-001: param
+            let range = v_kv.range_length();
+            v_kv.transform(1.0 / range, -v_kv[0] / range);
+        }
 
         Ok(Self::try_new((u_kv, v_kv), ctrls)?)
     }
@@ -2809,12 +2916,12 @@ impl TryFrom<&QuasiUniformSurface> for BSplineSurface<Point3> {
     #[inline(always)]
     fn try_from(surface: &QuasiUniformSurface) -> Result<Self, StepConvertingError> {
         let uknots =
-            quasi_uniform_knots(surface.control_points_list.len(), surface.u_degree as usize);
+            quasi_uniform_knots(surface.control_points_list.len(), surface.u_degree as usize)?;
         let first = surface
             .control_points_list
             .first()
             .ok_or("control points list is empty.")?;
-        let vknots = quasi_uniform_knots(first.len(), surface.v_degree as usize);
+        let vknots = quasi_uniform_knots(first.len(), surface.v_degree as usize)?;
         let ctrls = surface
             .control_points_list
             .iter()
@@ -3095,6 +3202,7 @@ impl EdgeCurve {
         q: Point2,
         same_sense: bool,
     ) -> Result<Curve2D, StepConvertingError> {
+        let ctx = ToleranceCtx::unscaled_legacy();
         let mut curve = match curve {
             CurveAny::Line(line) => {
                 let line = truck::Line::<Point2>::from(line.as_ref());
@@ -3119,7 +3227,8 @@ impl EdgeCurve {
                             .search_nearest_parameter(q, None, 0)
                             .ok_or_else(|| "the point is not on circle".to_string())?,
                     );
-                    if v < u - TOLERANCE {
+                    if v < u - ctx.ratio_margin() {
+                        // BG-TOL-001: param
                         v += 2.0 * PI;
                     }
                     let circle = TrimmedCurve::new(UnitCircle::<Point2>::new(), (u, v));
@@ -3142,7 +3251,8 @@ impl EdgeCurve {
                             .search_nearest_parameter(q, None, 0)
                             .ok_or_else(|| "the point is not on circle".to_string())?,
                     );
-                    if v < u - TOLERANCE {
+                    if v < u - ctx.ratio_margin() {
+                        // BG-TOL-001: param
                         v += 2.0 * PI;
                     }
                     let circle = TrimmedCurve::new(UnitCircle::<Point2>::new(), (u, v));
@@ -3219,6 +3329,7 @@ impl EdgeCurve {
         q: Point3,
         same_sense: bool,
     ) -> Result<Curve3D, StepConvertingError> {
+        let ctx = ToleranceCtx::unscaled_legacy();
         let mut curve = match curve {
             CurveAny::Line(_) => Curve3D::Line(Line(p, q)),
             CurveAny::BoundedCurve(b) => b.as_ref().try_into()?,
@@ -3238,7 +3349,8 @@ impl EdgeCurve {
                             .search_nearest_parameter(q, None, 0)
                             .ok_or_else(|| format!("the point is not on circle: {q:?}"))?,
                     );
-                    if v < u - TOLERANCE {
+                    if v < u - ctx.ratio_margin() {
+                        // BG-TOL-001: param
                         v += 2.0 * PI;
                     }
                     let circle = TrimmedCurve::new(UnitCircle::<Point3>::new(), (u, v));
@@ -3270,7 +3382,8 @@ impl EdgeCurve {
                             .search_nearest_parameter(q, None, 0)
                             .ok_or_else(|| format!("the point is not on circle: {q:?}"))?,
                     );
-                    if v < u - TOLERANCE {
+                    if v < u - ctx.ratio_margin() {
+                        // BG-TOL-001: param
                         v += 2.0 * PI;
                     }
                     let circle = TrimmedCurve::new(UnitCircle::<Point3>::new(), (u, v));
@@ -3345,7 +3458,8 @@ impl EdgeCurve {
                 Curve3D::PCurve(truck::PCurve::new(Box::new(curve2d), Box::new(surface)))
             }
             CurveAny::SurfaceCurve(c) => {
-                if p.near(&q) {
+                if ctx.near_pt(p, q) {
+                    // BG-TOL-001: model
                     return Self::sub_parse_curve3d(&c.curve_3d, p, q, same_sense);
                 }
                 use PreferredSurfaceCurveRepresentation::*;
