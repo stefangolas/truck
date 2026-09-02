@@ -176,13 +176,57 @@ Two ergonomic facts agents trip on:
 - Output: `truck-polymesh` (STL/OBJ/serde JSON), `truck-meshalgo` VTK,
   `truck-stepio` STEP.
 
-### Known limits (typed, not silent)
+### Expressiveness envelope
 
-Booleans require single-shell solids of canonical carriers; fillets cover
-plane-plane edges and circular rims; `mirror` (solid) is axis-aligned planes
-(`mirror_about_plane` is general); revolve is z-axis with line/circle
-profiles; no shell/offset/thicken, patterns, or sketch solver. Unsupported
-requests refuse with the matching `Refusal` arm.
+The kernel's contract is **certified construction or typed refusal — never a
+silent approximation.** That makes the boundary of what it can build a
+first-class part of the API, not a footnote. Three states per capability:
+
+**Certified today** (every op carries evidence or refuses with a typed reason):
+
+- Primitives (`cuboid`), `make_face`, `make_hull`
+- Extrusion: by height, along a vector, with taper, `extrude_until`
+  (build to a target plane), `project_profile`
+- Revolution about the z-axis (line/circle profiles)
+- Spine sweeps: `SpineFrameRecipe` (spine × profile law × frame law:
+  fixed-plane, architectural-up, parallel-transport, radial) and Coons4 patches
+- Booleans: union / difference / intersection of single-shell solids of
+  canonical carriers (plus the public composable pipeline:
+  contact → split → classify → decide → assemble)
+- Fillets on plane-plane edges; circular-rim fillets; chamfers on straight edges
+- Section / split by plane; mirror / rotate / scale / translate; bounding box
+- Certified tessellation with per-face machine-readable diagnostics
+
+**Compose it yourself** (facade/agent-layer recipes over the certified
+primitives — no kernel work needed):
+
+- Patterns: map + boolean-union loops
+- Ribs and bosses: profile + `extrude_until` + boolean composition
+- Steps and pockets: multiple arrangements + stacked extrusions
+
+**Typed refusal today** (the op refuses with the matching `Refusal` arm and
+the booking for its future program exists — but no construction spec is
+landed):
+
+- Fillets/chamfers beyond plane-plane edges and circular rims
+  (topology-changing/face-consuming fillets are deferred by decision in
+  `BUILD123D_COVERAGE_PLAN.md`)
+- Loft / multi-section sweeps (substrate booked: `certified_map` clients in
+  `CERTIFIED_PHASE1_BOOKING.md`)
+- Multi-shell or non-canonical boolean inputs (booked as the RW-MULTISHELL
+  fold in `SOLVER_FAMILY_PLAN.md`; v1 refuses typed)
+- Shell / offset / thicken (post-hoc 3-D offsets are out by doctrine; a
+  2-D-arrangement-offset wall recipe is the intended strictly-better form,
+  not yet landed)
+- Post-hoc face drafting, general (non-spine) sweeps, `ExtrudedCurve`
+  emission
+
+This boundary is a design surface, not an omission: outside it the kernel
+would have to emit uncertified answers the way general-purpose kernels do.
+The intended workflow for agents is to treat a refusal as a design signal —
+reformulate with the certified verbs — and the refusal census over realistic
+generated workloads is the instrument that decides which deferred program
+books next.
 
 ### The contract underneath
 
