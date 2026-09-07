@@ -22,147 +22,152 @@ Every fallible kernel operation returns
 with the certificate that produced it, or a typed refusal naming the reason
 no answer was certified.
 
-## Main theorems
+## The pipeline, and what certifies each stage
 
-**Krawczyk existence and uniqueness.**
-`K = m − Y·F(m) + (I − Y·F'(box))·(box − m)`. `K ⊆ interior(box)` proves a
-unique root in the box. `K ∩ box = ∅` proves no root in the box. Any other
-result bisects under budget. Validity holds for any invertible preconditioner
-`Y`; `Y` affects tightness only. Used in: root isolation
-(`formal/bezier_isect.rs` 2-D, `ssi.rs` square 3×3) and branch certification
-throughout the contact funnel.
+Geometry enters at the top as canonical carriers or is refused, and every
+arrow below is a typed outcome boundary.
 
-**Three-state root isolation.**
-Every box classifies as Subdivide, Excluded (Bernstein range excludes zero),
-or Root (Krawczyk strict inclusion). Multiple or tangential roots return
-`NumericallyUnresolved`, never an empty list. Used in: contact curve
-extraction; the empty-list case is the silent-wrong-answer class the
-discipline exists to prevent.
+```
+   STEP file ──► [1 INGEST] ─┐
+                             ├─► [2 ARRANGE] ──► [3 CONSTRUCT] ──┐
+   program calls ────────────┘      (2-D)        (extrude/revolve/│
+                                                                  ▼
+                                          ┌─────────────────────────────────┐
+                                          │           [4 CONTACT FUNNEL]    │
+                                          │  broadphase → reduction → screen│
+                                          │  → root isolation → branches →  │
+                                          │  split → classify → decide →    │
+                                          │  assemble                       │
+                                          └────────────────┬────────────────┘
+                                                           ▼
+                                            [5 REALIZE] (tessellation)
+                                                           ▼
+                                            [6 EMIT] STL/OBJ/VTK/GLB
+                                                     (STEP: canonical only)
+```
 
-**Enclosure soundness (BG-ENC-001/002/003).**
-`enclose(box) ⊇ { f(p) : p ∈ box }` for every carrier and box. Interval
-arithmetic rounds outward. Under-estimation invalidates every certificate
-built on it. Used in: every certified interval evaluation in the kernel.
+### [1] Ingestion — STEP entities become canonical carriers
 
-**Exact predicates.**
-An `Expansion` (Shewchuk arithmetic) is a non-overlapping `f64` component
-list that sums with zero rounding error to the exact value; its `sign`
-decides the exact sign of that value. No tolerance establishes topology.
-Used in: analytic line–line, line–circle, circle–circle intersection
-decisions, and the span BVH sign rows.
+**STEP symbolic closure (Theorem 1).** The atlas procedure terminates and
+produces exactly one outcome: `Valid | Inconsistent | Ambiguous |
+Unsupported | Unresolved`. Valid outputs are gauge-invariant. Proved from
+finite combinatorics (Lemmas 1–10); the assumed parts are separated
+explicitly.
 
-**Bernstein hull enclosure.**
-For a patch in Bézier form, the convex hull of control points is a
-conservative range enclosure of the patch and its derivative patches over any
-compact subbox. Hulls enclose polynomial quantities only; rational quantities
-require certified-positive weights and directed-rounded division. Used in:
-exclusion tests, the `∇h = 0` critical-point systems, and span BVH leaf
-bounds.
+**Cut-open existence.** Every compact connected orientable two-manifold with
+boundary admits a finite cut graph whose cut-open domain is a planar
+polygonal schema.
 
-**Theorem 3 (exclusion = hull separation).**
-`0 ∉ conv{c_αβ} ⇔ conv{P¹} ∩ conv{P²} = ∅` on every subbox. Separating
-directions inherit downward monotonically. One exact sign row
-(`min_α λ·P¹_α > max_β λ·P²_β`, decided by `Expansion` predicates) prunes
-every descendant span pair. Used in: the per-carrier span BVH broadphase; a
-float search (GJK) selects candidate directions and is never evidence.
+**Ambient periods and deck arithmetic.** Period evidence resolves to a
+five-state lattice; deck arithmetic is certified integer arithmetic. Only a
+regular ring torus certifies; spindle and horn tori refuse.
 
-**Theorem 4 (implicit reduction, analytic × spline).**
-Contact between a recognized analytic carrier (plane or quadric) and a spline
-patch is the zero set of `h = g∘S` on the spline chart, in exact Bernstein
-form. Critical points are the 2×2 system `∇h = 0` for the Krawczyk operator.
-Partial derivatives are degree-elevated to a common bidegree before pairing.
-Used in: the spline×analytic contact stage of the funnel
-(`contact/implicit2d.rs`).
+### [2] Arrange — the plane decides material
 
-**Gauss-map cone certificates.**
-Disjoint gradient-direction cones over a box prove: no tangency inside the
-box (rank deficiency ⇔ parallel normals), loop-freedom (every branch meets
-the box boundary), and a fixed continuation axis with certified margin.
-Verdicts: `LoopFree | TransversalByProof | AxisFixed`. Used in: contact
-funnel screening; boundary-crossing seeds are complete on `LoopFree` cells.
+**Winding-number material parity.** Material parity is the boundary's
+winding number mod 2; an edge crossed twice separates nothing; a parity
+flood is self-consistent iff every vertex has even incident toggling degree.
 
-**Crossing-angle identity (Theorem 2.1).**
-`σ_min(DF̂) = √(1 − |n_A · n_B|)` exactly, with `‖DF̂‖ = √2` exactly.
-Conditioning depends only on the crossing angle of the two surface normals,
-never on NURBS parameterization speed. Used in: solver conditioning and
-escalation thresholds.
+### [3] Construct — profiles become solids
 
-**Exact analytic degeneracy (BG-ANA).**
-Two cylinders are tangent iff `|d_axes| = r₀ ± r₁`; a plane is tangent to a
-sphere iff `dist(centre, plane) = r`; coaxiality and coincidence are exact
-conditions on carrier parameters. Analytic pairs return `Proven` with
-`Method::Exact` or a typed degenerate classification, never a float-certified
-result. Used in: analytic pair dispatch; the margin sweep must switch
-transverse → tangent → disjoint with no wrong-but-confident band.
+**Frame laws.** FixedPlane, ArchitecturalUp, ParallelTransport
+(double-reflection Bishop), RadialAboutAxis; non-C¹ spines refuse
+(`SpineNotC1`); correspondence is never inferred.
 
-**Stratified reach (BG-FID-001).**
-The certified quantity is the per-stratum lower bound
-`lfs_σ = min(ρ̲(σ), dist̲(x, non-incident strata), ϱ̲_wedge(x))`. The global
-reach of a mechanical B-rep is zero at every sharp edge, so global reach is
-never used. Gates of the form `q < c · lfs_σ̲` can only refuse. Used in:
-conditioning gates, isotopy margins, clustering radii.
+**Sweep regularity.** The sweep is immersive iff `κ(s)⟨q(t), N(s)⟩ < 1`
+pointwise, with global embedding `R_circ < ρ̲(c)`.
 
-**Isotopy lemma and the one-sheet condition.**
-Two-sided Hausdorff closeness, an almost-tangency bound, and boundary
-correspondence prove a covering of some degree, not a homeomorphism. The
-double-covered circle `(R + ε·cos(t/2))·e(t)`, `t ∈ [0, 4π]`, passes every
-metric condition. Degree-one covering per component (Krawczyk fibre
-isolation) or fibrewise uniqueness on a certified partition discharges it.
-Used in: sweep and offset embedding certificates.
+**Watertightness by index identity.** A mesh position index is a pure
+function of (entity identity, sample ordinal), never of coordinates.
+Incident faces satisfy `I(A, E) == reverse(I(B, E))` as integer sequences.
+The emitted mesh is edge-watertight by construction; welding is never
+invoked.
 
-**The nine B-rep invariants (BG-INV-101…109).**
-Coedge pairing, vertex link = single cycle, Euler–Poincaré (necessary only),
-same-parameter, domain–boundary correspondence, representation in 𝒢 within
-τ_rep, tolerance monotonicity, shell nesting (forest, by certified winding),
-wedge non-degeneracy. A violated invariant is `Contradictory`; an
-undecidable one is a typed refusal. Used in: topology validity
-(`truck-topology/src/invariants/`).
+### [4] The contact funnel — booleans, fillets, sections
 
-**Watertightness by index identity.**
-A mesh position index is a pure function of (entity identity, sample
-ordinal), never of coordinates. Incident faces satisfy
-`I(A, E) == reverse(I(B, E))` as integer sequences. The emitted mesh is
-edge-watertight by construction; positional welding is never invoked. A
-failed winding audit is `FAILED`, never a warning. Used in: the direct facet
-realization backend (`truck-geometry/src/constructive/`).
+**4a Broadphase.**
+**Theorem 3 (exclusion = hull separation).** `0 ∉ conv{c_αβ} ⇔ conv{P¹} ∩
+conv{P²} = ∅` on every subbox; separating directions inherit downward
+monotonically. One exact sign row prunes every descendant span pair. A float
+search (GJK) selects candidates and is never evidence.
 
-**Membership by propagation.**
-For a connected face of A cut by Ξ = f ∩ ∂B, χ_B is locally constant on
-f∖Ξ and the dual adjacency graph is connected. One certified seed per face
-determines all fragments. Flip parity is contact order; odd flips, even does
-not; tangential arcs are even-order and never flip. Coincident fragments are
-decided by the material state 4-tuple. Material parity is the boundary's
-winding number mod 2. Used in: boolean fragment classification and
-orientation.
+**4b Reduction.**
+**Theorem 4 (implicit reduction).** Analytic×spline contact is the zero set
+of `h = g∘S` on the spline chart, in exact Bernstein form; critical points
+are the 2×2 `∇h = 0` system; derivatives are degree-elevated before pairing.
 
-**Cut-open existence.**
-Every compact connected orientable two-manifold with boundary admits a
-finite cut graph whose cut-open domain is a planar polygonal schema. Used
-in: the quotient/deck fundamental-domain machinery and certified integer
-deck arithmetic over ambient periods.
+**4c Screen.**
+**Gauss-map cone certificates.** Disjoint gradient cones prove: no tangency
+in the box, loop-freedom (every branch meets the box boundary), and a fixed
+continuation axis with certified margin.
 
-**Epistemic closure (§22).**
-Under the ordering obligations, totality, and mutual exclusivity of the
-outcome classifier, every input terminates within its ledger and returns
-exactly one terminal outcome. No path ends unclassified; no path returns a
-construction whose preconditions were not established. Used in: the dispatch
-DAG as a whole.
+**4d Root isolation.**
+**Krawczyk existence and uniqueness.** `K ⊆ interior(box)` proves a unique
+root; `K ∩ box = ∅` proves no root; otherwise bisect. Valid for any
+invertible `Y`.
 
-**The composition theorem and the modulus contract.**
-If `ε_{i+1} ≤ ω_i(ε_i) + τ_i` with `ε_i < 𝔪_i` at every step, the
-combinatorial result equals the exact result and the geometric error obeys
-the nested recurrence. Subadditivity is read off the modulus shape, never
-declared; composing a non-subadditive operand refuses. A near-degenerate
-cell publishes an honest `Pole` instead of `Unbounded`. Used in: forward
-error bounds across operation chains (`Modulus` in `truck-base/src/
-evidence.rs`).
+**Three-state root isolation.** Subdivide / Excluded / Root; multiple or
+tangential roots return `NumericallyUnresolved`, never an empty list.
 
-**STEP ingestion symbolic closure (Theorem 1).**
-The atlas procedure terminates and produces exactly one outcome:
-`Valid | Inconsistent | Ambiguous | Unsupported | Unresolved`. Valid outputs
-are gauge-invariant. Proved from finite combinatorics (Lemmas 1–10); the
-assumed parts (numerical embedding, solver completeness) are separated
-explicitly. Used in: STEP face ingestion (`truck-stepio`).
+**Exact predicates.** An `Expansion` sums with zero rounding error to the
+exact value; its `sign` decides the exact sign. No tolerance establishes
+topology.
+
+**Bernstein hull enclosure.** The control-point hull is a conservative
+enclosure of the Bézier patch and its derivatives; polynomial quantities
+only; rational quantities require certified-positive weights.
+
+**4e Branch conditioning.**
+**Crossing-angle identity.** `σ_min(DF̂) = √(1 − |n_A · n_B|)` exactly,
+`‖DF̂‖ = √2` exactly. Conditioning depends only on the crossing angle of the
+two normals, never on parameterization speed.
+
+**Stratified reach.** The certified quantity is the per-stratum lower bound
+`lfs_σ = min(ρ̲(σ), dist̲(x, non-incident strata), ϱ̲_wedge(x))`; global
+reach is never used (it is zero at every sharp edge); gates of the form
+`q < c · lfs_σ̲` can only refuse.
+
+**4f Classify and decide.**
+**Membership by propagation.** One certified seed per face determines all
+fragments; flip parity is contact order; tangential arcs are even-order and
+never flip; coincident fragments are decided by the material state 4-tuple.
+
+**Exact analytic degeneracy.** Tangency, coaxiality, and coincidence are
+exact predicates on carrier parameters; analytic pairs never return
+float-certified results.
+
+### [5] Realize — tessellation with evidence
+
+**Isotopy lemma and the one-sheet condition.** Hausdorff closeness plus
+almost-tangency prove a covering of some degree, not a homeomorphism; the
+double-covered circle passes every metric condition; degree-one covering is
+discharged by Krawczyk fibre isolation or fibrewise uniqueness.
+
+**Enclosure soundness.** `enclose(box) ⊇ { f(p) : p ∈ box }`; interval
+arithmetic rounds outward; under-estimation invalidates every certificate
+built on it.
+
+### [6] Emit
+
+STEP out of constructive/swept geometry is the recorded typed-refusal
+boundary (`TR-NRB-001`); STL/OBJ/VTK/GLB are the cover paths. GLB carries
+the client-layer records (label, color, placement) as node data.
+
+### Cross-cutting substrate (powers every stage)
+
+**The composition theorem.** If `ε_{i+1} ≤ ω_i(ε_i) + τ_i` with `ε_i < 𝔪_i`
+at every step, the combinatorial result equals the exact result and the
+error obeys the nested recurrence; subadditivity is read off the modulus
+shape, never declared; a non-subadditive operand refuses.
+
+**Epistemic closure.** Every input terminates with exactly one terminal
+outcome; no path ends unclassified; no path returns a construction whose
+preconditions were not established.
+
+**The nine B-rep invariants.** Coedge pairing, vertex link, Euler–Poincaré,
+same-parameter, domain–boundary, representation in 𝒢, tolerance
+monotonicity, shell nesting, wedge non-degeneracy; violation is
+`Contradictory`, indecision is a typed refusal.
 
 ## Crates
 
